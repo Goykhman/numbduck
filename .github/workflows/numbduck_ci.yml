@@ -1,0 +1,57 @@
+name: numbduck_ci
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [ "3.10", "3.11", "3.12" ]
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "${{ matrix.python-version }}"
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.ref_type }}" == "tag" ]; then
+          echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+        else
+          BUILD_VERSION="0.1.${{ github.run_number }}"
+          echo "VERSION=${BUILD_VERSION}" >> $GITHUB_ENV
+        fi
+    - name: Write version to __init__.py
+      run: echo "__version__ = '${{ env.VERSION }}'" > numbduck/__init__.py
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pytest
+        pip install -e .
+    - name: Lint with flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --exclude=test/core/random_image_ref.py --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    - name: Test with pytest
+      run: |
+        pytest
+    - name: Install build dependencies
+      run: |
+        pip install build==1.2.2.post1 wheel==0.45.0
+    - name: Build wheel
+      run: |
+        git clean -Xfd
+        python -m build --wheel
