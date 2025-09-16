@@ -1,7 +1,6 @@
 import duckdb
 import os
 import re
-import sys
 
 from ctypes import CDLL, RTLD_GLOBAL
 from inspect import getfile
