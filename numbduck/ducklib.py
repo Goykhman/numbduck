@@ -20,6 +20,9 @@ DuckDBError = 1
 duckdb_result_ty = UniTuple(intp, 6)
 
 signatures["duckdb_close"] = void(intp)
+signatures["duckdb_data_chunk_get_column_count"] = intp(intp)
+signatures["duckdb_data_chunk_get_size"] = intp(intp)
+signatures["duckdb_disconnect"] = void(intp)
 signatures["duckdb_column_count"] = intp(intp)
 signatures["duckdb_connect"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_data_chunk_get_vector"] = intp(intp, intp)
@@ -46,6 +49,18 @@ def duckdb_column_count(duckdb_result_p):
     return _call_lib_func("duckdb_column_count", (duckdb_result_p,))
 
 
+@cres(signatures.get("duckdb_data_chunk_get_column_count"))
+def duckdb_data_chunk_get_column_count(data_chunk_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_column_count """
+    return _call_lib_func("duckdb_data_chunk_get_column_count", (data_chunk_p,))
+
+
+@cres(signatures.get("duckdb_data_chunk_get_size"))
+def duckdb_data_chunk_get_size(data_chunk_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_size """
+    return _call_lib_func("duckdb_data_chunk_get_size", (data_chunk_p,))
+
+
 @cres(signatures.get("duckdb_connect"))
 def duckdb_connect(duckdb_database_p, duckdb_connection_pp):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_connect """
@@ -56,6 +71,12 @@ def duckdb_connect(duckdb_database_p, duckdb_connection_pp):
 def duckdb_data_chunk_get_vector(chunk_p, idx):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_vector """
     return _call_lib_func("duckdb_data_chunk_get_vector", (chunk_p, idx))
+
+
+@cres(signatures.get("duckdb_disconnect"))
+def duckdb_disconnect(duckdb_connection_pp):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_disconnect """
+    return _call_lib_func("duckdb_disconnect", (duckdb_connection_pp,))
 
 
 @cres(signatures.get("duckdb_destroy_data_chunk"))
