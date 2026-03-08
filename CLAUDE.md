@@ -42,7 +42,7 @@ Uses a custom `@intrinsic` (`_duckdb_fetch_chunk`) instead of `_call_lib_func` b
 
 ## Key Paths
 
-- `numbduck/ducklib.py` — all DuckDB C API bindings (13 functions)
+- `numbduck/ducklib.py` — all DuckDB C API bindings (25 functions)
 - `numbduck/duckdb_utils.py` — buffer allocators for DuckDB structs
 - `numbduck/utils.py` — shared library loader
 - `test/test_ducklib.py` — integration tests
