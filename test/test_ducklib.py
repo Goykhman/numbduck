@@ -4,7 +4,9 @@ from numbox.utils.lowlevel import get_unicode_data_p
 
 from numbduck import ducklib
 from numbduck.duckdb_utils import (
-    create_duckdb_connection, create_duckdb_database, create_duckdb_result
+    create_duckdb_connection, create_duckdb_data_chunk,
+    create_duckdb_database, create_duckdb_prepared_statement,
+    create_duckdb_result
 )
 
 
@@ -26,6 +28,16 @@ def test_open_close_database():
     ducklib.duckdb_close(duckdb_database_pp)
 
 
+def test_open_invalid_path():
+    db_name_bytes = ctypes.c_char_p("/no/such/dir/db.duckdb".encode())
+    db_name_p = ctypes.c_void_p.from_buffer(db_name_bytes).value
+    duckdb_database = create_duckdb_database()
+    duckdb_database_pp = duckdb_database.ctypes.data
+    rc = ducklib.duckdb_open(db_name_p, duckdb_database_pp)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid path, got {rc}"
+    ducklib.duckdb_close(duckdb_database_pp)
+
+
 def aux_connect_db():
     duckdb_database = aux_open_database(0)
     duckdb_database_p = duckdb_database[0]
@@ -43,6 +55,13 @@ def test_connect():
     duckdb_connection_p = duckdb_connection[0]
     assert duckdb_database_p != 0, f"Expected pointer to DB, got {duckdb_database_p}"
     assert duckdb_connection_p != 0, f"Expected pointer to connection, got {duckdb_connection_p}"
+
+
+def test_connect_invalid_database():
+    duckdb_connection = create_duckdb_connection()
+    duckdb_connection_pp = duckdb_connection.ctypes.data
+    rc = ducklib.duckdb_connect(0, duckdb_connection_pp)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for null database, got {rc}"
 
 
 def test_disconnect():
@@ -95,6 +114,18 @@ def test_query():
     assert num_of_columns == 2, f"expected 'i', 'j', got {num_of_columns} columns"
 
 
+def test_query_invalid_sql():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    duckdb_connection_p = duckdb_connection[0]
+    query_txt = "NOT VALID SQL;"
+    query_p = get_unicode_data_p(query_txt)
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_query(duckdb_connection_p, query_p, out_result_p)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid SQL, got {rc}"
+    ducklib.duckdb_destroy_result(out_result_p)
+
+
 def test_duckdb_column_count_and_duckdb_row_count():
     out_result = aux_query_1()
     out_result_p = out_result.ctypes.data
@@ -137,6 +168,27 @@ def test_duckdb_data_chunk_get_size():
     assert chunk_size == 3, f"Expected 3 rows in chunk, got {chunk_size}"
 
 
+def test_duckdb_destroy_data_chunk():
+    duckdb_result, data_chunk_p = aux_get_data_vector()
+    assert data_chunk_p != 0, f"Expected valid chunk pointer, got {data_chunk_p}"
+    chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
+    assert chunk_size > 0, f"Expected rows in chunk before destroy, got {chunk_size}"
+    data_chunk = create_duckdb_data_chunk()
+    data_chunk[0] = data_chunk_p
+    data_chunk_pp = data_chunk.ctypes.data
+    ducklib.duckdb_destroy_data_chunk(data_chunk_pp)
+    assert data_chunk[0] == 0, f"Expected null after destroy, got {data_chunk[0]}"
+
+
+def test_duckdb_fetch_chunk_exhausted():
+    out_result = aux_query_1()
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, f"Expected first chunk, got null"
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p == 0, f"Expected null for exhausted result, got {chunk_p}"
+
+
 def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
     duckdb_result, data_chunk_p = aux_get_data_vector()
     assert data_chunk_p
@@ -147,3 +199,169 @@ def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
     j_val = [ducklib.duckdb_validity_row_is_valid(j_validity_p, ind_) for ind_ in range(3)]
     assert j_val == [1, 1, 0]
     assert all([j_val and j_arr_ == j_col_ or True for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)])
+
+
+# --- Prepared Statements ---
+
+def aux_prepare(connection_p, sql):
+    """Prepare a statement and return (prepared_statement buffer, rc)."""
+    query_p = get_unicode_data_p(sql)
+    stmt = create_duckdb_prepared_statement()
+    stmt_pp = stmt.ctypes.data
+    rc = ducklib.duckdb_prepare(connection_p, query_p, stmt_pp)
+    return stmt, rc
+
+
+def aux_execute_prepared(stmt_p):
+    """Execute a prepared statement, fetch the first chunk. Returns (result, chunk_p)."""
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt_p, out_result_p)
+    assert rc == ducklib.DuckDBSuccess, f"Execute failed, rc = {rc}"
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, "Expected chunk"
+    return out_result, chunk_p
+
+
+def aux_read_column_data(chunk_p, col_idx):
+    """Return the raw data pointer for a column in a chunk."""
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, col_idx)
+    return ducklib.duckdb_vector_get_data(vec_p)
+
+
+def aux_read_inline_string(data_p):
+    """Read a DuckDB inline string (4-byte uint32 length + char data)."""
+    str_len = ctypes.c_uint32.from_address(data_p).value
+    raw = (ctypes.c_char * str_len).from_address(data_p + 4)
+    return raw[:].decode()
+
+
+def aux_destroy_prepared(stmt):
+    """Destroy a prepared statement via its buffer."""
+    ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
+
+
+def test_prepare_and_destroy():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT 1;")
+    assert rc == ducklib.DuckDBSuccess, f"Expected DuckDBSuccess, got {rc}"
+    assert stmt[0] != 0, f"Expected valid prepared statement, got {stmt[0]}"
+    aux_destroy_prepared(stmt)
+    assert stmt[0] == 0, f"Expected null after destroy, got {stmt[0]}"
+
+
+def test_prepare_invalid_sql():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "NOT VALID SQL;")
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
+    aux_destroy_prepared(stmt)
+
+
+def test_nparams():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1, $2;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    nparams = ducklib.duckdb_nparams(stmt[0])
+    assert nparams == 2, f"Expected 2 params, got {nparams}"
+    aux_destroy_prepared(stmt)
+
+
+def test_nparams_no_params():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT 1;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    nparams = ducklib.duckdb_nparams(stmt[0])
+    assert nparams == 0, f"Expected 0 params, got {nparams}"
+    aux_destroy_prepared(stmt)
+
+
+def test_execute_prepared():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT 42 AS val;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    out_result_p = out_result.ctypes.data
+    row_count = ducklib.duckdb_row_count(out_result_p)
+    assert row_count == 1, f"Expected 1 row, got {row_count}"
+    col_count = ducklib.duckdb_column_count(out_result_p)
+    assert col_count == 1, f"Expected 1 column, got {col_count}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    aux_destroy_prepared(stmt)
+
+
+def test_bind_all_types():
+    """Bind int32, int64, double, varchar, and null in a single statement."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    sql = "SELECT $1::INTEGER, $2::BIGINT, $3::DOUBLE, $4::VARCHAR, $5::INTEGER;"  # noqa: E501
+    stmt, rc = aux_prepare(connection_p, sql)
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    assert ducklib.duckdb_nparams(stmt[0]) == 5
+
+    rc = ducklib.duckdb_bind_int32(stmt[0], 1, 99)
+    assert rc == ducklib.DuckDBSuccess, f"Bind int32 failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_int64(stmt[0], 2, 2**40)
+    assert rc == ducklib.DuckDBSuccess, f"Bind int64 failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_double(stmt[0], 3, 3.14)
+    assert rc == ducklib.DuckDBSuccess, f"Bind double failed, rc = {rc}"
+    val_bytes = ctypes.c_char_p(b"hello")
+    val_p = ctypes.c_void_p.from_buffer(val_bytes).value
+    rc = ducklib.duckdb_bind_varchar(stmt[0], 4, val_p)
+    assert rc == ducklib.DuckDBSuccess, f"Bind varchar failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_null(stmt[0], 5)
+    assert rc == ducklib.DuckDBSuccess, f"Bind null failed, rc = {rc}"
+
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+
+    # col 0: int32
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_int32 * 1).from_address(data_p)[0] == 99
+
+    # col 1: int64
+    data_p = aux_read_column_data(chunk_p, 1)
+    assert (ctypes.c_int64 * 1).from_address(data_p)[0] == 2**40
+
+    # col 2: double
+    data_p = aux_read_column_data(chunk_p, 2)
+    assert abs((ctypes.c_double * 1).from_address(data_p)[0] - 3.14) < 1e-10
+
+    # col 3: varchar
+    data_p = aux_read_column_data(chunk_p, 3)
+    assert aux_read_inline_string(data_p) == "hello"
+
+    # col 4: null
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 4)
+    validity_p = ducklib.duckdb_vector_get_validity(vec_p)
+    assert ducklib.duckdb_validity_row_is_valid(validity_p, 0) == 0
+
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+
+
+def test_bind_invalid_param_index():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_int32(stmt[0], 999, 42)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid param index, got {rc}"
+    aux_destroy_prepared(stmt)
+
+
+def test_execute_prepared_unbound_params():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for unbound params, got {rc}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    aux_destroy_prepared(stmt)
