@@ -34,6 +34,7 @@ def test_open_invalid_path():
     duckdb_database_pp = duckdb_database.ctypes.data
     rc = ducklib.duckdb_open(db_name_p, duckdb_database_pp)
     assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid path, got {rc}"
+    ducklib.duckdb_close(duckdb_database_pp)
 
 
 def aux_connect_db():
@@ -175,6 +176,16 @@ def test_duckdb_destroy_data_chunk():
     data_chunk[0] = data_chunk_p
     data_chunk_pp = data_chunk.ctypes.data
     ducklib.duckdb_destroy_data_chunk(data_chunk_pp)
+    assert data_chunk[0] == 0, f"Expected null after destroy, got {data_chunk[0]}"
+
+
+def test_duckdb_fetch_chunk_exhausted():
+    out_result = aux_query_1()
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, f"Expected first chunk, got null"
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p == 0, f"Expected null for exhausted result, got {chunk_p}"
 
 
 def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
