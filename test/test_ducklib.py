@@ -5,7 +5,8 @@ from numbox.utils.lowlevel import get_unicode_data_p
 from numbduck import ducklib
 from numbduck.duckdb_utils import (
     create_duckdb_connection, create_duckdb_data_chunk,
-    create_duckdb_database, create_duckdb_result
+    create_duckdb_database, create_duckdb_prepared_statement,
+    create_duckdb_result
 )
 
 
@@ -198,3 +199,187 @@ def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
     j_val = [ducklib.duckdb_validity_row_is_valid(j_validity_p, ind_) for ind_ in range(3)]
     assert j_val == [1, 1, 0]
     assert all([j_val and j_arr_ == j_col_ or True for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)])
+
+
+# --- Prepared Statements ---
+
+def aux_prepare(connection_p, sql):
+    """Prepare a statement and return (prepared_statement buffer, rc)."""
+    query_p = get_unicode_data_p(sql)
+    stmt = create_duckdb_prepared_statement()
+    stmt_pp = stmt.ctypes.data
+    rc = ducklib.duckdb_prepare(connection_p, query_p, stmt_pp)
+    return stmt, rc
+
+
+def test_prepare_and_destroy():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT 1;")
+    assert rc == ducklib.DuckDBSuccess, f"Expected DuckDBSuccess, got {rc}"
+    stmt_p = stmt[0]
+    assert stmt_p != 0, f"Expected valid prepared statement, got {stmt_p}"
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+    assert stmt[0] == 0, f"Expected null after destroy, got {stmt[0]}"
+
+
+def test_prepare_invalid_sql():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "NOT VALID SQL;")
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_nparams():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1, $2;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    nparams = ducklib.duckdb_nparams(stmt[0])
+    assert nparams == 2, f"Expected 2 params, got {nparams}"
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_nparams_no_params():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT 1;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    nparams = ducklib.duckdb_nparams(stmt[0])
+    assert nparams == 0, f"Expected 0 params, got {nparams}"
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_execute_prepared():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT 42 AS val;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
+    assert rc == ducklib.DuckDBSuccess, f"Execute failed, rc = {rc}"
+    row_count = ducklib.duckdb_row_count(out_result_p)
+    assert row_count == 1, f"Expected 1 row, got {row_count}"
+    col_count = ducklib.duckdb_column_count(out_result_p)
+    assert col_count == 1, f"Expected 1 column, got {col_count}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_bind_int32():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER AS val;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_int32(stmt[0], 1, 99)
+    assert rc == ducklib.DuckDBSuccess, f"Bind failed, rc = {rc}"
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
+    assert rc == ducklib.DuckDBSuccess, f"Execute failed, rc = {rc}"
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, "Expected chunk"
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int32 * 1).from_address(data_p)[0]
+    assert val == 99, f"Expected 99, got {val}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_bind_int64():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::BIGINT AS val;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_int64(stmt[0], 1, 2**40)
+    assert rc == ducklib.DuckDBSuccess, f"Bind failed, rc = {rc}"
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
+    assert rc == ducklib.DuckDBSuccess, f"Execute failed, rc = {rc}"
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, "Expected chunk"
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert val == 2**40, f"Expected {2**40}, got {val}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_bind_double():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::DOUBLE AS val;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_double(stmt[0], 1, 3.14)
+    assert rc == ducklib.DuckDBSuccess, f"Bind failed, rc = {rc}"
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
+    assert rc == ducklib.DuckDBSuccess, f"Execute failed, rc = {rc}"
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, "Expected chunk"
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_double * 1).from_address(data_p)[0]
+    assert abs(val - 3.14) < 1e-10, f"Expected 3.14, got {val}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_bind_null():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER AS val;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_null(stmt[0], 1)
+    assert rc == ducklib.DuckDBSuccess, f"Bind null failed, rc = {rc}"
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
+    assert rc == ducklib.DuckDBSuccess, f"Execute failed, rc = {rc}"
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, "Expected chunk"
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    validity_p = ducklib.duckdb_vector_get_validity(vec_p)
+    is_valid = ducklib.duckdb_validity_row_is_valid(validity_p, 0)
+    assert is_valid == 0, f"Expected null (invalid), got valid={is_valid}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_bind_varchar():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::VARCHAR AS val;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    val_bytes = ctypes.c_char_p("hello".encode())
+    val_p = ctypes.c_void_p.from_buffer(val_bytes).value
+    rc = ducklib.duckdb_bind_varchar(stmt[0], 1, val_p)
+    assert rc == ducklib.DuckDBSuccess, f"Bind varchar failed, rc = {rc}"
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
+    assert rc == ducklib.DuckDBSuccess, f"Execute failed, rc = {rc}"
+    row_count = ducklib.duckdb_row_count(out_result_p)
+    assert row_count == 1, f"Expected 1 row, got {row_count}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
