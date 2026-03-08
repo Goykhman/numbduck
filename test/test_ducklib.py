@@ -380,6 +380,41 @@ def test_bind_varchar():
     assert rc == ducklib.DuckDBSuccess, f"Execute failed, rc = {rc}"
     row_count = ducklib.duckdb_row_count(out_result_p)
     assert row_count == 1, f"Expected 1 row, got {row_count}"
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, "Expected chunk"
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    # DuckDB inline strings: 4-byte uint32 length, then char data
+    str_len = ctypes.c_uint32.from_address(data_p).value
+    raw = (ctypes.c_char * str_len).from_address(data_p + 4)
+    val = raw[:].decode()
+    assert val == "hello", f"Expected 'hello', got '{val}'"
+    ducklib.duckdb_destroy_result(out_result_p)
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_bind_invalid_param_index():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    rc = ducklib.duckdb_bind_int32(stmt[0], 999, 42)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid param index, got {rc}"
+    stmt_pp = stmt.ctypes.data
+    ducklib.duckdb_destroy_prepare(stmt_pp)
+
+
+def test_execute_prepared_unbound_params():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
+    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for unbound params, got {rc}"
     ducklib.duckdb_destroy_result(out_result_p)
     stmt_pp = stmt.ctypes.data
     ducklib.duckdb_destroy_prepare(stmt_pp)
