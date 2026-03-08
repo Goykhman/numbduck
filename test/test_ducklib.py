@@ -4,7 +4,8 @@ from numbox.utils.lowlevel import get_unicode_data_p
 
 from numbduck import ducklib
 from numbduck.duckdb_utils import (
-    create_duckdb_connection, create_duckdb_database, create_duckdb_result
+    create_duckdb_connection, create_duckdb_data_chunk,
+    create_duckdb_database, create_duckdb_result
 )
 
 
@@ -26,6 +27,16 @@ def test_open_close_database():
     ducklib.duckdb_close(duckdb_database_pp)
 
 
+def test_open_invalid_path():
+    db_name_bytes = ctypes.c_char_p("/no/such/dir/db.duckdb".encode())
+    db_name_p = ctypes.c_void_p.from_buffer(db_name_bytes).value
+    duckdb_database = create_duckdb_database()
+    duckdb_database_pp = duckdb_database.ctypes.data
+    rc = ducklib.duckdb_open(db_name_p, duckdb_database_pp)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid path, got {rc}"
+    ducklib.duckdb_close(duckdb_database_pp)
+
+
 def aux_connect_db():
     duckdb_database = aux_open_database(0)
     duckdb_database_p = duckdb_database[0]
@@ -43,6 +54,13 @@ def test_connect():
     duckdb_connection_p = duckdb_connection[0]
     assert duckdb_database_p != 0, f"Expected pointer to DB, got {duckdb_database_p}"
     assert duckdb_connection_p != 0, f"Expected pointer to connection, got {duckdb_connection_p}"
+
+
+def test_connect_invalid_database():
+    duckdb_connection = create_duckdb_connection()
+    duckdb_connection_pp = duckdb_connection.ctypes.data
+    rc = ducklib.duckdb_connect(0, duckdb_connection_pp)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for null database, got {rc}"
 
 
 def test_disconnect():
@@ -95,6 +113,18 @@ def test_query():
     assert num_of_columns == 2, f"expected 'i', 'j', got {num_of_columns} columns"
 
 
+def test_query_invalid_sql():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    duckdb_connection_p = duckdb_connection[0]
+    query_txt = "NOT VALID SQL;"
+    query_p = get_unicode_data_p(query_txt)
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_query(duckdb_connection_p, query_p, out_result_p)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid SQL, got {rc}"
+    ducklib.duckdb_destroy_result(out_result_p)
+
+
 def test_duckdb_column_count_and_duckdb_row_count():
     out_result = aux_query_1()
     out_result_p = out_result.ctypes.data
@@ -135,6 +165,27 @@ def test_duckdb_data_chunk_get_size():
     duckdb_result, data_chunk_p = aux_get_data_vector()
     chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
     assert chunk_size == 3, f"Expected 3 rows in chunk, got {chunk_size}"
+
+
+def test_duckdb_destroy_data_chunk():
+    duckdb_result, data_chunk_p = aux_get_data_vector()
+    assert data_chunk_p != 0, f"Expected valid chunk pointer, got {data_chunk_p}"
+    chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
+    assert chunk_size > 0, f"Expected rows in chunk before destroy, got {chunk_size}"
+    data_chunk = create_duckdb_data_chunk()
+    data_chunk[0] = data_chunk_p
+    data_chunk_pp = data_chunk.ctypes.data
+    ducklib.duckdb_destroy_data_chunk(data_chunk_pp)
+    assert data_chunk[0] == 0, f"Expected null after destroy, got {data_chunk[0]}"
+
+
+def test_duckdb_fetch_chunk_exhausted():
+    out_result = aux_query_1()
+    duckdb_result = tuple(out_result)
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p != 0, f"Expected first chunk, got null"
+    chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
+    assert chunk_p == 0, f"Expected null for exhausted result, got {chunk_p}"
 
 
 def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
