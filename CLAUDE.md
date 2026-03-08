@@ -62,4 +62,5 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Environment details go in MEMORY.md only (may change between OS installs)
 - Always exclude CLAUDE.md from upstream PRs (use a dedicated branch based on upstream/main)
 - Always use a feature branch — never commit directly to main
+- Never merge to main locally — only merge via PR on GitHub after all Actions pass
 - Always enable GitHub Actions on forked repos
