@@ -47,6 +47,10 @@ Uses a custom `@intrinsic` (`_duckdb_fetch_chunk`) instead of `_call_lib_func` b
 - `numbduck/utils.py` — shared library loader
 - `test/test_ducklib.py` — integration tests
 
+## Error Handling
+
+Bindings must mirror the DuckDB C API error-handling protocol exactly — return state codes (`DuckDBSuccess`/`DuckDBError`) and pointers, never inject exceptions. Callers do C-style return code checks. See [numbox issue #5](https://github.com/Goykhman/numbox/issues/5) for rationale.
+
 ## Preferences
 
 - Never include "Co-Authored-By" in git commit messages
@@ -58,4 +62,5 @@ Uses a custom `@intrinsic` (`_duckdb_fetch_chunk`) instead of `_call_lib_func` b
 - Environment details go in MEMORY.md only (may change between OS installs)
 - Always exclude CLAUDE.md from upstream PRs (use a dedicated branch based on upstream/main)
 - Always use a feature branch — never commit directly to main
+- Never merge to main locally — only merge via PR on GitHub after all Actions pass
 - Always enable GitHub Actions on forked repos
