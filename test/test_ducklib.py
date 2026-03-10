@@ -231,7 +231,8 @@ def aux_read_column_data(chunk_p, col_idx):
 
 
 def aux_read_inline_string(data_p):
-    """Read a DuckDB inline string (4-byte uint32 length + char data)."""
+    """Read a DuckDB inline string (4-byte uint32 length + char data).
+    https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L646 """
     str_len = ctypes.c_uint32.from_address(data_p).value
     raw = (ctypes.c_char * str_len).from_address(data_p + 4)
     return raw[:].decode()
