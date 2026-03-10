@@ -16,7 +16,7 @@ def create_duckdb_database():
 
 
 def create_duckdb_prepared_statement():
-    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L474 """
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L480 """
     return allocate_buffer(1)
 
 

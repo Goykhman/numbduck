@@ -27,14 +27,16 @@ Wraps DuckDB C API functions for use in numba JIT code. Same pattern as numbox b
 
 ### Adding a New Binding
 
-1. Add signature to `ducklib.py`: `signatures["duckdb_func"] = return_type(arg_types...)`
-2. Add wrapper following this pattern:
+1. **Check `duckdb.h` first.** Look up the function signature in [`src/include/duckdb.h`](https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h). Trace every typedef to its underlying type (e.g. `idx_t` → `uint64_t` → `uint64`, `duckdb_prepared_statement` is a pointer → use `_p` suffix). Use the correct line number for docstring links.
+2. Add signature to `ducklib.py`: `signatures["duckdb_func"] = return_type(arg_types...)`
+3. Add wrapper following this pattern:
 ```python
 @cres(signatures.get("duckdb_func"))
 def duckdb_func(arg):
     return _call_lib_func("duckdb_func", (arg,))
 ```
-3. Function names must match the DuckDB C API names exactly
+4. Function names must match the DuckDB C API names exactly
+5. **Before submitting an upstream PR**, re-verify all signatures, parameter types, naming conventions (`_p`/`_pp`), and docstring links against `duckdb.h`
 
 ### Special Case: duckdb_fetch_chunk
 
@@ -42,7 +44,7 @@ Uses a custom `@intrinsic` (`_duckdb_fetch_chunk`) instead of `_call_lib_func` b
 
 ## Key Paths
 
-- `numbduck/ducklib.py` — all DuckDB C API bindings (25 functions)
+- `numbduck/ducklib.py` — all DuckDB C API bindings (31 functions)
 - `numbduck/duckdb_utils.py` — buffer allocators for DuckDB structs
 - `numbduck/utils.py` — shared library loader
 - `test/test_ducklib.py` — integration tests
