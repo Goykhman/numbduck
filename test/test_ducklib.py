@@ -500,7 +500,7 @@ def test_bind_date():
     stmt, rc = aux_prepare(connection_p, "SELECT $1::DATE;")
     assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
 
-    # 2025-01-01 = 20089 days since 1970-01-01
+    # 2025-01-02 = 20089 days since 1970-01-01
     days = 20089
     rc = ducklib.duckdb_bind_date(stmt[0], 1, days)
     assert rc == ducklib.DuckDBSuccess, f"Bind date failed, rc = {rc}"

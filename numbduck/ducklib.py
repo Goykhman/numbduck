@@ -213,9 +213,9 @@ def duckdb_prepare_error(prepared_statement_p):
 
 
 @cres(signatures.get("duckdb_prepare"))
-def duckdb_prepare(connection, query_p, out_prepared_statement_pp):
+def duckdb_prepare(connection_p, query_p, out_prepared_statement_pp):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare """
-    return _call_lib_func("duckdb_prepare", (connection, query_p, out_prepared_statement_pp))
+    return _call_lib_func("duckdb_prepare", (connection_p, query_p, out_prepared_statement_pp))
 
 
 @cres(signatures.get("duckdb_query"))
@@ -244,7 +244,7 @@ def duckdb_validity_row_is_valid(validity_p, row):
 
 @cres(signatures.get("duckdb_vector_get_data"))
 def duckdb_vector_get_data(duckdb_vector_p):
-    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_query """
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_vector_get_data """
     return _call_lib_func("duckdb_vector_get_data", (duckdb_vector_p,))
 
 
