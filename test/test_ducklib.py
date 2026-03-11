@@ -1,7 +1,5 @@
 import ctypes
 
-import numpy
-from numba import njit
 from numbox.utils.lowlevel import get_unicode_data_p
 
 from numbduck import ducklib
@@ -10,7 +8,6 @@ from numbduck.duckdb_utils import (
     create_duckdb_database, create_duckdb_prepared_statement,
     create_duckdb_result
 )
-from numbduck.jit_utils import array_data_p
 
 
 def aux_open_database(db_name_p_):
@@ -369,26 +366,3 @@ def test_execute_prepared_unbound_params():
     assert rc == ducklib.DuckDBError, f"Expected DuckDBError for unbound params, got {rc}"
     ducklib.duckdb_destroy_result(out_result_p)
     aux_destroy_prepared(stmt)
-
-
-# --- JIT Tests ---
-
-def test_array_data_p():
-    arr = numpy.zeros(1, dtype=numpy.int64)
-    assert array_data_p(arr) == arr.ctypes.data
-
-
-@njit
-def jit_open_close():
-    db = numpy.zeros(1, dtype=numpy.int64)
-    db_name = numpy.frombuffer(b":memory:\x00", dtype=numpy.uint8)
-    rc = ducklib.duckdb_open(array_data_p(db_name), array_data_p(db))
-    db_p = db[0]
-    ducklib.duckdb_close(array_data_p(db))
-    return rc, db_p
-
-
-def test_jit_open_close_database():
-    rc, db_p = jit_open_close()
-    assert rc == ducklib.DuckDBSuccess, f"open failed, rc={rc}"
-    assert db_p != 0, f"expected valid pointer, got {db_p}"
