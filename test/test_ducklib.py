@@ -1,5 +1,7 @@
 import ctypes
 
+import numpy
+from numba import njit
 from numbox.utils.lowlevel import get_unicode_data_p
 
 from numbduck import ducklib
@@ -8,6 +10,7 @@ from numbduck.duckdb_utils import (
     create_duckdb_database, create_duckdb_prepared_statement,
     create_duckdb_result
 )
+from numbduck.jit_utils import array_data_p
 
 
 def aux_open_database(db_name_p_):
@@ -567,3 +570,30 @@ def test_bind_timestamp_invalid_param_index():
     rc = ducklib.duckdb_bind_timestamp(stmt[0], 999, 0)
     assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
     aux_destroy_prepared(stmt)
+
+
+# --- JIT Tests ---
+# Note: get_unicode_data_p segfaults inside @njit (NRT frees the string's
+# backing memory).  Use numpy.frombuffer(b"...\x00", dtype=numpy.uint8) with
+# array_data_p() to pass null-terminated C strings from JIT context instead.
+
+def test_array_data_p():
+    for dtype in [numpy.int64, numpy.float64, numpy.uint8]:
+        arr = numpy.zeros(1, dtype=dtype)
+        assert array_data_p(arr) == arr.ctypes.data
+
+
+@njit
+def jit_open_close():
+    db = numpy.zeros(1, dtype=numpy.int64)
+    db_name = numpy.frombuffer(b":memory:\x00", dtype=numpy.uint8)
+    rc = ducklib.duckdb_open(array_data_p(db_name), array_data_p(db))
+    db_p = db[0]
+    ducklib.duckdb_close(array_data_p(db))
+    return rc, db_p
+
+
+def test_jit_open_close_database():
+    rc, db_p = jit_open_close()
+    assert rc == ducklib.DuckDBSuccess, f"open failed, rc={rc}"
+    assert db_p != 0, f"expected valid pointer, got {db_p}"
