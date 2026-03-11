@@ -65,5 +65,6 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Always exclude CLAUDE.md from upstream PRs (use a dedicated branch based on upstream/main)
 - Always use a feature branch — never commit directly to main
 - Never merge to main locally — only merge via PR on GitHub after all Actions pass
-- Never merge local feature branches into main — main must always match upstream/main exactly
+- Never merge local feature branches into main — main must always match upstream/main (exception: CLAUDE.md)
+- Feature branches: base off origin/main (has CLAUDE.md); upstream PR branches: base off upstream/main (no CLAUDE.md)
 - Always enable GitHub Actions on forked repos
