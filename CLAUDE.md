@@ -62,7 +62,7 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Commit messages must not mention AI, Claude, Anthropic, or any AI tooling — only attribute to the user
 - Keep all memories in both MEMORY.md and the project CLAUDE.md (CLAUDE.md is in git and survives OS reinstalls)
 - Environment details go in MEMORY.md only (may change between OS installs)
-- Always exclude CLAUDE.md from upstream PRs (use a dedicated branch based on upstream/main)
+- Always exclude CLAUDE.md and .github/workflows/numbduck_ci.yml from upstream PRs (use a dedicated branch based on upstream/main)
 - Always use a feature branch — never commit directly to main
 - Never merge to main locally — only merge via PR on GitHub after all Actions pass
 - Never merge local feature branches into main — main must always match upstream/main (exception: CLAUDE.md)
