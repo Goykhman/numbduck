@@ -371,7 +371,8 @@ def test_execute_prepared_unbound_params():
 # --- Error Messages ---
 
 def test_prepare_error_on_invalid_sql():
-    """duckdb_prepare_error returns a non-null pointer with error text after failed prepare."""
+    """duckdb_prepare_error returns a non-null pointer with error text after failed prepare.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "NOT VALID SQL;")
@@ -384,7 +385,8 @@ def test_prepare_error_on_invalid_sql():
 
 
 def test_prepare_error_on_valid_sql():
-    """duckdb_prepare_error returns null pointer after successful prepare."""
+    """duckdb_prepare_error returns null pointer after successful prepare.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT 1;")
@@ -395,7 +397,8 @@ def test_prepare_error_on_valid_sql():
 
 
 def test_result_error_on_invalid_query():
-    """duckdb_result_error returns a non-null pointer with error text after failed query."""
+    """duckdb_result_error returns a non-null pointer with error text after failed query.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("NOT VALID SQL;")
@@ -411,7 +414,8 @@ def test_result_error_on_invalid_query():
 
 
 def test_result_error_on_valid_query():
-    """duckdb_result_error returns null pointer after successful query."""
+    """duckdb_result_error returns null pointer after successful query.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("SELECT 1;")
@@ -427,7 +431,8 @@ def test_result_error_on_valid_query():
 # --- Additional Bind Types ---
 
 def test_bind_boolean():
-    """Bind boolean values and verify readback."""
+    """Bind boolean values and verify readback.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_boolean """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::BOOLEAN, $2::BOOLEAN;")
@@ -453,7 +458,8 @@ def test_bind_boolean():
 
 
 def test_bind_boolean_invalid_param_index():
-    """duckdb_bind_boolean returns DuckDBError for out-of-range param index."""
+    """duckdb_bind_boolean returns DuckDBError for out-of-range param index.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_boolean """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::BOOLEAN;")
@@ -464,7 +470,8 @@ def test_bind_boolean_invalid_param_index():
 
 
 def test_bind_float():
-    """Bind float value and verify readback."""
+    """Bind float value and verify readback.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_float """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::FLOAT;")
@@ -483,7 +490,8 @@ def test_bind_float():
 
 
 def test_bind_float_invalid_param_index():
-    """duckdb_bind_float returns DuckDBError for out-of-range param index."""
+    """duckdb_bind_float returns DuckDBError for out-of-range param index.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_float """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::FLOAT;")
@@ -494,7 +502,8 @@ def test_bind_float_invalid_param_index():
 
 
 def test_bind_date():
-    """Bind a date value (days since 1970-01-01) and verify readback."""
+    """Bind a date value (days since 1970-01-01) and verify readback.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_date """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::DATE;")
@@ -515,7 +524,8 @@ def test_bind_date():
 
 
 def test_bind_date_invalid_param_index():
-    """duckdb_bind_date returns DuckDBError for out-of-range param index."""
+    """duckdb_bind_date returns DuckDBError for out-of-range param index.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_date """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::DATE;")
@@ -526,7 +536,8 @@ def test_bind_date_invalid_param_index():
 
 
 def test_bind_timestamp():
-    """Bind a timestamp value (microseconds since epoch) and verify readback."""
+    """Bind a timestamp value (microseconds since epoch) and verify readback.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::TIMESTAMP;")
@@ -547,7 +558,8 @@ def test_bind_timestamp():
 
 
 def test_bind_timestamp_invalid_param_index():
-    """duckdb_bind_timestamp returns DuckDBError for out-of-range param index."""
+    """duckdb_bind_timestamp returns DuckDBError for out-of-range param index.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::TIMESTAMP;")
