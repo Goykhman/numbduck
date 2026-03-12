@@ -1,3 +1,5 @@
+# These utilities are not DuckDB-specific and may be better moved to numbox
+# in the future.
 from numba import njit
 from numba.core.types import intp
 from numba.extending import intrinsic
