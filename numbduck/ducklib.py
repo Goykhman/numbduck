@@ -190,7 +190,7 @@ def _duckdb_fetch_chunk(typingctx, duckdb_result_tup_ty):
 
 @njit(signatures.get("duckdb_fetch_chunk"))
 def duckdb_fetch_chunk(args):
-    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_fetch_chunk """
+    """ https://duckdb.org/docs/stable/clients/c/query#duckdb_fetch_chunk """
     return _duckdb_fetch_chunk(args)
 
 
