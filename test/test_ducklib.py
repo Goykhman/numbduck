@@ -606,26 +606,26 @@ def jit_connect_query_disconnect():
     db = numpy.zeros(1, dtype=numpy.int64)
     conn = numpy.zeros(1, dtype=numpy.int64)
 
-    rc = ducklib.duckdb_open(0, array_data_p(db))
-    if rc != 0:
-        return rc, 0, 0
+    open_rc = ducklib.duckdb_open(0, array_data_p(db))
+    db_p = db[0]
 
-    rc = ducklib.duckdb_connect(db[0], array_data_p(conn))
-    if rc != 0:
-        ducklib.duckdb_close(array_data_p(db))
-        return rc, 0, 0
-
+    connect_rc = ducklib.duckdb_connect(db_p, array_data_p(conn))
     conn_p = conn[0]
+
     sql = numpy.frombuffer(b"SELECT 42;\x00", dtype=numpy.uint8)
     query_rc = ducklib.duckdb_query(conn_p, array_data_p(sql), 0)
 
     ducklib.duckdb_disconnect(array_data_p(conn))
+    conn_after = conn[0]
     ducklib.duckdb_close(array_data_p(db))
-    return 0, conn_p, query_rc
+    return open_rc, db_p, connect_rc, conn_p, query_rc, conn_after
 
 
 def test_jit_connect_query_disconnect():
-    rc, conn_p, query_rc = jit_connect_query_disconnect()
-    assert rc == 0, f"open/connect failed, rc={rc}"
+    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after = jit_connect_query_disconnect()
+    assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
+    assert db_p != 0, f"expected valid db pointer, got {db_p}"
+    assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
     assert conn_p != 0, f"expected valid connection pointer, got {conn_p}"
     assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
+    assert conn_after == 0, f"expected null after disconnect, got {conn_after}"
