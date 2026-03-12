@@ -576,6 +576,8 @@ def test_bind_timestamp_invalid_param_index():
 # Note: get_unicode_data_p segfaults inside @njit (NRT frees the string's
 # backing memory).  Use numpy.frombuffer(b"...\x00", dtype=numpy.uint8) with
 # array_data_p() to pass null-terminated C strings from JIT context instead.
+# Caution: frombuffer produces a read-only array — only safe for args the
+# C function reads (like path strings), not for output buffers.
 
 def test_array_data_p():
     for dtype in [numpy.int64, numpy.float64, numpy.uint8]:
