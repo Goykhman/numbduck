@@ -41,9 +41,9 @@ signatures["duckdb_destroy_prepare"] = void(intp)
 signatures["duckdb_destroy_result"] = void(intp)
 signatures["duckdb_fetch_chunk"] = intp(duckdb_result_ty)
 signatures["duckdb_nparams"] = uint64(intp)
-signatures["duckdb_prepare_error"] = intp(intp)
 signatures["duckdb_open"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_prepare"] = duckdb_state_ty(intp, intp, intp)
+signatures["duckdb_prepare_error"] = intp(intp)
 signatures["duckdb_query"] = duckdb_state_ty(intp, intp, intp)
 signatures["duckdb_result_error"] = intp(intp)
 signatures["duckdb_row_count"] = intp(intp)
@@ -190,7 +190,7 @@ def _duckdb_fetch_chunk(typingctx, duckdb_result_tup_ty):
 
 @njit(signatures.get("duckdb_fetch_chunk"))
 def duckdb_fetch_chunk(args):
-    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_fetch_chunk """
+    """ https://duckdb.org/docs/stable/clients/c/query#duckdb_fetch_chunk """
     return _duckdb_fetch_chunk(args)
 
 
