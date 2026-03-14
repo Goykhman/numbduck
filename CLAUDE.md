@@ -71,3 +71,4 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Never assume a reviewer's comment is wrong — always verify claims against actual runtime before responding
 - Before posting PR comments, check for pending reviews with existing comments (`GET /pulls/{pr}/reviews/{id}/comments`) — never silently delete a pending review, as it destroys all bundled draft comments
 - Preface all AI-authored GitHub comments with "From the fake Slim Shady:"
+- Never guess about things that can be verified — check the source of truth before making claims
