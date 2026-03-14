@@ -357,6 +357,8 @@ def test_jit_query_fetch_readback():
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_connect
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_query
     https://duckdb.org/docs/stable/clients/c/query#duckdb_fetch_chunk
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_size
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_column_count
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_vector
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_vector_get_data
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_validity_row_is_valid """
