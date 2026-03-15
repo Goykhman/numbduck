@@ -3,7 +3,7 @@ from numba import njit
 
 
 @njit
-def allocate_buffer(sz):
+def allocate_buffer(sz: int):
     return numpy.zeros(sz, dtype=numpy.int64)
 
 

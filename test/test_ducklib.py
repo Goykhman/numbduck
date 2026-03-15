@@ -614,6 +614,8 @@ def test_bind_timestamp_invalid_param_index():
 
 
 # --- JIT Tests ---
+# get_unicode_data_p is safe inside @njit with numbox >= 0.5.6, which
+# extracts the data pointer directly instead of going through NRT meminfo.
 
 def test_jit_create_duckdb_database():
     @njit
