@@ -614,11 +614,6 @@ def test_bind_timestamp_invalid_param_index():
 
 
 # --- JIT Tests ---
-# Note: get_unicode_data_p segfaults inside @njit (NRT frees the string's
-# backing memory).  Use numpy.frombuffer(b"...\x00", dtype=numpy.uint8) with
-# array_data_p() to pass null-terminated C strings from JIT context instead.
-# Caution: frombuffer produces a read-only array — only safe for args the
-# C function reads (like path strings), not for output buffers.
 
 def test_jit_create_duckdb_database():
     @njit
@@ -639,8 +634,8 @@ def test_array_data_p():
 @njit
 def jit_open_close():
     db = create_duckdb_database()
-    db_name = numpy.frombuffer(b":memory:\x00", dtype=numpy.uint8)
-    rc = ducklib.duckdb_open(array_data_p(db_name), array_data_p(db))
+    rc = ducklib.duckdb_open(
+        get_unicode_data_p(':memory:'), array_data_p(db))
     db_p = db[0]
     ducklib.duckdb_close(array_data_p(db))
     return rc, db_p
@@ -663,8 +658,8 @@ def jit_connect_query_disconnect():
     connect_rc = ducklib.duckdb_connect(db_p, array_data_p(conn))
     conn_p = conn[0]
 
-    sql = numpy.frombuffer(b"SELECT 42;\x00", dtype=numpy.uint8)
-    query_rc = ducklib.duckdb_query(conn_p, array_data_p(sql), 0)
+    query_rc = ducklib.duckdb_query(
+        conn_p, get_unicode_data_p('SELECT 42;'), 0)
 
     ducklib.duckdb_disconnect(array_data_p(conn))
     conn_after = conn[0]
@@ -695,11 +690,11 @@ def jit_prepare_bind_execute():
     conn_p = conn[0]
 
     # prepare: SELECT $1::INTEGER, $2::BIGINT, $3::DOUBLE, $4::INTEGER
-    sql = numpy.frombuffer(
-        b"SELECT $1::INTEGER, $2::BIGINT, $3::DOUBLE, $4::INTEGER;\x00",
-        dtype=numpy.uint8)
     prepare_rc = ducklib.duckdb_prepare(
-        conn_p, array_data_p(sql), array_data_p(stmt))
+        conn_p,
+        get_unicode_data_p(
+            'SELECT $1::INTEGER, $2::BIGINT, $3::DOUBLE, $4::INTEGER;'),
+        array_data_p(stmt))
     stmt_p = stmt[0]
     nparams = ducklib.duckdb_nparams(stmt_p)
 
