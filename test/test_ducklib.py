@@ -1,18 +1,21 @@
 import ctypes
 
 import numpy
-from numba import carray, njit
-from numba.core.types import intp
+from numba import njit
+from numba import carray
 from numbox.utils.lowlevel import get_unicode_data_p
 
+from numba.core.types import intp
+
 from numbduck import ducklib
-from numbduck.ducklib import _duckdb_fetch_chunk
 from numbduck.duckdb_utils import (
     create_duckdb_connection, create_duckdb_data_chunk,
     create_duckdb_database, create_duckdb_prepared_statement,
     create_duckdb_result
 )
-from numbduck.jit_utils import array_data_p, i32_ptr
+from numbduck.ducklib import _duckdb_fetch_chunk
+from numbox.utils.lowlevel import _cast_int_to_void_p
+from numbduck.jit_utils import array_data_p
 
 
 def aux_open_database(db_name_p_):
@@ -41,38 +44,6 @@ def test_open_invalid_path():
     rc = ducklib.duckdb_open(db_name_p, duckdb_database_pp)
     assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid path, got {rc}"
     ducklib.duckdb_close(duckdb_database_pp)
-
-
-# --- JIT: Open / Close ---
-# Note: get_unicode_data_p segfaults inside @njit (NRT frees the string's
-# backing memory).  Use numpy.frombuffer(b"...\x00", dtype=numpy.uint8) with
-# array_data_p() to pass null-terminated C strings from JIT context instead.
-# Caution: frombuffer produces a read-only array — only safe for args the
-# C function reads (like path strings), not for output buffers.
-
-def test_array_data_p():
-    for dtype in [numpy.int64, numpy.float64, numpy.uint8]:
-        arr = numpy.zeros(1, dtype=dtype)
-        assert array_data_p(arr) == arr.ctypes.data
-
-
-@njit
-def jit_open_close():
-    db = numpy.zeros(1, dtype=numpy.int64)
-    db_name = numpy.frombuffer(b":memory:\x00", dtype=numpy.uint8)
-    rc = ducklib.duckdb_open(array_data_p(db_name), array_data_p(db))
-    db_p = db[0]
-    ducklib.duckdb_close(array_data_p(db))
-    return rc, db_p
-
-
-def test_jit_open_close_database():
-    """duckdb_open and duckdb_close from JIT context.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_open
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_close """
-    rc, db_p = jit_open_close()
-    assert rc == ducklib.DuckDBSuccess, f"open failed, rc={rc}"
-    assert db_p != 0, f"expected valid pointer, got {db_p}"
 
 
 def aux_connect_db():
@@ -119,42 +90,6 @@ def test_disconnect():
     ducklib.duckdb_disconnect(duckdb_connection_pp)
     assert duckdb_connection[0] == 0, f"Expected null pointer after disconnect, got {duckdb_connection[0]}"
     ducklib.duckdb_close(duckdb_database.ctypes.data)
-
-
-# --- JIT: Connect / Query / Disconnect ---
-
-@njit
-def jit_connect_query_disconnect():
-    db = numpy.zeros(1, dtype=numpy.int64)
-    conn = numpy.zeros(1, dtype=numpy.int64)
-
-    open_rc = ducklib.duckdb_open(0, array_data_p(db))
-    db_p = db[0]
-
-    connect_rc = ducklib.duckdb_connect(db_p, array_data_p(conn))
-    conn_p = conn[0]
-
-    sql = numpy.frombuffer(b"SELECT 42;\x00", dtype=numpy.uint8)
-    query_rc = ducklib.duckdb_query(conn_p, array_data_p(sql), 0)
-
-    ducklib.duckdb_disconnect(array_data_p(conn))
-    conn_after = conn[0]
-    ducklib.duckdb_close(array_data_p(db))
-    return open_rc, db_p, connect_rc, conn_p, query_rc, conn_after
-
-
-def test_jit_connect_query_disconnect():
-    """duckdb_connect, duckdb_query, and duckdb_disconnect from JIT context.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_connect
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_query
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_disconnect """
-    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after = jit_connect_query_disconnect()
-    assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
-    assert db_p != 0, f"expected valid db pointer, got {db_p}"
-    assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
-    assert conn_p != 0, f"expected valid connection pointer, got {conn_p}"
-    assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
-    assert conn_after == 0, f"expected null after disconnect, got {conn_after}"
 
 
 i_col = [3, 5, 7]
@@ -288,90 +223,6 @@ def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
     assert j_val == [1, 1, 0]
     assert all([j_val and j_arr_ == j_col_ or True for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)])
     aux_close_db(duckdb_database, duckdb_connection)
-
-
-# --- JIT: Query / Fetch / Readback ---
-
-@njit
-def jit_query_fetch_readback():
-    db = numpy.zeros(1, dtype=numpy.int64)
-    conn = numpy.zeros(1, dtype=numpy.int64)
-
-    open_rc = ducklib.duckdb_open(0, array_data_p(db))
-    connect_rc = ducklib.duckdb_connect(db[0], array_data_p(conn))
-    conn_p = conn[0]
-
-    # create table and insert rows
-    sql1 = numpy.frombuffer(
-        b"CREATE TABLE integers (i INTEGER, j INTEGER);\x00",
-        dtype=numpy.uint8)
-    ducklib.duckdb_query(conn_p, array_data_p(sql1), 0)
-
-    sql2 = numpy.frombuffer(
-        b"INSERT INTO integers VALUES (3, 4), (5, 6), (7, NULL);\x00",
-        dtype=numpy.uint8)
-    ducklib.duckdb_query(conn_p, array_data_p(sql2), 0)
-
-    # select into result buffer
-    sql3 = numpy.frombuffer(
-        b"SELECT * FROM integers;\x00", dtype=numpy.uint8)
-    result = numpy.zeros(6, dtype=numpy.int64)
-    query_rc = ducklib.duckdb_query(
-        conn_p, array_data_p(sql3), array_data_p(result))
-
-    # fetch chunk and read column 0 (i) as int32
-    result_tup = (result[0], result[1], result[2],
-                  result[3], result[4], result[5])
-    chunk_p = _duckdb_fetch_chunk(result_tup)
-    chunk_size = ducklib.duckdb_data_chunk_get_size(chunk_p)
-    col_count = ducklib.duckdb_data_chunk_get_column_count(chunk_p)
-
-    i_vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
-    i_data_p = ducklib.duckdb_vector_get_data(i_vec_p)
-    i_arr = carray(i32_ptr(i_data_p), (chunk_size,))
-    i0, i1, i2 = i_arr[0], i_arr[1], i_arr[2]
-
-    # read column 1 (j) and check validity for NULL
-    j_vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 1)
-    j_data_p = ducklib.duckdb_vector_get_data(j_vec_p)
-    j_arr = carray(i32_ptr(j_data_p), (chunk_size,))
-    j0, j1 = j_arr[0], j_arr[1]
-    j_validity_p = ducklib.duckdb_vector_get_validity(j_vec_p)
-    j2_valid = ducklib.duckdb_validity_row_is_valid(intp(j_validity_p), intp(2))
-
-    # cleanup
-    chunk_buf = numpy.zeros(1, dtype=numpy.int64)
-    chunk_buf[0] = chunk_p
-    ducklib.duckdb_destroy_data_chunk(array_data_p(chunk_buf))
-    ducklib.duckdb_destroy_result(array_data_p(result))
-    ducklib.duckdb_disconnect(array_data_p(conn))
-    ducklib.duckdb_close(array_data_p(db))
-
-    return (open_rc, connect_rc, query_rc, chunk_size, col_count,
-            i0, i1, i2, j0, j1, j2_valid)
-
-
-def test_jit_query_fetch_readback():
-    """Full query-fetch-readback pipeline from JIT context.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_open
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_connect
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_query
-    https://duckdb.org/docs/stable/clients/c/query#duckdb_fetch_chunk
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_size
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_column_count
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_vector
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_vector_get_data
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_validity_row_is_valid """
-    (open_rc, connect_rc, query_rc, chunk_size, col_count,
-     i0, i1, i2, j0, j1, j2_valid) = jit_query_fetch_readback()
-    assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
-    assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
-    assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
-    assert chunk_size == 3, f"expected 3 rows, got {chunk_size}"
-    assert col_count == 2, f"expected 2 columns, got {col_count}"
-    assert (i0, i1, i2) == (3, 5, 7), f"column i: expected (3, 5, 7), got ({i0}, {i1}, {i2})"
-    assert (j0, j1) == (4, 6), f"column j: expected (4, 6), got ({j0}, {j1})"
-    assert j2_valid == 0, f"expected NULL for j[2], validity={j2_valid}"
 
 
 # --- Prepared Statements ---
@@ -762,3 +613,174 @@ def test_bind_timestamp_invalid_param_index():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+# --- JIT Tests ---
+# Note: get_unicode_data_p segfaults inside @njit (NRT frees the string's
+# backing memory).  Use numpy.frombuffer(b"...\x00", dtype=numpy.uint8) with
+# array_data_p() to pass null-terminated C strings from JIT context instead.
+# Caution: frombuffer produces a read-only array — only safe for args the
+# C function reads (like path strings), not for output buffers.
+
+def test_jit_create_duckdb_database():
+    @njit
+    def _jit_create():
+        db = create_duckdb_database()
+        return db.shape[0], db[0]
+    size, val = _jit_create()
+    assert size == 1
+    assert val == 0
+
+
+def test_array_data_p():
+    for dtype in [numpy.int64, numpy.float64, numpy.uint8]:
+        arr = numpy.zeros(1, dtype=dtype)
+        assert array_data_p(arr) == arr.ctypes.data
+
+
+@njit
+def jit_open_close():
+    db = create_duckdb_database()
+    db_name = numpy.frombuffer(b":memory:\x00", dtype=numpy.uint8)
+    rc = ducklib.duckdb_open(array_data_p(db_name), array_data_p(db))
+    db_p = db[0]
+    ducklib.duckdb_close(array_data_p(db))
+    return rc, db_p
+
+
+def test_jit_open_close_database():
+    rc, db_p = jit_open_close()
+    assert rc == ducklib.DuckDBSuccess, f"open failed, rc={rc}"
+    assert db_p != 0, f"expected valid pointer, got {db_p}"
+
+
+@njit
+def jit_connect_query_disconnect():
+    db = create_duckdb_database()
+    conn = create_duckdb_connection()
+
+    open_rc = ducklib.duckdb_open(0, array_data_p(db))
+    db_p = db[0]
+
+    connect_rc = ducklib.duckdb_connect(db_p, array_data_p(conn))
+    conn_p = conn[0]
+
+    sql = numpy.frombuffer(b"SELECT 42;\x00", dtype=numpy.uint8)
+    query_rc = ducklib.duckdb_query(conn_p, array_data_p(sql), 0)
+
+    ducklib.duckdb_disconnect(array_data_p(conn))
+    conn_after = conn[0]
+    ducklib.duckdb_close(array_data_p(db))
+    return open_rc, db_p, connect_rc, conn_p, query_rc, conn_after
+
+
+def test_jit_connect_query_disconnect():
+    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after = jit_connect_query_disconnect()
+    assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
+    assert db_p != 0, f"expected valid db pointer, got {db_p}"
+    assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
+    assert conn_p != 0, f"expected valid connection pointer, got {conn_p}"
+    assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
+    assert conn_after == 0, f"expected null after disconnect, got {conn_after}"
+
+
+# --- JIT: Prepared Statements ---
+
+@njit
+def jit_prepare_bind_execute():
+    db = create_duckdb_database()
+    conn = create_duckdb_connection()
+    stmt = create_duckdb_prepared_statement()
+
+    open_rc = ducklib.duckdb_open(0, array_data_p(db))
+    connect_rc = ducklib.duckdb_connect(db[0], array_data_p(conn))
+    conn_p = conn[0]
+
+    # prepare: SELECT $1::INTEGER, $2::BIGINT, $3::DOUBLE, $4::INTEGER
+    sql = numpy.frombuffer(
+        b"SELECT $1::INTEGER, $2::BIGINT, $3::DOUBLE, $4::INTEGER;\x00",
+        dtype=numpy.uint8)
+    prepare_rc = ducklib.duckdb_prepare(
+        conn_p, array_data_p(sql), array_data_p(stmt))
+    stmt_p = stmt[0]
+    nparams = ducklib.duckdb_nparams(stmt_p)
+
+    # bind values
+    bind1_rc = ducklib.duckdb_bind_int32(stmt_p, numpy.uint64(1), numpy.int32(99))
+    bind2_rc = ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(2), numpy.int64(2**40))
+    bind3_rc = ducklib.duckdb_bind_double(stmt_p, numpy.uint64(3), numpy.float64(3.14))
+    bind4_rc = ducklib.duckdb_bind_null(stmt_p, numpy.uint64(4))
+
+    # execute
+    result = create_duckdb_result()
+    exec_rc = ducklib.duckdb_execute_prepared(stmt_p, array_data_p(result))
+
+    # fetch chunk and read back values
+    result_tup = (result[0], result[1], result[2],
+                  result[3], result[4], result[5])
+    chunk_p = _duckdb_fetch_chunk(result_tup)
+    chunk_size = ducklib.duckdb_data_chunk_get_size(chunk_p)
+
+    # col 0: int32
+    v0_p = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 0))
+    vp0 = _cast_int_to_void_p(v0_p)
+    col0 = carray(vp0, (chunk_size,), dtype=numpy.int32)[0]
+
+    # col 1: int64
+    v1_p = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 1))
+    vp1 = _cast_int_to_void_p(v1_p)
+    col1 = carray(vp1, (chunk_size,), dtype=numpy.int64)[0]
+
+    # col 2: double
+    v2_p = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 2))
+    vp2 = _cast_int_to_void_p(v2_p)
+    col2 = carray(vp2, (chunk_size,), dtype=numpy.float64)[0]
+
+    # col 3: null check
+    v3_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 3)
+    v3_validity_p = ducklib.duckdb_vector_get_validity(v3_p)
+    col3_valid = ducklib.duckdb_validity_row_is_valid(
+        intp(v3_validity_p), intp(0))
+
+    # cleanup (reverse order)
+    chunk_buf = create_duckdb_data_chunk()
+    chunk_buf[0] = chunk_p
+    ducklib.duckdb_destroy_data_chunk(array_data_p(chunk_buf))
+    ducklib.duckdb_destroy_result(array_data_p(result))
+    ducklib.duckdb_destroy_prepare(array_data_p(stmt))
+    ducklib.duckdb_disconnect(array_data_p(conn))
+    ducklib.duckdb_close(array_data_p(db))
+
+    return (open_rc, connect_rc, prepare_rc, nparams,
+            bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
+            chunk_size, col0, col1, col2, col3_valid)
+
+
+def test_jit_prepare_bind_execute():
+    """Prepared statement with parameter binding from JIT context.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_nparams
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int32
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int64
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_double
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_null
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_execute_prepared
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_prepare """
+    (open_rc, connect_rc, prepare_rc, nparams,
+     bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
+     chunk_size, col0, col1, col2, col3_valid) = jit_prepare_bind_execute()
+    assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
+    assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
+    assert prepare_rc == ducklib.DuckDBSuccess, f"prepare failed, rc={prepare_rc}"
+    assert nparams == 4, f"expected 4 params, got {nparams}"
+    assert bind1_rc == ducklib.DuckDBSuccess, f"bind int32 failed, rc={bind1_rc}"
+    assert bind2_rc == ducklib.DuckDBSuccess, f"bind int64 failed, rc={bind2_rc}"
+    assert bind3_rc == ducklib.DuckDBSuccess, f"bind double failed, rc={bind3_rc}"
+    assert bind4_rc == ducklib.DuckDBSuccess, f"bind null failed, rc={bind4_rc}"
+    assert exec_rc == ducklib.DuckDBSuccess, f"execute failed, rc={exec_rc}"
+    assert chunk_size == 1, f"expected 1 row, got {chunk_size}"
+    assert col0 == 99, f"col0: expected 99, got {col0}"
+    assert col1 == 2**40, f"col1: expected 2^40, got {col1}"
+    assert abs(col2 - 3.14) < 1e-10, f"col2: expected 3.14, got {col2}"
+    assert col3_valid == 0, f"col3: expected NULL, validity={col3_valid}"
