@@ -1,5 +1,4 @@
 from llvmlite.ir import IRBuilder, FunctionType
-from numba import njit
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
 from numba.extending import intrinsic
 from numbox.core.bindings.call import _call_lib_func
@@ -55,7 +54,6 @@ signatures["duckdb_data_chunk_get_vector"] = intp(intp, intp)
 signatures["duckdb_destroy_data_chunk"] = void(intp)
 signatures["duckdb_destroy_prepare"] = void(intp)
 signatures["duckdb_destroy_result"] = void(intp)
-signatures["duckdb_fetch_chunk"] = intp(duckdb_result_ty)
 signatures["duckdb_nparams"] = uint64(intp)
 signatures["duckdb_open"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_prepare"] = duckdb_state_ty(intp, intp, intp)
@@ -276,7 +274,7 @@ def _duckdb_fetch_chunk(typingctx, duckdb_result_tup_ty):
     return intp(duckdb_result_ty), codegen
 
 
-@njit(signatures.get("duckdb_fetch_chunk"))
+@cres(intp(duckdb_result_ty))
 def duckdb_fetch_chunk(args):
     """ https://duckdb.org/docs/stable/clients/c/query#duckdb_fetch_chunk """
     return _duckdb_fetch_chunk(args)
@@ -375,7 +373,7 @@ def _duckdb_bind_hugeint(typingctx, prepared_statement_p_ty, param_idx_ty, hugei
     return duckdb_state_ty(intp, uint64, duckdb_hugeint_ty), codegen
 
 
-@njit(duckdb_state_ty(intp, uint64, duckdb_hugeint_ty))
+@cres(duckdb_state_ty(intp, uint64, duckdb_hugeint_ty))
 def duckdb_bind_hugeint(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_hugeint """
     return _duckdb_bind_hugeint(prepared_statement_p, param_idx, val)
@@ -413,7 +411,7 @@ def _duckdb_bind_uhugeint(typingctx, prepared_statement_p_ty, param_idx_ty, uhug
     return duckdb_state_ty(intp, uint64, duckdb_uhugeint_ty), codegen
 
 
-@njit(duckdb_state_ty(intp, uint64, duckdb_uhugeint_ty))
+@cres(duckdb_state_ty(intp, uint64, duckdb_uhugeint_ty))
 def duckdb_bind_uhugeint(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_uhugeint """
     return _duckdb_bind_uhugeint(prepared_statement_p, param_idx, val)
@@ -429,7 +427,9 @@ def _duckdb_bind_interval(typingctx, prepared_statement_p_ty, param_idx_ty, inte
         prepared_statement_p, param_idx, interval_tup = arguments
         i64 = ir.IntType(64)
         # C struct: { int32 months, int32 days, int64 micros } = 16 bytes
-        # Pack two i32 fields into one i64 to match the C struct layout
+        # Pack two i32 fields into one i64 to match the C struct layout.
+        # Using {i32, i32, i64} directly fails — LLVM's SysV x86-64 ABI
+        # lowering drops the second i32 field when coercing to registers.
         interval_struct = ir.LiteralStructType([i64, i64])
         months = builder.extract_value(interval_tup, 0)
         days = builder.extract_value(interval_tup, 1)
@@ -464,7 +464,7 @@ def _duckdb_bind_interval(typingctx, prepared_statement_p_ty, param_idx_ty, inte
     return duckdb_state_ty(intp, uint64, duckdb_interval_ty), codegen
 
 
-@njit(duckdb_state_ty(intp, uint64, duckdb_interval_ty))
+@cres(duckdb_state_ty(intp, uint64, duckdb_interval_ty))
 def duckdb_bind_interval(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_interval """
     return _duckdb_bind_interval(prepared_statement_p, param_idx, val)
@@ -519,7 +519,7 @@ def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decim
             # stack for the callee. optnone prevents the optimizer from
             # eliminating the GEP stores to the alloca. Without optnone,
             # the optimizer drops stores and the C function reads garbage.
-            # NOTE: optnone applies to the entire enclosing @njit wrapper.
+            # NOTE: optnone applies to the entire enclosing @cres wrapper.
             # This is safe because the wrapper is trivial, but revisit with
             # volatile stores if llvmlite adds support.
             # TODO(llvmlite): replace optnone with volatile stores when
@@ -533,7 +533,7 @@ def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decim
     return duckdb_state_ty(intp, uint64, duckdb_decimal_ty), codegen
 
 
-@njit(duckdb_state_ty(intp, uint64, duckdb_decimal_ty))
+@cres(duckdb_state_ty(intp, uint64, duckdb_decimal_ty))
 def duckdb_bind_decimal(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_decimal """
     return _duckdb_bind_decimal(prepared_statement_p, param_idx, val)
