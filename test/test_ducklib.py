@@ -613,6 +613,289 @@ def test_bind_timestamp_invalid_param_index():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+# --- New Bind Types (Task 1) ---
+
+def test_bind_int8():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::TINYINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_int8(stmt[0], 1, 42)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_int8 * 1).from_address(data_p)[0] == 42
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_int16():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::SMALLINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_int16(stmt[0], 1, 1234)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_int16 * 1).from_address(data_p)[0] == 1234
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_uint8():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::UTINYINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_uint8(stmt[0], 1, 200)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_uint8 * 1).from_address(data_p)[0] == 200
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_uint16():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::USMALLINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_uint16(stmt[0], 1, 50000)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_uint16 * 1).from_address(data_p)[0] == 50000
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_uint32():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::UINTEGER;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_uint32(stmt[0], 1, 3000000000)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_uint32 * 1).from_address(data_p)[0] == 3000000000
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_uint64():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::UBIGINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_uint64(stmt[0], 1, 2**50)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_uint64 * 1).from_address(data_p)[0] == 2**50
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_time():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::TIME;")
+    assert rc == ducklib.DuckDBSuccess
+    micros = 45000000000  # 12:30:00
+    rc = ducklib.duckdb_bind_time(stmt[0], 1, micros)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_int64 * 1).from_address(data_p)[0] == micros
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_timestamp_tz():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::TIMESTAMPTZ;")
+    assert rc == ducklib.DuckDBSuccess
+    micros = 1735689600000000
+    rc = ducklib.duckdb_bind_timestamp_tz(stmt[0], 1, micros)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_int64 * 1).from_address(data_p)[0] == micros
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_varchar_length():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::VARCHAR;")
+    assert rc == ducklib.DuckDBSuccess
+    val_bytes = ctypes.c_char_p(b"hello world")
+    val_p = ctypes.c_void_p.from_buffer(val_bytes).value
+    rc = ducklib.duckdb_bind_varchar_length(stmt[0], 1, val_p, 5)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert aux_read_inline_string(data_p) == "hello"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_blob():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::BLOB;")
+    assert rc == ducklib.DuckDBSuccess
+    blob_data = ctypes.c_char_p(b"\x00\x01\x02\x03")
+    blob_p = ctypes.c_void_p.from_buffer(blob_data).value
+    rc = ducklib.duckdb_bind_blob(stmt[0], 1, blob_p, 4)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    # BLOB uses same string_t layout: uint32 length + inline data
+    blob_len = ctypes.c_uint32.from_address(data_p).value
+    assert blob_len == 4
+    raw = (ctypes.c_char * blob_len).from_address(data_p + 4)
+    assert raw[:] == b"\x00\x01\x02\x03"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_int8_negative():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::TINYINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_int8(stmt[0], 1, -42)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_int8 * 1).from_address(data_p)[0] == -42
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_int16_negative():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::SMALLINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_int16(stmt[0], 1, -1234)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert (ctypes.c_int16 * 1).from_address(data_p)[0] == -1234
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_parameter_index():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER, $2::VARCHAR;")
+    assert rc == ducklib.DuckDBSuccess
+    idx_buf = numpy.zeros(1, dtype=numpy.uint64)
+    name_bytes = ctypes.c_char_p(b"1")
+    name_p = ctypes.c_void_p.from_buffer(name_bytes).value
+    rc = ducklib.duckdb_bind_parameter_index(stmt[0], idx_buf.ctypes.data, name_p)
+    assert rc == ducklib.DuckDBSuccess
+    assert idx_buf[0] == 1
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+# --- Struct Bind Types (Task 2) ---
+
+def test_bind_hugeint():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::HUGEINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_hugeint(stmt[0], 1, (42, 0))
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    lower = (ctypes.c_uint64 * 1).from_address(data_p)[0]
+    upper = (ctypes.c_int64 * 1).from_address(data_p + 8)[0]
+    assert lower == 42
+    assert upper == 0
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_uhugeint():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::UHUGEINT;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_uhugeint(stmt[0], 1, (100, 0))
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    lower = (ctypes.c_uint64 * 1).from_address(data_p)[0]
+    upper = (ctypes.c_uint64 * 1).from_address(data_p + 8)[0]
+    assert lower == 100
+    assert upper == 0
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_interval():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTERVAL;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_interval(stmt[0], 1, (1, 2, 3000000))
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    months = (ctypes.c_int32 * 1).from_address(data_p)[0]
+    days = (ctypes.c_int32 * 1).from_address(data_p + 4)[0]
+    micros = (ctypes.c_int64 * 1).from_address(data_p + 8)[0]
+    assert months == 1
+    assert days == 2
+    assert micros == 3000000
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_decimal():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::DECIMAL(10, 2);")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_decimal(stmt[0], 1, (10, 2, 12345, 0))
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    # DECIMAL(10,2) uses INT64 physical storage (width <= 18)
+    # The stored value is the unscaled integer: 12345 represents 123.45
+    stored = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert stored == 12345
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 # --- JIT Tests ---
 # get_unicode_data_p is safe inside @njit with numbox >= 0.5.6, which
 # extracts the data pointer directly instead of going through NRT meminfo.
