@@ -1,6 +1,6 @@
 from llvmlite.ir import IRBuilder, FunctionType
 from numba import njit
-from numba.core.types import float32, float64, int8, int32, int64, intp, uint64, UniTuple, void
+from numba.core.types import float32, float64, int8, int16, int32, int64, intp, uint8, uint16, uint32, uint64, UniTuple, void
 from numba.extending import intrinsic
 from numbox.core.bindings.call import _call_lib_func
 from numbox.core.bindings.signatures import signatures
@@ -28,6 +28,18 @@ signatures["duckdb_bind_int64"] = duckdb_state_ty(intp, uint64, int64)
 signatures["duckdb_bind_null"] = duckdb_state_ty(intp, uint64)
 signatures["duckdb_bind_timestamp"] = duckdb_state_ty(intp, uint64, int64)
 signatures["duckdb_bind_varchar"] = duckdb_state_ty(intp, uint64, intp)
+signatures["duckdb_bind_blob"] = duckdb_state_ty(intp, uint64, intp, uint64)
+signatures["duckdb_bind_int8"] = duckdb_state_ty(intp, uint64, int8)
+signatures["duckdb_bind_int16"] = duckdb_state_ty(intp, uint64, int16)
+signatures["duckdb_bind_parameter_index"] = duckdb_state_ty(intp, intp, intp)
+signatures["duckdb_bind_time"] = duckdb_state_ty(intp, uint64, int64)
+signatures["duckdb_bind_timestamp_tz"] = duckdb_state_ty(intp, uint64, int64)
+signatures["duckdb_bind_uint8"] = duckdb_state_ty(intp, uint64, uint8)
+signatures["duckdb_bind_uint16"] = duckdb_state_ty(intp, uint64, uint16)
+signatures["duckdb_bind_uint32"] = duckdb_state_ty(intp, uint64, uint32)
+signatures["duckdb_bind_uint64"] = duckdb_state_ty(intp, uint64, uint64)
+signatures["duckdb_bind_value"] = duckdb_state_ty(intp, uint64, intp)
+signatures["duckdb_bind_varchar_length"] = duckdb_state_ty(intp, uint64, intp, uint64)
 signatures["duckdb_close"] = void(intp)
 signatures["duckdb_data_chunk_get_column_count"] = intp(intp)
 signatures["duckdb_data_chunk_get_size"] = intp(intp)
@@ -58,10 +70,28 @@ def duckdb_bind_boolean(prepared_statement_p, param_idx, val):
     return _call_lib_func("duckdb_bind_boolean", (prepared_statement_p, param_idx, val))
 
 
+@cres(signatures.get("duckdb_bind_blob"))
+def duckdb_bind_blob(prepared_statement_p, param_idx, data_p, length):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_blob """
+    return _call_lib_func("duckdb_bind_blob", (prepared_statement_p, param_idx, data_p, length))
+
+
 @cres(signatures.get("duckdb_bind_date"))
 def duckdb_bind_date(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_date """
     return _call_lib_func("duckdb_bind_date", (prepared_statement_p, param_idx, val))
+
+
+@cres(signatures.get("duckdb_bind_int8"))
+def duckdb_bind_int8(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int8 """
+    return _call_lib_func("duckdb_bind_int8", (prepared_statement_p, param_idx, val))
+
+
+@cres(signatures.get("duckdb_bind_int16"))
+def duckdb_bind_int16(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int16 """
+    return _call_lib_func("duckdb_bind_int16", (prepared_statement_p, param_idx, val))
 
 
 @cres(signatures.get("duckdb_bind_double"))
@@ -88,10 +118,22 @@ def duckdb_bind_int64(prepared_statement_p, param_idx, val):
     return _call_lib_func("duckdb_bind_int64", (prepared_statement_p, param_idx, val))
 
 
+@cres(signatures.get("duckdb_bind_parameter_index"))
+def duckdb_bind_parameter_index(prepared_statement_p, param_idx_out_p, name_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_parameter_index """
+    return _call_lib_func("duckdb_bind_parameter_index", (prepared_statement_p, param_idx_out_p, name_p))
+
+
 @cres(signatures.get("duckdb_bind_null"))
 def duckdb_bind_null(prepared_statement_p, param_idx):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_null """
     return _call_lib_func("duckdb_bind_null", (prepared_statement_p, param_idx))
+
+
+@cres(signatures.get("duckdb_bind_time"))
+def duckdb_bind_time(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_time """
+    return _call_lib_func("duckdb_bind_time", (prepared_statement_p, param_idx, val))
 
 
 @cres(signatures.get("duckdb_bind_timestamp"))
@@ -100,10 +142,52 @@ def duckdb_bind_timestamp(prepared_statement_p, param_idx, val):
     return _call_lib_func("duckdb_bind_timestamp", (prepared_statement_p, param_idx, val))
 
 
+@cres(signatures.get("duckdb_bind_timestamp_tz"))
+def duckdb_bind_timestamp_tz(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp_tz """
+    return _call_lib_func("duckdb_bind_timestamp_tz", (prepared_statement_p, param_idx, val))
+
+
+@cres(signatures.get("duckdb_bind_uint8"))
+def duckdb_bind_uint8(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_uint8 """
+    return _call_lib_func("duckdb_bind_uint8", (prepared_statement_p, param_idx, val))
+
+
+@cres(signatures.get("duckdb_bind_uint16"))
+def duckdb_bind_uint16(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_uint16 """
+    return _call_lib_func("duckdb_bind_uint16", (prepared_statement_p, param_idx, val))
+
+
+@cres(signatures.get("duckdb_bind_uint32"))
+def duckdb_bind_uint32(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_uint32 """
+    return _call_lib_func("duckdb_bind_uint32", (prepared_statement_p, param_idx, val))
+
+
+@cres(signatures.get("duckdb_bind_uint64"))
+def duckdb_bind_uint64(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_uint64 """
+    return _call_lib_func("duckdb_bind_uint64", (prepared_statement_p, param_idx, val))
+
+
+@cres(signatures.get("duckdb_bind_value"))
+def duckdb_bind_value(prepared_statement_p, param_idx, val_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_value """
+    return _call_lib_func("duckdb_bind_value", (prepared_statement_p, param_idx, val_p))
+
+
 @cres(signatures.get("duckdb_bind_varchar"))
 def duckdb_bind_varchar(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_varchar """
     return _call_lib_func("duckdb_bind_varchar", (prepared_statement_p, param_idx, val))
+
+
+@cres(signatures.get("duckdb_bind_varchar_length"))
+def duckdb_bind_varchar_length(prepared_statement_p, param_idx, val_p, length):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_varchar_length """
+    return _call_lib_func("duckdb_bind_varchar_length", (prepared_statement_p, param_idx, val_p, length))
 
 
 @cres(signatures.get("duckdb_close"))
