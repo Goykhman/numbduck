@@ -1,6 +1,6 @@
 from llvmlite.ir import IRBuilder, FunctionType
 from numba import njit
-from numba.core.types import float32, float64, int8, int16, int32, int64, intp, uint8, uint16, uint32, uint64, UniTuple, void
+from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
 from numba.extending import intrinsic
 from numbox.core.bindings.call import _call_lib_func
 from numbox.core.bindings.signatures import signatures
@@ -18,6 +18,10 @@ DuckDBSuccess = 0
 DuckDBError = 1
 
 duckdb_result_ty = UniTuple(intp, 6)
+duckdb_hugeint_ty = Tuple((uint64, int64))
+duckdb_uhugeint_ty = UniTuple(uint64, 2)
+duckdb_interval_ty = Tuple((int32, int32, int64))
+duckdb_decimal_ty = Tuple((uint8, uint8, uint64, int64))
 
 signatures["duckdb_bind_boolean"] = duckdb_state_ty(intp, uint64, int8)
 signatures["duckdb_bind_date"] = duckdb_state_ty(intp, uint64, int32)
@@ -336,3 +340,98 @@ def duckdb_vector_get_data(duckdb_vector_p):
 def duckdb_vector_get_validity(duckdb_vector_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_vector_get_validity """
     return _call_lib_func("duckdb_vector_get_validity", (duckdb_vector_p,))
+
+
+@intrinsic
+def _duckdb_bind_hugeint(typingctx, prepared_statement_p_ty, param_idx_ty, hugeint_tup_ty):
+    def codegen(context, builder: IRBuilder, signature, arguments):
+        prepared_statement_p, param_idx, hugeint_tup = arguments
+        hugeint_ll_ty = context.get_value_type(duckdb_hugeint_ty)
+        func_ty_ll = FunctionType(
+            context.get_value_type(signature.return_type),
+            [prepared_statement_p.type, param_idx.type, hugeint_ll_ty]
+        )
+        func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_hugeint")
+        return builder.call(func_p, [prepared_statement_p, param_idx, hugeint_tup])
+    return duckdb_state_ty(intp, uint64, duckdb_hugeint_ty), codegen
+
+
+@njit(duckdb_state_ty(intp, uint64, duckdb_hugeint_ty))
+def duckdb_bind_hugeint(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_hugeint """
+    return _duckdb_bind_hugeint(prepared_statement_p, param_idx, val)
+
+
+@intrinsic
+def _duckdb_bind_uhugeint(typingctx, prepared_statement_p_ty, param_idx_ty, uhugeint_tup_ty):
+    def codegen(context, builder: IRBuilder, signature, arguments):
+        prepared_statement_p, param_idx, uhugeint_tup = arguments
+        uhugeint_ll_ty = context.get_value_type(duckdb_uhugeint_ty)
+        func_ty_ll = FunctionType(
+            context.get_value_type(signature.return_type),
+            [prepared_statement_p.type, param_idx.type, uhugeint_ll_ty]
+        )
+        func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_uhugeint")
+        return builder.call(func_p, [prepared_statement_p, param_idx, uhugeint_tup])
+    return duckdb_state_ty(intp, uint64, duckdb_uhugeint_ty), codegen
+
+
+@njit(duckdb_state_ty(intp, uint64, duckdb_uhugeint_ty))
+def duckdb_bind_uhugeint(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_uhugeint """
+    return _duckdb_bind_uhugeint(prepared_statement_p, param_idx, val)
+
+
+@intrinsic
+def _duckdb_bind_interval(typingctx, prepared_statement_p_ty, param_idx_ty, interval_tup_ty):
+    def codegen(context, builder: IRBuilder, signature, arguments):
+        prepared_statement_p, param_idx, interval_tup = arguments
+        interval_ll_ty = context.get_value_type(duckdb_interval_ty)
+        func_ty_ll = FunctionType(
+            context.get_value_type(signature.return_type),
+            [prepared_statement_p.type, param_idx.type, interval_ll_ty]
+        )
+        func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_interval")
+        return builder.call(func_p, [prepared_statement_p, param_idx, interval_tup])
+    return duckdb_state_ty(intp, uint64, duckdb_interval_ty), codegen
+
+
+@njit(duckdb_state_ty(intp, uint64, duckdb_interval_ty))
+def duckdb_bind_interval(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_interval """
+    return _duckdb_bind_interval(prepared_statement_p, param_idx, val)
+
+
+@intrinsic
+def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decimal_tup_ty):
+    def codegen(context, builder: IRBuilder, signature, arguments):
+        from llvmlite import ir
+        prepared_statement_p, param_idx, decimal_tup = arguments
+        i8 = ir.IntType(8)
+        i64 = ir.IntType(64)
+        hugeint_struct = ir.LiteralStructType([i64, i64])
+        decimal_struct = ir.LiteralStructType([i8, i8, hugeint_struct])
+        width = builder.extract_value(decimal_tup, 0)
+        scale = builder.extract_value(decimal_tup, 1)
+        lower = builder.extract_value(decimal_tup, 2)
+        upper = builder.extract_value(decimal_tup, 3)
+        hugeint = ir.Constant(hugeint_struct, ir.Undefined)
+        hugeint = builder.insert_value(hugeint, lower, 0)
+        hugeint = builder.insert_value(hugeint, upper, 1)
+        decimal_val = ir.Constant(decimal_struct, ir.Undefined)
+        decimal_val = builder.insert_value(decimal_val, width, 0)
+        decimal_val = builder.insert_value(decimal_val, scale, 1)
+        decimal_val = builder.insert_value(decimal_val, hugeint, 2)
+        func_ty_ll = FunctionType(
+            context.get_value_type(signature.return_type),
+            [prepared_statement_p.type, param_idx.type, decimal_struct]
+        )
+        func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_decimal")
+        return builder.call(func_p, [prepared_statement_p, param_idx, decimal_val])
+    return duckdb_state_ty(intp, uint64, duckdb_decimal_ty), codegen
+
+
+@njit(duckdb_state_ty(intp, uint64, duckdb_decimal_ty))
+def duckdb_bind_decimal(prepared_statement_p, param_idx, val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_decimal """
+    return _duckdb_bind_decimal(prepared_statement_p, param_idx, val)
