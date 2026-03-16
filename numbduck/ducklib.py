@@ -497,6 +497,8 @@ def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decim
         upper = builder.extract_value(decimal_tup, 3)
         zero = ir.Constant(i32, 0)
         decimal_stack_p = builder.alloca(decimal_struct)
+        # Zero-initialize to clear padding bytes (between scale and hugeint)
+        builder.store(ir.Constant(decimal_struct, None), decimal_stack_p)
         width_p = builder.gep(decimal_stack_p, [zero, ir.Constant(i32, 0)])
         builder.store(width, width_p)
         scale_p = builder.gep(decimal_stack_p, [zero, ir.Constant(i32, 1)])
