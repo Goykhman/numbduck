@@ -385,14 +385,29 @@ def duckdb_bind_uhugeint(prepared_statement_p, param_idx, val):
 @intrinsic
 def _duckdb_bind_interval(typingctx, prepared_statement_p_ty, param_idx_ty, interval_tup_ty):
     def codegen(context, builder: IRBuilder, signature, arguments):
+        from llvmlite import ir
         prepared_statement_p, param_idx, interval_tup = arguments
-        interval_ll_ty = context.get_value_type(duckdb_interval_ty)
+        i64 = ir.IntType(64)
+        # C struct: { int32 months, int32 days, int64 micros } = 16 bytes
+        # Pack two i32 fields into one i64 to match the ABI register layout
+        interval_struct = ir.LiteralStructType([i64, i64])
+        months = builder.extract_value(interval_tup, 0)
+        days = builder.extract_value(interval_tup, 1)
+        micros = builder.extract_value(interval_tup, 2)
+        # Pack months (low 32) | days (high 32) into first i64
+        months_zext = builder.zext(months, i64)
+        days_zext = builder.zext(days, i64)
+        days_shifted = builder.shl(days_zext, ir.Constant(i64, 32))
+        packed = builder.or_(months_zext, days_shifted)
+        val = ir.Constant(interval_struct, ir.Undefined)
+        val = builder.insert_value(val, packed, 0)
+        val = builder.insert_value(val, micros, 1)
         func_ty_ll = FunctionType(
             context.get_value_type(signature.return_type),
-            [prepared_statement_p.type, param_idx.type, interval_ll_ty]
+            [prepared_statement_p.type, param_idx.type, interval_struct]
         )
         func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_interval")
-        return builder.call(func_p, [prepared_statement_p, param_idx, interval_tup])
+        return builder.call(func_p, [prepared_statement_p, param_idx, val])
     return duckdb_state_ty(intp, uint64, duckdb_interval_ty), codegen
 
 
@@ -408,26 +423,39 @@ def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decim
         from llvmlite import ir
         prepared_statement_p, param_idx, decimal_tup = arguments
         i8 = ir.IntType(8)
+        i32 = ir.IntType(32)
         i64 = ir.IntType(64)
+        # C struct: { uint8 width, uint8 scale, pad[6], {uint64 lower, int64 upper} }
+        # 24 bytes = MEMORY class on SysV x86-64, passed on stack via byval
         hugeint_struct = ir.LiteralStructType([i64, i64])
         decimal_struct = ir.LiteralStructType([i8, i8, hugeint_struct])
         width = builder.extract_value(decimal_tup, 0)
         scale = builder.extract_value(decimal_tup, 1)
         lower = builder.extract_value(decimal_tup, 2)
         upper = builder.extract_value(decimal_tup, 3)
-        hugeint = ir.Constant(hugeint_struct, ir.Undefined)
-        hugeint = builder.insert_value(hugeint, lower, 0)
-        hugeint = builder.insert_value(hugeint, upper, 1)
-        decimal_val = ir.Constant(decimal_struct, ir.Undefined)
-        decimal_val = builder.insert_value(decimal_val, width, 0)
-        decimal_val = builder.insert_value(decimal_val, scale, 1)
-        decimal_val = builder.insert_value(decimal_val, hugeint, 2)
+        # Disable optimization for this function to prevent the optimizer
+        # from eliminating stores to the byval alloca (LLVM bug)
+        builder.function.attributes.add('optnone')
+        builder.function.attributes.add('noinline')
+        zero = ir.Constant(i32, 0)
+        decimal_stack_p = builder.alloca(decimal_struct)
+        width_p = builder.gep(decimal_stack_p, [zero, ir.Constant(i32, 0)])
+        builder.store(width, width_p)
+        scale_p = builder.gep(decimal_stack_p, [zero, ir.Constant(i32, 1)])
+        builder.store(scale, scale_p)
+        lower_p = builder.gep(decimal_stack_p,
+                              [zero, ir.Constant(i32, 2), ir.Constant(i32, 0)])
+        builder.store(lower, lower_p)
+        upper_p = builder.gep(decimal_stack_p,
+                              [zero, ir.Constant(i32, 2), ir.Constant(i32, 1)])
+        builder.store(upper, upper_p)
         func_ty_ll = FunctionType(
             context.get_value_type(signature.return_type),
-            [prepared_statement_p.type, param_idx.type, decimal_struct]
+            [prepared_statement_p.type, param_idx.type, decimal_struct.as_pointer()]
         )
         func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_decimal")
-        return builder.call(func_p, [prepared_statement_p, param_idx, decimal_val])
+        func_p.args[2].add_attribute('byval')
+        return builder.call(func_p, [prepared_statement_p, param_idx, decimal_stack_p])
     return duckdb_state_ty(intp, uint64, duckdb_decimal_ty), codegen
 
 
