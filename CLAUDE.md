@@ -13,7 +13,7 @@ numbduck — adapts DuckDB's C API for use inside numba `@njit` code. Built on t
 - Test: `pytest`
 - Lint: `flake8`
 - Python: >=3.10
-- Key dependencies: `duckdb~=1.3.2`, `numbox~=0.5.6`
+- Key dependencies: `duckdb~=1.3.2`, `numbox~=0.2.13`
 
 ## Architecture
 
@@ -72,7 +72,5 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Before posting PR comments, check for pending reviews with existing comments (`GET /pulls/{pr}/reviews/{id}/comments`) — never silently delete a pending review, as it destroys all bundled draft comments
 - Preface all AI-authored GitHub comments with "From the fake Slim Shady:"
 - Never guess about things that can be verified — check the source of truth before making claims
-- Always preview GitHub PR/issue comments with the user before posting
-- Before planning, reviewing, or implementing anything that depends on numbox, read and understand the relevant numbox/utils source (e.g. lowlevel.py) — don't reinvent what already exists
-- Every task in tasks.json must have a "model" field so executing sessions know which model to use for subagents
+- Always clean `__pycache__` and numba cache (`~/.cache/numba`) before every pytest run — stale JIT artifacts cause false failures
 - Never put implementation planning details (task numbers, phase references, internal tracking) into code comments — comments must be context-independent
