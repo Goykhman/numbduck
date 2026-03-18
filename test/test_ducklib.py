@@ -613,7 +613,7 @@ def test_bind_timestamp_invalid_param_index():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# --- New Bind Types (Task 1) ---
+# --- Scalar Bind Types ---
 
 def test_bind_int8():
     duckdb_database, duckdb_connection = aux_connect_db()
@@ -820,7 +820,7 @@ def test_bind_parameter_index():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# --- Struct Bind Types (Task 2) ---
+# --- Struct Bind Types ---
 
 def test_bind_hugeint():
     duckdb_database, duckdb_connection = aux_connect_db()

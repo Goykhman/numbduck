@@ -16,7 +16,7 @@ from numbduck.utils import load_duckdb
 duckdb_lib = load_duckdb()
 
 _is_win = sys.platform == 'win32'
-_is_sysv_x86_64 = platform.machine() == 'x86_64' and not _is_win
+_is_sysv_x86_64 = platform.machine() == 'x86_64'
 
 duckdb_state_ty = int32
 
