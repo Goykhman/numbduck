@@ -29,8 +29,6 @@ duckdb_uhugeint_ty = UniTuple(uint64, 2)
 duckdb_interval_ty = Tuple((int32, int32, int64))
 duckdb_decimal_ty = Tuple((uint8, uint8, uint64, int64))
 
-_i8 = ir.IntType(8)
-_i32 = ir.IntType(32)
 _i64 = ir.IntType(64)
 
 signatures["duckdb_bind_blob"] = duckdb_state_ty(intp, uint64, intp, uint64)
@@ -475,42 +473,22 @@ def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decim
     def codegen(context, builder: IRBuilder, signature, arguments):
         prepared_statement_p, param_idx, decimal_tup = arguments
         # C struct: { uint8 width, uint8 scale, pad[6], {uint64 lower, int64 upper} }
-        # 24 bytes — ABI handling varies by platform:
-        # - x86-64 SysV: MEMORY class (>16 bytes), passed on stack via byval
-        # - arm64/Windows: passed by implicit pointer in register
-        hugeint_struct = ir.LiteralStructType([_i64, _i64])
-        decimal_struct = ir.LiteralStructType([_i8, _i8, hugeint_struct])
-        width = builder.extract_value(decimal_tup, 0)
-        scale = builder.extract_value(decimal_tup, 1)
-        lower = builder.extract_value(decimal_tup, 2)
-        upper = builder.extract_value(decimal_tup, 3)
-        zero = ir.Constant(_i32, 0)
-        decimal_stack_p = builder.alloca(decimal_struct)
-        # Zero-initialize to clear padding bytes (between scale and hugeint)
-        builder.store(ir.Constant(decimal_struct, None), decimal_stack_p)
-        width_p = builder.gep(decimal_stack_p, [zero, ir.Constant(_i32, 0)])
-        builder.store(width, width_p)
-        scale_p = builder.gep(decimal_stack_p, [zero, ir.Constant(_i32, 1)])
-        builder.store(scale, scale_p)
-        lower_p = builder.gep(decimal_stack_p,
-                              [zero, ir.Constant(_i32, 2), ir.Constant(_i32, 0)])
-        builder.store(lower, lower_p)
-        upper_p = builder.gep(decimal_stack_p,
-                              [zero, ir.Constant(_i32, 2), ir.Constant(_i32, 1)])
-        builder.store(upper, upper_p)
+        # 24 bytes total. Numba's {i8, i8, i64, i64} has the same layout
+        # because LLVM aligns the i64 fields to 8-byte boundaries.
+        decimal_tup_ty = decimal_tup.type
+        decimal_stack_p = builder.alloca(decimal_tup_ty)
+        builder.store(decimal_tup, decimal_stack_p)
         func_ty_ll = FunctionType(
             context.get_value_type(signature.return_type),
-            [prepared_statement_p.type, param_idx.type, decimal_struct.as_pointer()]
+            [prepared_statement_p.type, param_idx.type,
+             decimal_tup_ty.as_pointer()]
         )
-        func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_decimal")
+        func_p = get_or_insert_function(
+            builder.module, func_ty_ll, "duckdb_bind_decimal")
         if _is_sysv_x86_64:
             # On x86-64 SysV, byval tells LLVM to copy the struct to the
             # stack for the callee. optnone prevents the optimizer from
-            # eliminating the GEP stores to the alloca. Without optnone,
-            # the optimizer drops stores and the C function reads garbage.
-            # NOTE: optnone applies to the entire enclosing @cres wrapper.
-            # This is safe because the wrapper is trivial, but revisit with
-            # volatile stores if llvmlite adds support.
+            # eliminating the store to the alloca.
             # TODO(llvmlite): replace optnone with volatile stores when
             # llvmlite exposes builder.store(..., volatile=True).
             func_p.args[2].add_attribute('byval')
@@ -518,7 +496,8 @@ def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decim
             builder.function.attributes.add('noinline')
         # On arm64 and Windows x64, the C ABI passes >16/>8-byte structs
         # by pointer, so a plain pointer parameter matches the ABI.
-        return builder.call(func_p, [prepared_statement_p, param_idx, decimal_stack_p])
+        return builder.call(
+            func_p, [prepared_statement_p, param_idx, decimal_stack_p])
     return duckdb_state_ty(intp, uint64, duckdb_decimal_ty), codegen
 
 
