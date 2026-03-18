@@ -1,3 +1,4 @@
+from llvmlite import ir
 from llvmlite.ir import IRBuilder, FunctionType
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
 from numba.extending import intrinsic
@@ -6,10 +7,16 @@ from numbox.core.bindings.signatures import signatures
 from numba.core.cgutils import get_or_insert_function
 from numbox.utils.highlevel import cres
 
+import platform
+import sys
+
 from numbduck.utils import load_duckdb
 
 
 duckdb_lib = load_duckdb()
+
+_is_win = sys.platform == 'win32'
+_is_sysv_x86_64 = platform.machine() == 'x86_64' and not _is_win
 
 duckdb_state_ty = int32
 
@@ -22,38 +29,42 @@ duckdb_uhugeint_ty = UniTuple(uint64, 2)
 duckdb_interval_ty = Tuple((int32, int32, int64))
 duckdb_decimal_ty = Tuple((uint8, uint8, uint64, int64))
 
+_i8 = ir.IntType(8)
+_i32 = ir.IntType(32)
+_i64 = ir.IntType(64)
+
+signatures["duckdb_bind_blob"] = duckdb_state_ty(intp, uint64, intp, uint64)
 signatures["duckdb_bind_boolean"] = duckdb_state_ty(intp, uint64, int8)
 signatures["duckdb_bind_date"] = duckdb_state_ty(intp, uint64, int32)
 signatures["duckdb_bind_double"] = duckdb_state_ty(intp, uint64, float64)
 signatures["duckdb_bind_float"] = duckdb_state_ty(intp, uint64, float32)
+signatures["duckdb_bind_int8"] = duckdb_state_ty(intp, uint64, int8)
+signatures["duckdb_bind_int16"] = duckdb_state_ty(intp, uint64, int16)
 signatures["duckdb_bind_int32"] = duckdb_state_ty(intp, uint64, int32)
 signatures["duckdb_bind_int64"] = duckdb_state_ty(intp, uint64, int64)
 signatures["duckdb_bind_null"] = duckdb_state_ty(intp, uint64)
-signatures["duckdb_bind_timestamp"] = duckdb_state_ty(intp, uint64, int64)
-signatures["duckdb_bind_varchar"] = duckdb_state_ty(intp, uint64, intp)
-signatures["duckdb_bind_blob"] = duckdb_state_ty(intp, uint64, intp, uint64)
-signatures["duckdb_bind_int8"] = duckdb_state_ty(intp, uint64, int8)
-signatures["duckdb_bind_int16"] = duckdb_state_ty(intp, uint64, int16)
 signatures["duckdb_bind_parameter_index"] = duckdb_state_ty(intp, intp, intp)
 signatures["duckdb_bind_time"] = duckdb_state_ty(intp, uint64, int64)
+signatures["duckdb_bind_timestamp"] = duckdb_state_ty(intp, uint64, int64)
 signatures["duckdb_bind_timestamp_tz"] = duckdb_state_ty(intp, uint64, int64)
 signatures["duckdb_bind_uint8"] = duckdb_state_ty(intp, uint64, uint8)
 signatures["duckdb_bind_uint16"] = duckdb_state_ty(intp, uint64, uint16)
 signatures["duckdb_bind_uint32"] = duckdb_state_ty(intp, uint64, uint32)
 signatures["duckdb_bind_uint64"] = duckdb_state_ty(intp, uint64, uint64)
 signatures["duckdb_bind_value"] = duckdb_state_ty(intp, uint64, intp)
+signatures["duckdb_bind_varchar"] = duckdb_state_ty(intp, uint64, intp)
 signatures["duckdb_bind_varchar_length"] = duckdb_state_ty(intp, uint64, intp, uint64)
 signatures["duckdb_close"] = void(intp)
-signatures["duckdb_data_chunk_get_column_count"] = intp(intp)
-signatures["duckdb_data_chunk_get_size"] = intp(intp)
-signatures["duckdb_disconnect"] = void(intp)
-signatures["duckdb_execute_prepared"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_column_count"] = intp(intp)
 signatures["duckdb_connect"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_data_chunk_get_column_count"] = intp(intp)
+signatures["duckdb_data_chunk_get_size"] = intp(intp)
 signatures["duckdb_data_chunk_get_vector"] = intp(intp, intp)
 signatures["duckdb_destroy_data_chunk"] = void(intp)
 signatures["duckdb_destroy_prepare"] = void(intp)
 signatures["duckdb_destroy_result"] = void(intp)
+signatures["duckdb_disconnect"] = void(intp)
+signatures["duckdb_execute_prepared"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_nparams"] = uint64(intp)
 signatures["duckdb_open"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_prepare"] = duckdb_state_ty(intp, intp, intp)
@@ -342,9 +353,6 @@ def duckdb_vector_get_validity(duckdb_vector_p):
 
 @intrinsic
 def _duckdb_bind_hugeint(typingctx, prepared_statement_p_ty, param_idx_ty, hugeint_tup_ty):
-    import sys
-    _is_win = sys.platform == 'win32'
-
     def codegen(context, builder: IRBuilder, signature, arguments):
         prepared_statement_p, param_idx, hugeint_tup = arguments
         # Numba lowers Tuple((uint64, int64)) to LLVM {i64, i64}, which
@@ -381,9 +389,6 @@ def duckdb_bind_hugeint(prepared_statement_p, param_idx, val):
 
 @intrinsic
 def _duckdb_bind_uhugeint(typingctx, prepared_statement_p_ty, param_idx_ty, uhugeint_tup_ty):
-    import sys
-    _is_win = sys.platform == 'win32'
-
     def codegen(context, builder: IRBuilder, signature, arguments):
         prepared_statement_p, param_idx, uhugeint_tup = arguments
         # Numba lowers UniTuple(uint64, 2) to LLVM {i64, i64}, which
@@ -419,25 +424,20 @@ def duckdb_bind_uhugeint(prepared_statement_p, param_idx, val):
 
 @intrinsic
 def _duckdb_bind_interval(typingctx, prepared_statement_p_ty, param_idx_ty, interval_tup_ty):
-    import sys
-    _is_win = sys.platform == 'win32'
-
     def codegen(context, builder: IRBuilder, signature, arguments):
-        from llvmlite import ir
         prepared_statement_p, param_idx, interval_tup = arguments
-        i64 = ir.IntType(64)
         # C struct: { int32 months, int32 days, int64 micros } = 16 bytes
         # Pack two i32 fields into one i64 to match the C struct layout.
         # Using {i32, i32, i64} directly fails — LLVM's SysV x86-64 ABI
         # lowering drops the second i32 field when coercing to registers.
-        interval_struct = ir.LiteralStructType([i64, i64])
+        interval_struct = ir.LiteralStructType([_i64, _i64])
         months = builder.extract_value(interval_tup, 0)
         days = builder.extract_value(interval_tup, 1)
         micros = builder.extract_value(interval_tup, 2)
         # Pack months (low 32) | days (high 32) into first i64
-        months_zext = builder.zext(months, i64)
-        days_zext = builder.zext(days, i64)
-        days_shifted = builder.shl(days_zext, ir.Constant(i64, 32))
+        months_zext = builder.zext(months, _i64)
+        days_zext = builder.zext(days, _i64)
+        days_shifted = builder.shl(days_zext, ir.Constant(_i64, 32))
         packed = builder.or_(months_zext, days_shifted)
         val = ir.Constant(interval_struct, ir.Undefined)
         val = builder.insert_value(val, packed, 0)
@@ -472,42 +472,31 @@ def duckdb_bind_interval(prepared_statement_p, param_idx, val):
 
 @intrinsic
 def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decimal_tup_ty):
-    import platform
-    import sys
-    # Only SysV x86-64 (Linux/macOS) needs byval — Windows AMD64 passes
-    # >8-byte structs by pointer like arm64.  Windows reports 'AMD64' for
-    # platform.machine(), but we exclude it explicitly for clarity.
-    _is_sysv_x86_64 = platform.machine() == 'x86_64' and sys.platform != 'win32'
-
     def codegen(context, builder: IRBuilder, signature, arguments):
-        from llvmlite import ir
         prepared_statement_p, param_idx, decimal_tup = arguments
-        i8 = ir.IntType(8)
-        i32 = ir.IntType(32)
-        i64 = ir.IntType(64)
         # C struct: { uint8 width, uint8 scale, pad[6], {uint64 lower, int64 upper} }
         # 24 bytes — ABI handling varies by platform:
         # - x86-64 SysV: MEMORY class (>16 bytes), passed on stack via byval
         # - arm64/Windows: passed by implicit pointer in register
-        hugeint_struct = ir.LiteralStructType([i64, i64])
-        decimal_struct = ir.LiteralStructType([i8, i8, hugeint_struct])
+        hugeint_struct = ir.LiteralStructType([_i64, _i64])
+        decimal_struct = ir.LiteralStructType([_i8, _i8, hugeint_struct])
         width = builder.extract_value(decimal_tup, 0)
         scale = builder.extract_value(decimal_tup, 1)
         lower = builder.extract_value(decimal_tup, 2)
         upper = builder.extract_value(decimal_tup, 3)
-        zero = ir.Constant(i32, 0)
+        zero = ir.Constant(_i32, 0)
         decimal_stack_p = builder.alloca(decimal_struct)
         # Zero-initialize to clear padding bytes (between scale and hugeint)
         builder.store(ir.Constant(decimal_struct, None), decimal_stack_p)
-        width_p = builder.gep(decimal_stack_p, [zero, ir.Constant(i32, 0)])
+        width_p = builder.gep(decimal_stack_p, [zero, ir.Constant(_i32, 0)])
         builder.store(width, width_p)
-        scale_p = builder.gep(decimal_stack_p, [zero, ir.Constant(i32, 1)])
+        scale_p = builder.gep(decimal_stack_p, [zero, ir.Constant(_i32, 1)])
         builder.store(scale, scale_p)
         lower_p = builder.gep(decimal_stack_p,
-                              [zero, ir.Constant(i32, 2), ir.Constant(i32, 0)])
+                              [zero, ir.Constant(_i32, 2), ir.Constant(_i32, 0)])
         builder.store(lower, lower_p)
         upper_p = builder.gep(decimal_stack_p,
-                              [zero, ir.Constant(i32, 2), ir.Constant(i32, 1)])
+                              [zero, ir.Constant(_i32, 2), ir.Constant(_i32, 1)])
         builder.store(upper, upper_p)
         func_ty_ll = FunctionType(
             context.get_value_type(signature.return_type),
