@@ -54,6 +54,9 @@ signatures["duckdb_bind_varchar"] = duckdb_state_ty(intp, uint64, intp)
 signatures["duckdb_bind_varchar_length"] = duckdb_state_ty(intp, uint64, intp, uint64)
 signatures["duckdb_close"] = void(intp)
 signatures["duckdb_column_count"] = intp(intp)
+signatures["duckdb_column_logical_type"] = intp(intp, uint64)
+signatures["duckdb_column_name"] = intp(intp, uint64)
+signatures["duckdb_column_type"] = int32(intp, uint64)
 signatures["duckdb_connect"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_data_chunk_get_column_count"] = intp(intp)
 signatures["duckdb_data_chunk_get_size"] = intp(intp)
@@ -69,7 +72,9 @@ signatures["duckdb_prepare"] = duckdb_state_ty(intp, intp, intp)
 signatures["duckdb_prepare_error"] = intp(intp)
 signatures["duckdb_query"] = duckdb_state_ty(intp, intp, intp)
 signatures["duckdb_result_error"] = intp(intp)
+signatures["duckdb_result_error_type"] = int32(intp)
 signatures["duckdb_row_count"] = intp(intp)
+signatures["duckdb_rows_changed"] = uint64(intp)
 signatures["duckdb_validity_row_is_valid"] = int8(intp, intp)
 signatures["duckdb_vector_get_data"] = intp(intp)
 signatures["duckdb_vector_get_validity"] = uint64(intp)
@@ -213,6 +218,24 @@ def duckdb_column_count(duckdb_result_p):
     return _call_lib_func("duckdb_column_count", (duckdb_result_p,))
 
 
+@cres(signatures.get("duckdb_column_logical_type"))
+def duckdb_column_logical_type(duckdb_result_p, col):
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L987 """
+    return _call_lib_func("duckdb_column_logical_type", (duckdb_result_p, col))
+
+
+@cres(signatures.get("duckdb_column_name"))
+def duckdb_column_name(duckdb_result_p, col):
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L955 """
+    return _call_lib_func("duckdb_column_name", (duckdb_result_p, col))
+
+
+@cres(signatures.get("duckdb_column_type"))
+def duckdb_column_type(duckdb_result_p, col):
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L966 """
+    return _call_lib_func("duckdb_column_type", (duckdb_result_p, col))
+
+
 @cres(signatures.get("duckdb_data_chunk_get_column_count"))
 def duckdb_data_chunk_get_column_count(data_chunk_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_data_chunk_get_column_count """
@@ -325,10 +348,68 @@ def duckdb_result_error(duckdb_result_p):
     return _call_lib_func("duckdb_result_error", (duckdb_result_p,))
 
 
+@cres(signatures.get("duckdb_result_error_type"))
+def duckdb_result_error_type(duckdb_result_p):
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L1081 """
+    return _call_lib_func("duckdb_result_error_type", (duckdb_result_p,))
+
+
+@intrinsic
+def _duckdb_result_return_type(typingctx, duckdb_result_tup_ty):
+    def codegen(context, builder: IRBuilder, signature, arguments):
+        duckdb_result_tup = arguments[0]
+        duckdb_result_tup_ty_ll = context.get_value_type(duckdb_result_ty)
+        duckdb_result_tup_stack_p = builder.alloca(duckdb_result_tup_ty_ll)
+        builder.store(duckdb_result_tup, duckdb_result_tup_stack_p)
+        func_ty_ll = FunctionType(
+            context.get_value_type(signature.return_type),
+            [duckdb_result_tup_ty_ll.as_pointer()]
+        )
+        func_p = get_or_insert_function(
+            builder.module, func_ty_ll, "duckdb_result_return_type")
+        return builder.call(func_p, [duckdb_result_tup_stack_p])
+    return int32(duckdb_result_ty), codegen
+
+
+@cres(int32(duckdb_result_ty))
+def duckdb_result_return_type(result):
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L1136 """
+    return _duckdb_result_return_type(result)
+
+
+@intrinsic
+def _duckdb_result_statement_type(typingctx, duckdb_result_tup_ty):
+    def codegen(context, builder: IRBuilder, signature, arguments):
+        duckdb_result_tup = arguments[0]
+        duckdb_result_tup_ty_ll = context.get_value_type(duckdb_result_ty)
+        duckdb_result_tup_stack_p = builder.alloca(duckdb_result_tup_ty_ll)
+        builder.store(duckdb_result_tup, duckdb_result_tup_stack_p)
+        func_ty_ll = FunctionType(
+            context.get_value_type(signature.return_type),
+            [duckdb_result_tup_ty_ll.as_pointer()]
+        )
+        func_p = get_or_insert_function(
+            builder.module, func_ty_ll, "duckdb_result_statement_type")
+        return builder.call(func_p, [duckdb_result_tup_stack_p])
+    return int32(duckdb_result_ty), codegen
+
+
+@cres(int32(duckdb_result_ty))
+def duckdb_result_statement_type(result):
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L974 """
+    return _duckdb_result_statement_type(result)
+
+
 @cres(signatures.get("duckdb_row_count"))
 def duckdb_row_count(duckdb_result_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_row_count """
     return _call_lib_func("duckdb_row_count", (duckdb_result_p,))
+
+
+@cres(signatures.get("duckdb_rows_changed"))
+def duckdb_rows_changed(duckdb_result_p):
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L1016 """
+    return _call_lib_func("duckdb_rows_changed", (duckdb_result_p,))
 
 
 @cres(signatures.get("duckdb_validity_row_is_valid"))
