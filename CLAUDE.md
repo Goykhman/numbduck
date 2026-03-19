@@ -69,6 +69,7 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Never merge to main locally — only merge via PR on GitHub after all Actions pass
 - Never merge local feature branches into main — main must always match upstream/main (exception: CLAUDE.md)
 - Feature branches: base off origin/main (has CLAUDE.md); upstream PR branches: base off upstream/main (no CLAUDE.md)
+- Do all coding work on the feature branch (has CLAUDE.md + fork CI), then cherry-pick to the upstream PR branch when ready
 - Always enable GitHub Actions on forked repos
 - Never assume a reviewer's comment is wrong — always verify claims against actual runtime before responding
 - Before posting PR comments, check for pending reviews with existing comments (`GET /pulls/{pr}/reviews/{id}/comments`) — never silently delete a pending review, as it destroys all bundled draft comments
