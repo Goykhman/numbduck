@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ "main" ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -16,6 +20,11 @@ jobs:
       matrix:
         python-version: [ "3.10", "3.11", "3.12", "3.13"]
         arch: ["ubuntu-latest", "ubuntu-24.04-arm", "windows-latest"]
+        numba-version: ["0.60.0", "0.64.0"]
+        exclude:
+          # numba 0.60.0 does not support Python 3.13
+          - python-version: "3.13"
+            numba-version: "0.60.0"
     runs-on: "${{ matrix.arch }}"
 
     steps:
@@ -41,6 +50,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install flake8 pytest
+        pip install "numba==${{ matrix.numba-version }}"
         pip install -e .
     - name: Lint with flake8
       run: |
