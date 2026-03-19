@@ -927,7 +927,9 @@ def test_column_logical_type():
     out_result_p = out_result.ctypes.data
     logical_type_p = ducklib.duckdb_column_logical_type(out_result_p, 0)
     assert logical_type_p != 0, "Expected valid logical type pointer"
-    # logical_type_p leaks here — duckdb_destroy_logical_type not yet bound
+    lt_buf = numpy.zeros(1, dtype=numpy.intp)
+    lt_buf[0] = logical_type_p
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
     ducklib.duckdb_destroy_result(out_result_p)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -936,7 +938,8 @@ def test_rows_changed():
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("CREATE TABLE rc_test (x INTEGER);")
-    ducklib.duckdb_query(connection_p, query_p, 0)
+    rc = ducklib.duckdb_query(connection_p, query_p, 0)
+    assert rc == ducklib.DuckDBSuccess, f"CREATE TABLE failed, rc={rc}"
     query_p = get_unicode_data_p("INSERT INTO rc_test VALUES (1), (2), (3);")
     out_result = create_duckdb_result()
     out_result_p = out_result.ctypes.data
