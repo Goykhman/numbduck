@@ -13,7 +13,6 @@ from numbduck.duckdb_utils import (
     create_duckdb_database, create_duckdb_prepared_statement,
     create_duckdb_result
 )
-from numbduck.ducklib import _duckdb_fetch_chunk
 from numbox.utils.lowlevel import _cast_int_to_void_p
 from numbduck.jit_utils import array_data_p
 
@@ -1081,7 +1080,7 @@ def jit_prepare_bind_execute():
     # fetch chunk and read back values
     result_tup = (result[0], result[1], result[2],
                   result[3], result[4], result[5])
-    chunk_p = _duckdb_fetch_chunk(result_tup)
+    chunk_p = ducklib.duckdb_fetch_chunk(result_tup)
     chunk_size = ducklib.duckdb_data_chunk_get_size(chunk_p)
 
     # col 0: int32
