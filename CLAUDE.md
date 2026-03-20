@@ -77,3 +77,7 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Never guess about things that can be verified — check the source of truth before making claims
 - Always clean `__pycache__` and numba cache (`~/.cache/numba`) before every pytest run — stale JIT artifacts cause false failures
 - Never put implementation planning details (task numbers, phase references, internal tracking) into code comments — comments must be context-independent
+- When checking PR comments, show all comments — only skip nelson2005 comments containing "fake Slim Shady" (AI-authored); any other nelson2005 comment is from the user
+- When told to "address" review feedback, implement your own recommendations — push back on items you assessed as not worth doing
+- Always show PR review comments verbatim — never summarize or paraphrase
+- Always include links to specific changed lines when responding to PR review comments
