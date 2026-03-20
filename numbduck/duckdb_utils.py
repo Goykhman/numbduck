@@ -38,6 +38,12 @@ def create_duckdb_result():
 
 
 @njit
+def create_duckdb_value():
+    """Allocate a buffer for a duckdb_value pointer-to-handle."""
+    return allocate_buffer(1)
+
+
+@njit
 def create_duckdb_vector():
     """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L395 """
     return allocate_buffer(1)
