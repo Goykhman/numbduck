@@ -13,7 +13,6 @@ from numbduck.duckdb_utils import (
     create_duckdb_database, create_duckdb_prepared_statement,
     create_duckdb_result
 )
-from numbduck.ducklib import _duckdb_fetch_chunk
 from numbox.utils.lowlevel import _cast_int_to_void_p
 from numbduck.jit_utils import array_data_p
 
@@ -896,6 +895,91 @@ def test_bind_decimal():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+# --- Result Metadata ---
+
+def test_column_name():
+    out_result, duckdb_database, duckdb_connection = aux_query_1()
+    out_result_p = out_result.ctypes.data
+    name_p = ducklib.duckdb_column_name(out_result_p, 0)
+    assert name_p != 0
+    name = ctypes.c_char_p(name_p).value.decode()
+    assert name == "i"
+    name_p = ducklib.duckdb_column_name(out_result_p, 1)
+    name = ctypes.c_char_p(name_p).value.decode()
+    assert name == "j"
+    ducklib.duckdb_destroy_result(out_result_p)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_column_type():
+    out_result, duckdb_database, duckdb_connection = aux_query_1()
+    out_result_p = out_result.ctypes.data
+    # DUCKDB_TYPE_INTEGER = 4
+    col_type = ducklib.duckdb_column_type(out_result_p, 0)
+    assert col_type == 4, f"Expected INTEGER (4), got {col_type}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_column_logical_type():
+    out_result, duckdb_database, duckdb_connection = aux_query_1()
+    out_result_p = out_result.ctypes.data
+    logical_type_p = ducklib.duckdb_column_logical_type(out_result_p, 0)
+    assert logical_type_p != 0, "Expected valid logical type pointer"
+    lt_buf = numpy.zeros(1, dtype=numpy.intp)
+    lt_buf[0] = logical_type_p
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(out_result_p)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_rows_changed():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    query_p = get_unicode_data_p("CREATE TABLE rc_test (x INTEGER);")
+    rc = ducklib.duckdb_query(connection_p, query_p, 0)
+    assert rc == ducklib.DuckDBSuccess, f"CREATE TABLE failed, rc={rc}"
+    query_p = get_unicode_data_p("INSERT INTO rc_test VALUES (1), (2), (3);")
+    out_result = create_duckdb_result()
+    out_result_p = out_result.ctypes.data
+    rc = ducklib.duckdb_query(connection_p, query_p, out_result_p)
+    assert rc == ducklib.DuckDBSuccess
+    changed = ducklib.duckdb_rows_changed(out_result_p)
+    assert changed == 3, f"Expected 3 rows changed, got {changed}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_result_error_type_on_success():
+    out_result, duckdb_database, duckdb_connection = aux_query_1()
+    out_result_p = out_result.ctypes.data
+    # DUCKDB_ERROR_INVALID = 0 (no error)
+    error_type = ducklib.duckdb_result_error_type(out_result_p)
+    assert error_type == 0, f"Expected DUCKDB_ERROR_INVALID (0), got {error_type}"
+    ducklib.duckdb_destroy_result(out_result_p)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_result_return_type():
+    out_result, duckdb_database, duckdb_connection = aux_query_1()
+    result_tup = tuple(out_result)
+    # DUCKDB_RESULT_TYPE_QUERY_RESULT = 3
+    ret_type = ducklib.duckdb_result_return_type(result_tup)
+    assert ret_type == 3, f"Expected DUCKDB_RESULT_TYPE_QUERY_RESULT (3), got {ret_type}"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_result_statement_type():
+    out_result, duckdb_database, duckdb_connection = aux_query_1()
+    result_tup = tuple(out_result)
+    # DUCKDB_STATEMENT_TYPE_SELECT = 1
+    stmt_type = ducklib.duckdb_result_statement_type(result_tup)
+    assert stmt_type == 1, f"Expected SELECT (1), got {stmt_type}"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 # --- JIT Tests ---
 # get_unicode_data_p is safe inside @njit with numbox >= 0.5.6, which
 # extracts the data pointer directly instead of going through NRT meminfo.
@@ -996,7 +1080,7 @@ def jit_prepare_bind_execute():
     # fetch chunk and read back values
     result_tup = (result[0], result[1], result[2],
                   result[3], result[4], result[5])
-    chunk_p = _duckdb_fetch_chunk(result_tup)
+    chunk_p = ducklib.duckdb_fetch_chunk(result_tup)
     chunk_size = ducklib.duckdb_data_chunk_get_size(chunk_p)
 
     # col 0: int32
