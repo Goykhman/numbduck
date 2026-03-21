@@ -44,6 +44,28 @@ def _resolve_sig(func_name):
     return func_sig
 
 
+def _build_packed_interval(builder, interval_tup):
+    """Pack (months:i32, days:i32, micros:i64) into {i64, i64}.
+
+    C struct: { int32 months, int32 days, int64 micros } = 16 bytes.
+    Pack two i32 fields into one i64 to match the C struct layout.
+    Using {i32, i32, i64} directly fails — LLVM's SysV x86-64 ABI
+    lowering drops the second i32 field when coercing to registers.
+    """
+    interval_struct = ir.LiteralStructType([_i64, _i64])
+    months = builder.extract_value(interval_tup, 0)
+    days = builder.extract_value(interval_tup, 1)
+    micros = builder.extract_value(interval_tup, 2)
+    months_zext = builder.zext(months, _i64)
+    days_zext = builder.zext(days, _i64)
+    days_shifted = builder.shl(days_zext, ir.Constant(_i64, 32))
+    packed = builder.or_(months_zext, days_shifted)
+    val = ir.Constant(interval_struct, ir.Undefined)
+    val = builder.insert_value(val, packed, 0)
+    val = builder.insert_value(val, micros, 1)
+    return val
+
+
 def _emit_byval_call(builder, context, arg, arg_ll_ty, ret_type, func_name):
     """Emit IR to pass a struct by pointer: alloca, store, call via pointer."""
     stack_p = builder.alloca(arg_ll_ty)
@@ -618,32 +640,14 @@ def duckdb_create_hugeint(val):
 @intrinsic
 def _duckdb_create_interval(typingctx, interval_tup_ty):
     def codegen(context, builder, signature, arguments):
-        interval_tup = arguments[0]
-        interval_struct = ir.LiteralStructType([_i64, _i64])
-        months = builder.extract_value(interval_tup, 0)
-        days = builder.extract_value(interval_tup, 1)
-        micros = builder.extract_value(interval_tup, 2)
-        months_zext = builder.zext(months, _i64)
-        days_zext = builder.zext(days, _i64)
-        days_shifted = builder.shl(days_zext, ir.Constant(_i64, 32))
-        packed = builder.or_(months_zext, days_shifted)
-        val = ir.Constant(interval_struct, ir.Undefined)
-        val = builder.insert_value(val, packed, 0)
-        val = builder.insert_value(val, micros, 1)
+        val = _build_packed_interval(builder, arguments[0])
+        interval_struct = val.type
+        ret_type = context.get_value_type(signature.return_type)
         if _is_win:
-            stack_p = builder.alloca(interval_struct)
-            builder.store(val, stack_p)
-            func_ty_ll = FunctionType(
-                context.get_value_type(signature.return_type),
-                [interval_struct.as_pointer()]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, "duckdb_create_interval")
-            return builder.call(func_p, [stack_p])
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [interval_struct]
-        )
+            return _emit_byval_call(
+                builder, context, val, interval_struct, ret_type,
+                "duckdb_create_interval")
+        func_ty_ll = FunctionType(ret_type, [interval_struct])
         func_p = get_or_insert_function(
             builder.module, func_ty_ll, "duckdb_create_interval")
         return builder.call(func_p, [val])
@@ -1262,24 +1266,9 @@ def duckdb_bind_uhugeint(prepared_statement_p, param_idx, val):
 def _duckdb_bind_interval(typingctx, prepared_statement_p_ty, param_idx_ty, interval_tup_ty):
     def codegen(context, builder: IRBuilder, signature, arguments):
         prepared_statement_p, param_idx, interval_tup = arguments
-        # C struct: { int32 months, int32 days, int64 micros } = 16 bytes
-        # Pack two i32 fields into one i64 to match the C struct layout.
-        # Using {i32, i32, i64} directly fails — LLVM's SysV x86-64 ABI
-        # lowering drops the second i32 field when coercing to registers.
-        interval_struct = ir.LiteralStructType([_i64, _i64])
-        months = builder.extract_value(interval_tup, 0)
-        days = builder.extract_value(interval_tup, 1)
-        micros = builder.extract_value(interval_tup, 2)
-        # Pack months (low 32) | days (high 32) into first i64
-        months_zext = builder.zext(months, _i64)
-        days_zext = builder.zext(days, _i64)
-        days_shifted = builder.shl(days_zext, ir.Constant(_i64, 32))
-        packed = builder.or_(months_zext, days_shifted)
-        val = ir.Constant(interval_struct, ir.Undefined)
-        val = builder.insert_value(val, packed, 0)
-        val = builder.insert_value(val, micros, 1)
+        val = _build_packed_interval(builder, interval_tup)
+        interval_struct = val.type
         if _is_win:
-            # Windows x64: structs >8 bytes passed by pointer
             stack_p = builder.alloca(interval_struct)
             builder.store(val, stack_p)
             func_ty_ll = FunctionType(
