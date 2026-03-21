@@ -44,6 +44,15 @@ def _resolve_sig(func_name):
     return func_sig
 
 
+def _emit_byval_call(builder, context, arg, arg_ll_ty, ret_type, func_name):
+    """Emit IR to pass a struct by pointer: alloca, store, call via pointer."""
+    stack_p = builder.alloca(arg_ll_ty)
+    builder.store(arg, stack_p)
+    func_ty_ll = FunctionType(ret_type, [arg_ll_ty.as_pointer()])
+    func_p = get_or_insert_function(builder.module, func_ty_ll, func_name)
+    return builder.call(func_p, [stack_p])
+
+
 @intrinsic(prefer_literal=True)
 def _call_lib_func_byval(typingctx, func_name_ty, arg_ty):
     """Like _call_lib_func, but allocates the arg on the stack
@@ -59,15 +68,9 @@ def _call_lib_func_byval(typingctx, func_name_ty, arg_ty):
     def codegen(context, builder, signature, arguments):
         _, arg = arguments
         arg_ll_ty = context.get_value_type(arg_ty)
-        stack_p = builder.alloca(arg_ll_ty)
-        builder.store(arg, stack_p)
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [arg_ll_ty.as_pointer()]
-        )
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, func_name)
-        return builder.call(func_p, [stack_p])
+        ret_type = context.get_value_type(signature.return_type)
+        return _emit_byval_call(
+            builder, context, arg, arg_ll_ty, ret_type, func_name)
 
     sig = func_sig.return_type(func_name_ty, arg_ty)
     return sig, codegen
@@ -78,7 +81,7 @@ def _call_lib_func_struct_in(typingctx, func_name_ty, arg_ty):
     """Like _call_lib_func, but the arg is a small struct.
 
     Struct must be ≤16 bytes for System V x86-64 by-value passing.
-    On Windows: passes via stack pointer.
+    On Windows: passes via stack pointer (degrades to byval).
     On other platforms: passes the struct directly by value.
     """
     func_name = func_name_ty.literal_value
@@ -91,20 +94,11 @@ def _call_lib_func_struct_in(typingctx, func_name_ty, arg_ty):
     def codegen(context, builder, signature, arguments):
         _, arg = arguments
         arg_ll_ty = context.get_value_type(arg_ty)
+        ret_type = context.get_value_type(signature.return_type)
         if _is_win:
-            stack_p = builder.alloca(arg_ll_ty)
-            builder.store(arg, stack_p)
-            func_ty_ll = FunctionType(
-                context.get_value_type(signature.return_type),
-                [arg_ll_ty.as_pointer()]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, func_name)
-            return builder.call(func_p, [stack_p])
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [arg_ll_ty]
-        )
+            return _emit_byval_call(
+                builder, context, arg, arg_ll_ty, ret_type, func_name)
+        func_ty_ll = FunctionType(ret_type, [arg_ll_ty])
         func_p = get_or_insert_function(
             builder.module, func_ty_ll, func_name)
         return builder.call(func_p, [arg])
