@@ -1528,3 +1528,25 @@ def test_destroy_value():
     val_p = ducklib.duckdb_create_int32(1)
     assert val_p != 0
     aux_destroy_value(val_p)
+
+
+# --- Struct size guard ---
+
+
+def test_struct_size_guard():
+    """Verify the size computation used by _call_lib_func_struct_in/out."""
+    from numba.core.types import UniTuple, Tuple, int32, int64, uint64, uint8
+
+    # 16-byte structs (should pass the ≤16 byte guard)
+    assert sum(t.bitwidth for t in UniTuple(int64, 2)) // 8 == 16
+    assert sum(t.bitwidth for t in UniTuple(uint64, 2)) // 8 == 16
+    assert sum(t.bitwidth for t in Tuple((uint64, int64))) // 8 == 16
+
+    # 8-byte struct
+    assert sum(t.bitwidth for t in UniTuple(int32, 2)) // 8 == 8
+
+    # Mixed-width tuple
+    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint64, int64))) // 8 == 18
+
+    # 24-byte struct (should fail the guard)
+    assert sum(t.bitwidth for t in UniTuple(int64, 3)) // 8 == 24

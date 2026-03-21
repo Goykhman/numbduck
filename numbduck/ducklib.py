@@ -78,11 +78,16 @@ def _call_lib_func_byval(typingctx, func_name_ty, args_ty):
 def _call_lib_func_struct_in(typingctx, func_name_ty, args_ty):
     """Like _call_lib_func, but the first arg is a small struct.
 
+    Struct must be ≤16 bytes for System V x86-64 by-value passing.
     On Windows: passes via stack pointer.
     On other platforms: passes the struct directly by value.
     """
     func_name = func_name_ty.literal_value
     func_sig = _resolve_sig(func_name)
+    struct_bytes = sum(t.bitwidth for t in args_ty[0]) // 8
+    assert struct_bytes <= 16, (
+        f"struct too large for by-value passing ({struct_bytes} bytes > 16)"
+    )
 
     def codegen(context, builder, signature, arguments):
         _, args = arguments
@@ -114,11 +119,17 @@ def _call_lib_func_struct_in(typingctx, func_name_ty, args_ty):
 def _call_lib_func_struct_out(typingctx, func_name_ty, args_ty):
     """Like _call_lib_func, but the return value is a struct.
 
+    Return struct must be ≤16 bytes for System V x86-64 by-value return.
     On Windows: uses sret (hidden first pointer arg, void return).
     On other platforms: returns the struct directly by value.
     """
     func_name = func_name_ty.literal_value
     func_sig = _resolve_sig(func_name)
+    ret_ty = func_sig.return_type
+    struct_bytes = sum(t.bitwidth for t in ret_ty) // 8
+    assert struct_bytes <= 16, (
+        f"return struct too large for by-value return ({struct_bytes} bytes > 16)"
+    )
 
     def codegen(context, builder, signature, arguments):
         _, args = arguments
