@@ -51,6 +51,7 @@ def _build_packed_interval(builder, interval_tup):
     Pack two i32 fields into one i64 to match the C struct layout.
     Using {i32, i32, i64} directly fails — LLVM's SysV x86-64 ABI
     lowering drops the second i32 field when coercing to registers.
+    See: https://github.com/numba/llvmlite/issues/300#issuecomment-327235846
     """
     interval_struct = ir.LiteralStructType([_i64, _i64])
     months = builder.extract_value(interval_tup, 0)
@@ -613,6 +614,14 @@ def duckdb_create_date(val):
 
 @intrinsic
 def _duckdb_create_decimal(typingctx, decimal_tup_ty):
+    """Custom intrinsic for duckdb_create_decimal.
+
+    duckdb_decimal is 24 bytes ({uint8, uint8, uint64, int64}) — too large
+    for register passing on any platform. Always passed by pointer.
+    On SysV x86-64, byval + optnone are needed to prevent LLVM from
+    optimizing away the stack copy before the callee reads it.
+    See: https://github.com/numba/llvmlite/issues/300#issuecomment-327235846
+    """
     def codegen(context, builder, signature, arguments):
         decimal_tup = arguments[0]
         decimal_tup_ll_ty = decimal_tup.type
@@ -646,6 +655,12 @@ def duckdb_create_hugeint(val):
 
 @intrinsic
 def _duckdb_create_interval(typingctx, interval_tup_ty):
+    """Custom intrinsic for duckdb_create_interval.
+
+    Uses _build_packed_interval to repack the 3-field interval into {i64, i64}.
+    On Windows: passes by pointer (byval). On SysV x86-64: passes by value
+    (≤16 bytes fits in two registers).
+    """
     def codegen(context, builder, signature, arguments):
         val = _build_packed_interval(builder, arguments[0])
         interval_struct = val.type
@@ -729,6 +744,11 @@ def duckdb_create_uuid(val):
 
 @intrinsic
 def _duckdb_create_varint(typingctx, varint_tup_ty):
+    """Custom intrinsic for duckdb_create_varint.
+
+    duckdb_varint is 24 bytes ({intp, uint64, int8}) — same >16-byte
+    case as decimal. See _duckdb_create_decimal docstring for details.
+    """
     def codegen(context, builder, signature, arguments):
         varint_tup = arguments[0]
         varint_ll_ty = context.get_value_type(duckdb_varint_ty)
@@ -1271,6 +1291,11 @@ def duckdb_bind_uhugeint(prepared_statement_p, param_idx, val):
 
 @intrinsic
 def _duckdb_bind_interval(typingctx, prepared_statement_p_ty, param_idx_ty, interval_tup_ty):
+    """Custom intrinsic for duckdb_bind_interval.
+
+    Same interval packing as _duckdb_create_interval.
+    See _build_packed_interval docstring for details.
+    """
     def codegen(context, builder: IRBuilder, signature, arguments):
         prepared_statement_p, param_idx, interval_tup = arguments
         val = _build_packed_interval(builder, interval_tup)
@@ -1304,6 +1329,12 @@ def duckdb_bind_interval(prepared_statement_p, param_idx, val):
 
 @intrinsic
 def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decimal_tup_ty):
+    """Custom intrinsic for duckdb_bind_decimal.
+
+    duckdb_decimal is 24 bytes — always passed by pointer. On SysV x86-64,
+    byval + optnone prevent LLVM from optimizing away the stack copy.
+    See: https://github.com/numba/llvmlite/issues/300#issuecomment-327235846
+    """
     def codegen(context, builder: IRBuilder, signature, arguments):
         prepared_statement_p, param_idx, decimal_tup = arguments
         # C struct: { uint8 width, uint8 scale, pad[6], {uint64 lower, int64 upper} }
