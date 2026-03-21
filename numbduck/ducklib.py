@@ -105,6 +105,11 @@ def _call_lib_func_struct_in(typingctx, func_name_ty, arg_ty):
     Struct must be ≤16 bytes for System V x86-64 by-value passing.
     On Windows: passes via stack pointer (degrades to byval).
     On other platforms: passes the struct directly by value.
+
+    LLVM's JIT treats ABI lowering as a frontend responsibility — it
+    won't insert the right calling convention for struct args/returns.
+    See: https://github.com/numba/llvmlite/issues/300#issuecomment-327235846
+         https://github.com/llvm/llvm-project/issues/85417
     """
     func_name = func_name_ty.literal_value
     func_sig = _resolve_sig(func_name)
@@ -136,6 +141,8 @@ def _call_lib_func_struct_out(typingctx, func_name_ty, arg_ty):
     Return struct must be ≤16 bytes for System V x86-64 by-value return.
     On Windows: uses sret (hidden first pointer arg, void return).
     On other platforms: returns the struct directly by value.
+
+    See _call_lib_func_struct_in docstring for ABI references.
     """
     func_name = func_name_ty.literal_value
     func_sig = _resolve_sig(func_name)
