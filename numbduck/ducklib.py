@@ -45,8 +45,8 @@ def _resolve_sig(func_name):
 
 
 @intrinsic(prefer_literal=True)
-def _call_lib_func_byval(typingctx, func_name_ty, args_ty):
-    """Like _call_lib_func, but allocates the first arg on the stack
+def _call_lib_func_byval(typingctx, func_name_ty, arg_ty):
+    """Like _call_lib_func, but allocates the arg on the stack
     and passes a pointer to that stack slot.
 
     Used for C functions whose parameter is a pointer to a struct
@@ -57,9 +57,8 @@ def _call_lib_func_byval(typingctx, func_name_ty, args_ty):
     func_sig = _resolve_sig(func_name)
 
     def codegen(context, builder, signature, arguments):
-        _, args = arguments
-        arg = builder.extract_value(args, 0)
-        arg_ll_ty = context.get_value_type(args_ty[0])
+        _, arg = arguments
+        arg_ll_ty = context.get_value_type(arg_ty)
         stack_p = builder.alloca(arg_ll_ty)
         builder.store(arg, stack_p)
         func_ty_ll = FunctionType(
@@ -70,13 +69,13 @@ def _call_lib_func_byval(typingctx, func_name_ty, args_ty):
             builder.module, func_ty_ll, func_name)
         return builder.call(func_p, [stack_p])
 
-    sig = func_sig.return_type(func_name_ty, args_ty)
+    sig = func_sig.return_type(func_name_ty, arg_ty)
     return sig, codegen
 
 
 @intrinsic(prefer_literal=True)
-def _call_lib_func_struct_in(typingctx, func_name_ty, args_ty):
-    """Like _call_lib_func, but the first arg is a small struct.
+def _call_lib_func_struct_in(typingctx, func_name_ty, arg_ty):
+    """Like _call_lib_func, but the arg is a small struct.
 
     Struct must be ≤16 bytes for System V x86-64 by-value passing.
     On Windows: passes via stack pointer.
@@ -84,15 +83,14 @@ def _call_lib_func_struct_in(typingctx, func_name_ty, args_ty):
     """
     func_name = func_name_ty.literal_value
     func_sig = _resolve_sig(func_name)
-    struct_bytes = sum(t.bitwidth for t in args_ty[0]) / 8
+    struct_bytes = sum(t.bitwidth for t in arg_ty) / 8
     assert struct_bytes <= 16, (
         f"struct too large for by-value passing ({struct_bytes} bytes > 16)"
     )
 
     def codegen(context, builder, signature, arguments):
-        _, args = arguments
-        arg = builder.extract_value(args, 0)
-        arg_ll_ty = context.get_value_type(args_ty[0])
+        _, arg = arguments
+        arg_ll_ty = context.get_value_type(arg_ty)
         if _is_win:
             stack_p = builder.alloca(arg_ll_ty)
             builder.store(arg, stack_p)
@@ -111,12 +109,12 @@ def _call_lib_func_struct_in(typingctx, func_name_ty, args_ty):
             builder.module, func_ty_ll, func_name)
         return builder.call(func_p, [arg])
 
-    sig = func_sig.return_type(func_name_ty, args_ty)
+    sig = func_sig.return_type(func_name_ty, arg_ty)
     return sig, codegen
 
 
 @intrinsic(prefer_literal=True)
-def _call_lib_func_struct_out(typingctx, func_name_ty, args_ty):
+def _call_lib_func_struct_out(typingctx, func_name_ty, arg_ty):
     """Like _call_lib_func, but the return value is a struct.
 
     Return struct must be ≤16 bytes for System V x86-64 by-value return.
@@ -132,8 +130,7 @@ def _call_lib_func_struct_out(typingctx, func_name_ty, args_ty):
     )
 
     def codegen(context, builder, signature, arguments):
-        _, args = arguments
-        arg = builder.extract_value(args, 0)
+        _, arg = arguments
         ret_ll_ty = context.get_value_type(signature.return_type)
         if _is_win:
             sret_p = builder.alloca(ret_ll_ty)
@@ -151,7 +148,7 @@ def _call_lib_func_struct_out(typingctx, func_name_ty, args_ty):
             builder.module, func_ty_ll, func_name)
         return builder.call(func_p, [arg])
 
-    sig = func_sig.return_type(func_name_ty, args_ty)
+    sig = func_sig.return_type(func_name_ty, arg_ty)
     return sig, codegen
 
 
@@ -576,7 +573,7 @@ def duckdb_connect(duckdb_database_p, duckdb_connection_pp):
 @cres(signatures.get("duckdb_create_bit"))
 def duckdb_create_bit(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_bit """
-    return _call_lib_func_struct_in("duckdb_create_bit", (val,))
+    return _call_lib_func_struct_in("duckdb_create_bit", val)
 
 
 @cres(signatures.get("duckdb_create_blob"))
@@ -621,7 +618,7 @@ def duckdb_create_decimal(val):
 @cres(signatures.get("duckdb_create_hugeint"))
 def duckdb_create_hugeint(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_hugeint """
-    return _call_lib_func_struct_in("duckdb_create_hugeint", (val,))
+    return _call_lib_func_struct_in("duckdb_create_hugeint", val)
 
 
 @intrinsic
@@ -716,13 +713,13 @@ def duckdb_create_timestamp_tz(val):
 @cres(signatures.get("duckdb_create_uhugeint"))
 def duckdb_create_uhugeint(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_uhugeint """
-    return _call_lib_func_struct_in("duckdb_create_uhugeint", (val,))
+    return _call_lib_func_struct_in("duckdb_create_uhugeint", val)
 
 
 @cres(signatures.get("duckdb_create_uuid"))
 def duckdb_create_uuid(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_uuid """
-    return _call_lib_func_struct_in("duckdb_create_uuid", (val,))
+    return _call_lib_func_struct_in("duckdb_create_uuid", val)
 
 
 @intrinsic
@@ -930,7 +927,7 @@ def duckdb_is_null_value(value_p):
 @cres(signatures.get("duckdb_fetch_chunk"))
 def duckdb_fetch_chunk(duckdb_result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_fetch_chunk """
-    return _call_lib_func_byval("duckdb_fetch_chunk", (duckdb_result,))
+    return _call_lib_func_byval("duckdb_fetch_chunk", duckdb_result)
 
 
 @cres(signatures.get("duckdb_free"))
@@ -942,13 +939,13 @@ def duckdb_free(ptr):
 @cres(signatures.get("duckdb_get_bit"))
 def duckdb_get_bit(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_bit """
-    return _call_lib_func_struct_out("duckdb_get_bit", (val_p,))
+    return _call_lib_func_struct_out("duckdb_get_bit", val_p)
 
 
 @cres(signatures.get("duckdb_get_blob"))
 def duckdb_get_blob(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_blob """
-    return _call_lib_func_struct_out("duckdb_get_blob", (val_p,))
+    return _call_lib_func_struct_out("duckdb_get_blob", val_p)
 
 
 @cres(signatures.get("duckdb_get_date"))
@@ -984,7 +981,7 @@ def duckdb_get_decimal(val_p):
 @cres(signatures.get("duckdb_get_hugeint"))
 def duckdb_get_hugeint(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_hugeint """
-    return _call_lib_func_struct_out("duckdb_get_hugeint", (val_p,))
+    return _call_lib_func_struct_out("duckdb_get_hugeint", val_p)
 
 
 @intrinsic
@@ -1073,13 +1070,13 @@ def duckdb_get_timestamp_tz(val_p):
 @cres(signatures.get("duckdb_get_uhugeint"))
 def duckdb_get_uhugeint(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_uhugeint """
-    return _call_lib_func_struct_out("duckdb_get_uhugeint", (val_p,))
+    return _call_lib_func_struct_out("duckdb_get_uhugeint", val_p)
 
 
 @cres(signatures.get("duckdb_get_uuid"))
 def duckdb_get_uuid(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_uuid """
-    return _call_lib_func_struct_out("duckdb_get_uuid", (val_p,))
+    return _call_lib_func_struct_out("duckdb_get_uuid", val_p)
 
 
 @intrinsic
@@ -1151,13 +1148,13 @@ def duckdb_result_error_type(duckdb_result_p):
 @cres(signatures.get("duckdb_result_return_type"))
 def duckdb_result_return_type(result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_return_type """
-    return _call_lib_func_byval("duckdb_result_return_type", (result,))
+    return _call_lib_func_byval("duckdb_result_return_type", result)
 
 
 @cres(signatures.get("duckdb_result_statement_type"))
 def duckdb_result_statement_type(result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_statement_type """
-    return _call_lib_func_byval("duckdb_result_statement_type", (result,))
+    return _call_lib_func_byval("duckdb_result_statement_type", result)
 
 
 @cres(signatures.get("duckdb_row_count"))
