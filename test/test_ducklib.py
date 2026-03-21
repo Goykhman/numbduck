@@ -1538,15 +1538,17 @@ def test_struct_size_guard():
     from numba.core.types import UniTuple, Tuple, int32, int64, uint64, uint8
 
     # 16-byte structs (should pass the ≤16 byte guard)
-    assert sum(t.bitwidth for t in UniTuple(int64, 2)) // 8 == 16
-    assert sum(t.bitwidth for t in UniTuple(uint64, 2)) // 8 == 16
-    assert sum(t.bitwidth for t in Tuple((uint64, int64))) // 8 == 16
+    assert sum(t.bitwidth for t in UniTuple(int64, 2)) / 8 == 16
+    assert sum(t.bitwidth for t in UniTuple(uint64, 2)) / 8 == 16
+    assert sum(t.bitwidth for t in Tuple((uint64, int64))) / 8 == 16
 
     # 8-byte struct
-    assert sum(t.bitwidth for t in UniTuple(int32, 2)) // 8 == 8
+    assert sum(t.bitwidth for t in UniTuple(int32, 2)) / 8 == 8
 
-    # Mixed-width tuple
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint64, int64))) // 8 == 18
+    # Mixed-width tuples
+    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint64, int64))) / 8 == 18
+    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 == 19
+    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 > 16
 
     # 24-byte struct (should fail the guard)
-    assert sum(t.bitwidth for t in UniTuple(int64, 3)) // 8 == 24
+    assert sum(t.bitwidth for t in UniTuple(int64, 3)) / 8 == 24

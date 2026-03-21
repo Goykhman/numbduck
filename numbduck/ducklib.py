@@ -84,7 +84,7 @@ def _call_lib_func_struct_in(typingctx, func_name_ty, args_ty):
     """
     func_name = func_name_ty.literal_value
     func_sig = _resolve_sig(func_name)
-    struct_bytes = sum(t.bitwidth for t in args_ty[0]) // 8
+    struct_bytes = sum(t.bitwidth for t in args_ty[0]) / 8
     assert struct_bytes <= 16, (
         f"struct too large for by-value passing ({struct_bytes} bytes > 16)"
     )
@@ -126,7 +126,7 @@ def _call_lib_func_struct_out(typingctx, func_name_ty, args_ty):
     func_name = func_name_ty.literal_value
     func_sig = _resolve_sig(func_name)
     ret_ty = func_sig.return_type
-    struct_bytes = sum(t.bitwidth for t in ret_ty) // 8
+    struct_bytes = sum(t.bitwidth for t in ret_ty) / 8
     assert struct_bytes <= 16, (
         f"return struct too large for by-value return ({struct_bytes} bytes > 16)"
     )
