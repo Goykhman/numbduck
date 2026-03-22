@@ -72,7 +72,7 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Commit messages must not mention AI, Claude, Anthropic, or any AI tooling — only attribute to the user
 - Keep all memories in both MEMORY.md and the project CLAUDE.md (CLAUDE.md is in git and survives OS reinstalls)
 - Environment details go in MEMORY.md only (may change between OS installs)
-- Always exclude CLAUDE.md and .github/workflows/numbduck_ci.yml from upstream PRs (use a dedicated branch based on upstream/main)
+- Always exclude CLAUDE.md, .github/workflows/numbduck_ci.yml, and docs/plans/ from upstream PRs (use a dedicated branch based on upstream/main)
 - Always use a feature branch — never commit directly to main
 - Never merge to main locally — only merge via PR on GitHub after all Actions pass
 - Never merge local feature branches into main — main must always match upstream/main (exception: CLAUDE.md)
@@ -95,5 +95,7 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - **main** is synced with upstream/main (includes merged PR #13)
 - **PR #13** (Value Interface) — merged 2026-03-22. Added value interface bindings with struct-by-value support, ABI-aware intrinsics, and integration tests
 - **Completed PRs**: #11 (prepared statements), #12 (logical type + enum), #13 (value interface)
-- **Remote branches to clean up**: `value-interface` and `upstream-value-interface` on origin — branch protection rules prevented deletion via CLI, need manual cleanup via GitHub UI
-- **No active feature branches**
+- **Remote branches to clean up**: `abi-reproducer`, `bind-types`, `fork-only-updates`, `jit-prepared-statements`, `result-metadata`, `upstream-bind-types`, `upstream-result-metadata`, `upstream-value-interface`, `value-interface` — repository rulesets prevent CLI deletion, need manual cleanup via GitHub UI (https://github.com/nelson2005/numbduck/branches)
+- **No active feature branches** (local branches cleaned up)
+- **Implementation plan**: `docs/plans/2026-03-15-complete-api-plan.md` — fork-only file, excluded from upstream PRs
+- **Next phase**: Phase 4 (Logical Type Interface) — Tasks 19-23
