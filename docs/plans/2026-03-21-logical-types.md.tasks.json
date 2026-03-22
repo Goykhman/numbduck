@@ -1,14 +1,14 @@
 {
   "planPath": "docs/plans/2026-03-21-logical-types.md",
   "tasks": [
-    {"id": 1, "subject": "Task 1: Create feature branch", "status": "pending", "model": "sonnet"},
-    {"id": 2, "subject": "Task 2: Add logical type create signatures and wrappers (8 functions)", "status": "pending", "blockedBy": [1], "model": "sonnet"},
-    {"id": 3, "subject": "Task 3: Add logical type inspect signatures and wrappers (20 functions)", "status": "pending", "blockedBy": [2], "model": "sonnet"},
-    {"id": 4, "subject": "Task 4: Add tests for basic and decimal logical types", "status": "pending", "blockedBy": [3], "model": "sonnet"},
-    {"id": 5, "subject": "Task 5: Add tests for list, array, and map logical types", "status": "pending", "blockedBy": [3], "model": "sonnet"},
-    {"id": 6, "subject": "Task 6: Add tests for struct, union, and enum logical types", "status": "pending", "blockedBy": [3], "model": "sonnet"},
-    {"id": 7, "subject": "Task 7: Run full suite, lint, push", "status": "pending", "blockedBy": [4, 5, 6], "model": "sonnet"},
-    {"id": 8, "subject": "Task 8: Create upstream PR branch and PR", "status": "pending", "blockedBy": [7], "model": "sonnet"}
+    {"id": 1, "subject": "Task 1: Create feature branch", "status": "completed", "model": "sonnet"},
+    {"id": 2, "subject": "Task 2: Add logical type create signatures and wrappers (8 functions)", "status": "completed", "blockedBy": [1], "model": "sonnet"},
+    {"id": 3, "subject": "Task 3: Add logical type inspect signatures and wrappers (20 functions)", "status": "completed", "blockedBy": [2], "model": "sonnet"},
+    {"id": 4, "subject": "Task 4: Add tests for basic and decimal logical types", "status": "completed", "blockedBy": [3], "model": "sonnet"},
+    {"id": 5, "subject": "Task 5: Add tests for list, array, and map logical types", "status": "completed", "blockedBy": [3], "model": "sonnet"},
+    {"id": 6, "subject": "Task 6: Add tests for struct, union, and enum logical types", "status": "completed", "blockedBy": [3], "model": "sonnet"},
+    {"id": 7, "subject": "Task 7: Run full suite, lint, push", "status": "completed", "blockedBy": [4, 5, 6], "model": "sonnet"},
+    {"id": 8, "subject": "Task 8: Create upstream PR branch and PR", "status": "completed", "blockedBy": [7], "model": "sonnet"}
   ],
-  "lastUpdated": "2026-03-21T00:00:00Z"
+  "lastUpdated": "2026-03-22T00:00:00Z"
 }

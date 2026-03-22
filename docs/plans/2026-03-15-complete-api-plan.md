@@ -46,8 +46,8 @@
 - **Phase 3:** MERGED upstream (PR #13)
   - Task 17 container tests were deferred — segfault when combining `duckdb_column_logical_type` with container creators in JIT. Bindings compile; issue is test-level interaction with logical type handles.
   - **Discovery:** `duckdb_get_value_type` returns the same handle as the input value for scalar types — do NOT destroy both (double-free).
-- **Phase 4:** Not started (Task 21 `duckdb_destroy_logical_type` already done in Phase 2)
-- **Phase 5:** Not started
+- **Phase 4:** MERGED upstream (PR #14)
+- **Phase 5:** upstream PR #15 open
 
 ---
 
