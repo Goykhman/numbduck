@@ -1785,3 +1785,18 @@ def test_create_set_destroy_config():
     rc = ducklib.duckdb_set_config(config_p, name_p, val_p)
     assert rc == ducklib.DuckDBSuccess
     ducklib.duckdb_destroy_config(config_pp)
+    assert config[0] == 0, f"Expected null after destroy, got {config[0]}"
+
+
+def test_get_config_flag():
+    name_buf = numpy.zeros(1, dtype=numpy.intp)
+    desc_buf = numpy.zeros(1, dtype=numpy.intp)
+    rc = ducklib.duckdb_get_config_flag(
+        0, name_buf.ctypes.data, desc_buf.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    name_p = int(name_buf[0])
+    desc_p = int(desc_buf[0])
+    assert name_p != 0
+    assert desc_p != 0
+    name = ctypes.c_char_p(name_p).value.decode()
+    assert len(name) > 0
