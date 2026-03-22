@@ -1604,3 +1604,61 @@ def test_logical_type_alias():
     ducklib.duckdb_free(alias_p)
     buf = numpy.array([type_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+
+def test_create_list_type():
+    DUCKDB_TYPE_LIST = 24
+    DUCKDB_TYPE_INTEGER = 4
+    child_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    assert child_p != 0
+    list_p = ducklib.duckdb_create_list_type(child_p)
+    assert list_p != 0
+    type_id = ducklib.duckdb_get_type_id(list_p)
+    assert type_id == DUCKDB_TYPE_LIST
+    child_back_p = ducklib.duckdb_list_type_child_type(list_p)
+    assert child_back_p != 0
+    child_type_id = ducklib.duckdb_get_type_id(child_back_p)
+    assert child_type_id == DUCKDB_TYPE_INTEGER
+    for p in [child_back_p, list_p, child_p]:
+        buf = numpy.array([p], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+
+def test_create_array_type():
+    DUCKDB_TYPE_ARRAY = 33
+    DUCKDB_TYPE_INTEGER = 4
+    child_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    assert child_p != 0
+    array_p = ducklib.duckdb_create_array_type(child_p, 5)
+    assert array_p != 0
+    type_id = ducklib.duckdb_get_type_id(array_p)
+    assert type_id == DUCKDB_TYPE_ARRAY
+    size = ducklib.duckdb_array_type_array_size(array_p)
+    assert size == 5
+    child_back_p = ducklib.duckdb_array_type_child_type(array_p)
+    assert child_back_p != 0
+    child_type_id = ducklib.duckdb_get_type_id(child_back_p)
+    assert child_type_id == DUCKDB_TYPE_INTEGER
+    for p in [child_back_p, array_p, child_p]:
+        buf = numpy.array([p], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+
+def test_create_map_type():
+    DUCKDB_TYPE_MAP = 26
+    DUCKDB_TYPE_INTEGER = 4
+    DUCKDB_TYPE_VARCHAR = 17
+    key_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    val_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
+    assert key_p != 0 and val_p != 0
+    map_p = ducklib.duckdb_create_map_type(key_p, val_p)
+    assert map_p != 0
+    type_id = ducklib.duckdb_get_type_id(map_p)
+    assert type_id == DUCKDB_TYPE_MAP
+    key_back_p = ducklib.duckdb_map_type_key_type(map_p)
+    val_back_p = ducklib.duckdb_map_type_value_type(map_p)
+    assert ducklib.duckdb_get_type_id(key_back_p) == DUCKDB_TYPE_INTEGER
+    assert ducklib.duckdb_get_type_id(val_back_p) == DUCKDB_TYPE_VARCHAR
+    for p in [val_back_p, key_back_p, map_p, val_p, key_p]:
+        buf = numpy.array([p], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
