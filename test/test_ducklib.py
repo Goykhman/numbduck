@@ -1552,3 +1552,55 @@ def test_struct_size_guard():
 
     # 24-byte struct (should fail the guard)
     assert sum(t.bitwidth for t in UniTuple(int64, 3)) / 8 == 24
+
+
+def test_create_logical_type_integer():
+    DUCKDB_TYPE_INTEGER = 4
+    type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    assert type_p != 0
+    type_id = ducklib.duckdb_get_type_id(type_p)
+    assert type_id == DUCKDB_TYPE_INTEGER
+    buf = numpy.array([type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+
+def test_create_logical_type_varchar():
+    DUCKDB_TYPE_VARCHAR = 17
+    type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
+    assert type_p != 0
+    type_id = ducklib.duckdb_get_type_id(type_p)
+    assert type_id == DUCKDB_TYPE_VARCHAR
+    buf = numpy.array([type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+
+def test_create_decimal_type():
+    DUCKDB_TYPE_DECIMAL = 19
+    type_p = ducklib.duckdb_create_decimal_type(10, 2)
+    assert type_p != 0
+    type_id = ducklib.duckdb_get_type_id(type_p)
+    assert type_id == DUCKDB_TYPE_DECIMAL
+    assert ducklib.duckdb_decimal_width(type_p) == 10
+    assert ducklib.duckdb_decimal_scale(type_p) == 2
+    internal_type = ducklib.duckdb_decimal_internal_type(type_p)
+    assert internal_type != 0
+    buf = numpy.array([type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+
+def test_logical_type_alias():
+    DUCKDB_TYPE_INTEGER = 4
+    type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    assert type_p != 0
+    alias_p = ducklib.duckdb_logical_type_get_alias(type_p)
+    assert alias_p == 0  # no alias set yet
+    alias_bytes = ctypes.c_char_p(b"my_int")
+    alias_c_p = ctypes.c_void_p.from_buffer(alias_bytes).value
+    ducklib.duckdb_logical_type_set_alias(type_p, alias_c_p)
+    alias_p = ducklib.duckdb_logical_type_get_alias(type_p)
+    assert alias_p != 0
+    alias_str = ctypes.c_char_p(alias_p).value.decode()
+    assert alias_str == "my_int"
+    ducklib.duckdb_free(alias_p)
+    buf = numpy.array([type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
