@@ -214,9 +214,12 @@ signatures["duckdb_create_timestamp_ns"] = intp(int64)
 signatures["duckdb_create_timestamp_s"] = intp(int64)
 signatures["duckdb_create_timestamp_tz"] = intp(int64)
 signatures["duckdb_connect"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_create_array_type"] = intp(intp, uint64)
 signatures["duckdb_create_array_value"] = intp(intp, intp, uint64)
 signatures["duckdb_create_bool"] = intp(int8)
+signatures["duckdb_create_decimal_type"] = intp(uint8, uint8)
 signatures["duckdb_create_double"] = intp(float64)
+signatures["duckdb_create_enum_type"] = intp(intp, uint64)
 signatures["duckdb_create_enum_value"] = intp(intp, uint64)
 signatures["duckdb_create_hugeint"] = intp(duckdb_hugeint_ty)
 signatures["duckdb_create_float"] = intp(float32)
@@ -224,15 +227,20 @@ signatures["duckdb_create_int8"] = intp(int8)
 signatures["duckdb_create_int16"] = intp(int16)
 signatures["duckdb_create_int32"] = intp(int32)
 signatures["duckdb_create_int64"] = intp(int64)
+signatures["duckdb_create_list_type"] = intp(intp)
 signatures["duckdb_create_list_value"] = intp(intp, intp, uint64)
+signatures["duckdb_create_logical_type"] = intp(int32)
+signatures["duckdb_create_map_type"] = intp(intp, intp)
 signatures["duckdb_create_map_value"] = intp(intp, intp, intp, uint64)
 signatures["duckdb_create_null_value"] = intp()
+signatures["duckdb_create_struct_type"] = intp(intp, intp, uint64)
 signatures["duckdb_create_struct_value"] = intp(intp, intp)
 signatures["duckdb_create_uhugeint"] = intp(duckdb_uhugeint_ty)
 signatures["duckdb_create_uint8"] = intp(uint8)
 signatures["duckdb_create_uint16"] = intp(uint16)
 signatures["duckdb_create_uint32"] = intp(uint32)
 signatures["duckdb_create_uint64"] = intp(uint64)
+signatures["duckdb_create_union_type"] = intp(intp, intp, uint64)
 signatures["duckdb_create_union_value"] = intp(intp, uint64, intp)
 signatures["duckdb_create_uuid"] = intp(duckdb_uhugeint_ty)
 signatures["duckdb_create_varchar"] = intp(intp)
@@ -456,6 +464,12 @@ def duckdb_column_type(duckdb_result_p, col):
     return _call_lib_func("duckdb_column_type", (duckdb_result_p, col))
 
 
+@cres(signatures.get("duckdb_create_array_type"))
+def duckdb_create_array_type(type_p, array_size):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_array_type """
+    return _call_lib_func("duckdb_create_array_type", (type_p, array_size))
+
+
 @cres(signatures.get("duckdb_create_array_value"))
 def duckdb_create_array_value(type_p, values_p, value_count):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_array_value """
@@ -468,10 +482,22 @@ def duckdb_create_bool(input):
     return _call_lib_func("duckdb_create_bool", (input,))
 
 
+@cres(signatures.get("duckdb_create_decimal_type"))
+def duckdb_create_decimal_type(width, scale):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_decimal_type """
+    return _call_lib_func("duckdb_create_decimal_type", (width, scale))
+
+
 @cres(signatures.get("duckdb_create_double"))
 def duckdb_create_double(input):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_double """
     return _call_lib_func("duckdb_create_double", (input,))
+
+
+@cres(signatures.get("duckdb_create_enum_type"))
+def duckdb_create_enum_type(member_names_p, member_count):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_enum_type """
+    return _call_lib_func("duckdb_create_enum_type", (member_names_p, member_count))
 
 
 @cres(signatures.get("duckdb_create_enum_value"))
@@ -510,10 +536,28 @@ def duckdb_create_int64(input):
     return _call_lib_func("duckdb_create_int64", (input,))
 
 
+@cres(signatures.get("duckdb_create_list_type"))
+def duckdb_create_list_type(type_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_list_type """
+    return _call_lib_func("duckdb_create_list_type", (type_p,))
+
+
 @cres(signatures.get("duckdb_create_list_value"))
 def duckdb_create_list_value(type_p, values_p, value_count):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_list_value """
     return _call_lib_func("duckdb_create_list_value", (type_p, values_p, value_count))
+
+
+@cres(signatures.get("duckdb_create_logical_type"))
+def duckdb_create_logical_type(type_id):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_logical_type """
+    return _call_lib_func("duckdb_create_logical_type", (type_id,))
+
+
+@cres(signatures.get("duckdb_create_map_type"))
+def duckdb_create_map_type(key_type_p, value_type_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_map_type """
+    return _call_lib_func("duckdb_create_map_type", (key_type_p, value_type_p))
 
 
 @cres(signatures.get("duckdb_create_map_value"))
@@ -526,6 +570,12 @@ def duckdb_create_map_value(map_type_p, keys_p, values_p, entry_count):
 def duckdb_create_null_value():
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_null_value """
     return _call_lib_func("duckdb_create_null_value", ())
+
+
+@cres(signatures.get("duckdb_create_struct_type"))
+def duckdb_create_struct_type(member_types_p, member_names_p, member_count):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_struct_type """
+    return _call_lib_func("duckdb_create_struct_type", (member_types_p, member_names_p, member_count))
 
 
 @cres(signatures.get("duckdb_create_struct_value"))
@@ -556,6 +606,12 @@ def duckdb_create_uint32(input):
 def duckdb_create_uint64(input):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_uint64 """
     return _call_lib_func("duckdb_create_uint64", (input,))
+
+
+@cres(signatures.get("duckdb_create_union_type"))
+def duckdb_create_union_type(member_types_p, member_names_p, member_count):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_union_type """
+    return _call_lib_func("duckdb_create_union_type", (member_types_p, member_names_p, member_count))
 
 
 @cres(signatures.get("duckdb_create_union_value"))
