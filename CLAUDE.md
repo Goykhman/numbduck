@@ -92,10 +92,10 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 
 ## Project Status
 
-- **main** is synced with upstream/main (includes merged PR #13)
-- **PR #13** (Value Interface) — merged 2026-03-22. Added value interface bindings with struct-by-value support, ABI-aware intrinsics, and integration tests
-- **Completed PRs**: #11 (prepared statements), #12 (logical type + enum), #13 (value interface)
-- **Remote branches to clean up**: `abi-reproducer`, `bind-types`, `fork-only-updates`, `jit-prepared-statements`, `result-metadata`, `upstream-bind-types`, `upstream-result-metadata`, `upstream-value-interface`, `value-interface` — repository rulesets prevent CLI deletion, need manual cleanup via GitHub UI (https://github.com/nelson2005/numbduck/branches)
-- **No active feature branches** (local branches cleaned up)
+- **main** is synced with upstream/main (includes merged PR #14)
+- **Completed PRs**: #11 (prepared statements), #12 (logical type + enum), #13 (value interface), #14 (logical type interface)
+- **Phase 5**: upstream PR Goykhman/numbduck#15 open — configuration (5 bindings, 3 tests)
+- **Active branches**: `configuration` (fork PR #16), `upstream-configuration` (upstream PR #15)
+- **Remote branches to clean up**: `abi-reproducer`, `bind-types`, `fork-only-updates`, `jit-prepared-statements`, `logical-types`, `result-metadata`, `upstream-bind-types`, `upstream-logical-types`, `upstream-result-metadata`, `upstream-value-interface`, `value-interface` — repository rulesets prevent CLI deletion, need manual cleanup via GitHub UI (https://github.com/nelson2005/numbduck/branches)
 - **Implementation plan**: `docs/plans/2026-03-15-complete-api-plan.md` — fork-only file, excluded from upstream PRs
-- **Next phase**: Phase 4 (Logical Type Interface) — Tasks 19-23
+- **All phases complete** — Plan fully implemented
