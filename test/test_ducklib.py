@@ -1662,3 +1662,105 @@ def test_create_map_type():
     for p in [val_back_p, key_back_p, map_p, val_p, key_p]:
         buf = numpy.array([p], dtype=numpy.intp)
         ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+
+def test_create_struct_type():
+    DUCKDB_TYPE_STRUCT = 25
+    DUCKDB_TYPE_INTEGER = 4
+    DUCKDB_TYPE_VARCHAR = 17
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    varchar_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
+    types_arr = numpy.array([int_type_p, varchar_type_p], dtype=numpy.intp)
+    name1 = ctypes.c_char_p(b"id")
+    name2 = ctypes.c_char_p(b"name")
+    names_arr = numpy.array(
+        [ctypes.c_void_p.from_buffer(name1).value, ctypes.c_void_p.from_buffer(name2).value],
+        dtype=numpy.intp
+    )
+    struct_p = ducklib.duckdb_create_struct_type(types_arr.ctypes.data, names_arr.ctypes.data, 2)
+    assert struct_p != 0
+    type_id = ducklib.duckdb_get_type_id(struct_p)
+    assert type_id == DUCKDB_TYPE_STRUCT
+    count = ducklib.duckdb_struct_type_child_count(struct_p)
+    assert count == 2
+    child_name_p = ducklib.duckdb_struct_type_child_name(struct_p, 0)
+    assert child_name_p != 0
+    child_name = ctypes.c_char_p(child_name_p).value.decode()
+    assert child_name == "id"
+    ducklib.duckdb_free(child_name_p)
+    child_type_p = ducklib.duckdb_struct_type_child_type(struct_p, 0)
+    assert ducklib.duckdb_get_type_id(child_type_p) == DUCKDB_TYPE_INTEGER
+    child_type_buf = numpy.array([child_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(child_type_buf.ctypes.data)
+    struct_buf = numpy.array([struct_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(struct_buf.ctypes.data)
+    int_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(int_buf.ctypes.data)
+    varchar_buf = numpy.array([varchar_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(varchar_buf.ctypes.data)
+
+
+def test_create_union_type():
+    DUCKDB_TYPE_UNION = 28
+    DUCKDB_TYPE_INTEGER = 4
+    DUCKDB_TYPE_VARCHAR = 17
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    varchar_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
+    types_arr = numpy.array([int_type_p, varchar_type_p], dtype=numpy.intp)
+    name1 = ctypes.c_char_p(b"num")
+    name2 = ctypes.c_char_p(b"str")
+    names_arr = numpy.array(
+        [ctypes.c_void_p.from_buffer(name1).value, ctypes.c_void_p.from_buffer(name2).value],
+        dtype=numpy.intp
+    )
+    union_p = ducklib.duckdb_create_union_type(types_arr.ctypes.data, names_arr.ctypes.data, 2)
+    assert union_p != 0
+    type_id = ducklib.duckdb_get_type_id(union_p)
+    assert type_id == DUCKDB_TYPE_UNION
+    count = ducklib.duckdb_union_type_member_count(union_p)
+    assert count == 2
+    member_name_p = ducklib.duckdb_union_type_member_name(union_p, 0)
+    assert member_name_p != 0
+    member_name = ctypes.c_char_p(member_name_p).value.decode()
+    assert member_name == "num"
+    ducklib.duckdb_free(member_name_p)
+    member_type_p = ducklib.duckdb_union_type_member_type(union_p, 0)
+    assert ducklib.duckdb_get_type_id(member_type_p) == DUCKDB_TYPE_INTEGER
+    member_type_buf = numpy.array([member_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(member_type_buf.ctypes.data)
+    union_buf = numpy.array([union_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(union_buf.ctypes.data)
+    int_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(int_buf.ctypes.data)
+    varchar_buf = numpy.array([varchar_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(varchar_buf.ctypes.data)
+
+
+def test_create_enum_type():
+    DUCKDB_TYPE_ENUM = 23
+    name1 = ctypes.c_char_p(b"small")
+    name2 = ctypes.c_char_p(b"medium")
+    name3 = ctypes.c_char_p(b"large")
+    names_arr = numpy.array(
+        [ctypes.c_void_p.from_buffer(n).value for n in [name1, name2, name3]],
+        dtype=numpy.intp
+    )
+    enum_p = ducklib.duckdb_create_enum_type(names_arr.ctypes.data, 3)
+    assert enum_p != 0
+    type_id = ducklib.duckdb_get_type_id(enum_p)
+    assert type_id == DUCKDB_TYPE_ENUM
+    dict_size = ducklib.duckdb_enum_dictionary_size(enum_p)
+    assert dict_size == 3
+    val_p = ducklib.duckdb_enum_dictionary_value(enum_p, 0)
+    assert val_p != 0
+    val_str = ctypes.c_char_p(val_p).value.decode()
+    assert val_str == "small"
+    ducklib.duckdb_free(val_p)
+    val_p = ducklib.duckdb_enum_dictionary_value(enum_p, 2)
+    val_str = ctypes.c_char_p(val_p).value.decode()
+    assert val_str == "large"
+    ducklib.duckdb_free(val_p)
+    internal_type = ducklib.duckdb_enum_internal_type(enum_p)
+    assert internal_type != 0
+    enum_buf = numpy.array([enum_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(enum_buf.ctypes.data)
