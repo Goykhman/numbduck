@@ -205,7 +205,7 @@ def test_duckdb_fetch_chunk_exhausted():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     duckdb_result = tuple(out_result)
     chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
-    assert chunk_p != 0, f"Expected first chunk, got null"
+    assert chunk_p != 0, "Expected first chunk, got null"
     chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
     assert chunk_p == 0, f"Expected null for exhausted result, got {chunk_p}"
     aux_close_db(duckdb_database, duckdb_connection)
@@ -758,8 +758,8 @@ def test_bind_blob():
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::BLOB;")
     assert rc == ducklib.DuckDBSuccess
-    blob_data = ctypes.c_char_p(b"\x00\x01\x02\x03")
-    blob_p = ctypes.c_void_p.from_buffer(blob_data).value
+    blob_data = ctypes.create_string_buffer(b"\x00\x01\x02\x03", 4)
+    blob_p = ctypes.cast(blob_data, ctypes.c_void_p).value
     rc = ducklib.duckdb_bind_blob(stmt[0], 1, blob_p, 4)
     assert rc == ducklib.DuckDBSuccess
     out_result, chunk_p = aux_execute_prepared(stmt[0])
@@ -1148,3 +1148,407 @@ def test_jit_prepare_bind_execute():
     assert col1 == 2**40, f"col1: expected 2^40, got {col1}"
     assert abs(col2 - 3.14) < 1e-10, f"col2: expected 3.14, got {col2}"
     assert col3_valid == 0, f"col3: expected NULL, validity={col3_valid}"
+
+
+# --- Value Interface ---
+
+def aux_destroy_value(val_p):
+    """Destroy a duckdb_value by storing the handle in a buffer and passing
+    the buffer address (pointer-to-handle) to duckdb_destroy_value."""
+    buf = numpy.zeros(1, dtype=numpy.intp)
+    buf[0] = val_p
+    ducklib.duckdb_destroy_value(buf.ctypes.data)
+
+
+def test_create_get_date():
+    days = numpy.int32(19000)
+    val_p = ducklib.duckdb_create_date(days)
+    assert val_p != 0
+    result = ducklib.duckdb_get_date(val_p)
+    assert result == days
+    aux_destroy_value(val_p)
+
+
+def test_create_get_time():
+    micros = numpy.int64(45000000000)
+    val_p = ducklib.duckdb_create_time(micros)
+    assert val_p != 0
+    result = ducklib.duckdb_get_time(val_p)
+    assert result == micros
+    aux_destroy_value(val_p)
+
+
+def test_create_get_time_tz():
+    micros = numpy.int64(45000000000)
+    offset = numpy.int32(3600)
+    time_tz = ducklib.duckdb_create_time_tz(micros, offset)
+    assert time_tz != 0
+    val_p = ducklib.duckdb_create_time_tz_value(time_tz)
+    assert val_p != 0
+    result = ducklib.duckdb_get_time_tz(val_p)
+    assert result == time_tz
+    aux_destroy_value(val_p)
+
+
+def test_create_get_timestamp():
+    micros = numpy.int64(1735689600000000)
+    val_p = ducklib.duckdb_create_timestamp(micros)
+    assert val_p != 0
+    result = ducklib.duckdb_get_timestamp(val_p)
+    assert result == micros
+    aux_destroy_value(val_p)
+
+
+def test_create_get_timestamp_ms():
+    ms = numpy.int64(1735689600000)
+    val_p = ducklib.duckdb_create_timestamp_ms(ms)
+    assert val_p != 0
+    result = ducklib.duckdb_get_timestamp_ms(val_p)
+    assert result == ms
+    aux_destroy_value(val_p)
+
+
+def test_create_get_timestamp_ns():
+    ns = numpy.int64(1735689600000000000)
+    val_p = ducklib.duckdb_create_timestamp_ns(ns)
+    assert val_p != 0
+    result = ducklib.duckdb_get_timestamp_ns(val_p)
+    assert result == ns
+    aux_destroy_value(val_p)
+
+
+def test_create_get_timestamp_s():
+    secs = numpy.int64(1735689600)
+    val_p = ducklib.duckdb_create_timestamp_s(secs)
+    assert val_p != 0
+    result = ducklib.duckdb_get_timestamp_s(val_p)
+    assert result == secs
+    aux_destroy_value(val_p)
+
+
+def test_create_get_timestamp_tz():
+    micros = numpy.int64(1735689600000000)
+    val_p = ducklib.duckdb_create_timestamp_tz(micros)
+    assert val_p != 0
+    result = ducklib.duckdb_get_timestamp_tz(val_p)
+    assert result == micros
+    aux_destroy_value(val_p)
+
+
+def test_create_get_blob():
+    blob_data = ctypes.create_string_buffer(b"\x00\x01\x02\x03", 4)
+    blob_p = ctypes.cast(blob_data, ctypes.c_void_p).value
+    val_p = ducklib.duckdb_create_blob(blob_p, 4)
+    assert val_p != 0
+    result = ducklib.duckdb_get_blob(val_p)
+    data_p = result[0]
+    size = result[1]
+    assert size == 4
+    raw = (ctypes.c_char * size).from_address(data_p)
+    assert raw[:] == b"\x00\x01\x02\x03"
+    ducklib.duckdb_free(data_p)
+    aux_destroy_value(val_p)
+
+
+def test_create_get_hugeint():
+    val_p = ducklib.duckdb_create_hugeint((42, 0))
+    assert val_p != 0
+    result = ducklib.duckdb_get_hugeint(val_p)
+    assert result[0] == 42
+    assert result[1] == 0
+    aux_destroy_value(val_p)
+
+
+def test_create_get_hugeint_negative():
+    val_p = ducklib.duckdb_create_hugeint((0, -1))
+    assert val_p != 0
+    result = ducklib.duckdb_get_hugeint(val_p)
+    assert result[0] == 0
+    assert result[1] == -1
+    aux_destroy_value(val_p)
+
+
+def test_create_get_uhugeint():
+    val_p = ducklib.duckdb_create_uhugeint((100, 0))
+    assert val_p != 0
+    result = ducklib.duckdb_get_uhugeint(val_p)
+    assert result[0] == 100
+    assert result[1] == 0
+    aux_destroy_value(val_p)
+
+
+def test_create_get_uhugeint_large():
+    val_p = ducklib.duckdb_create_uhugeint((2**63, 1))
+    assert val_p != 0
+    result = ducklib.duckdb_get_uhugeint(val_p)
+    assert result[0] == 2**63
+    assert result[1] == 1
+    aux_destroy_value(val_p)
+
+
+def test_create_get_interval():
+    val_p = ducklib.duckdb_create_interval((1, 2, 3000000))
+    assert val_p != 0
+    result = ducklib.duckdb_get_interval(val_p)
+    assert result[0] == 1
+    assert result[1] == 2
+    assert result[2] == 3000000
+    aux_destroy_value(val_p)
+
+
+def test_create_get_interval_zero():
+    val_p = ducklib.duckdb_create_interval((0, 0, 0))
+    assert val_p != 0
+    result = ducklib.duckdb_get_interval(val_p)
+    assert result[0] == 0
+    assert result[1] == 0
+    assert result[2] == 0
+    aux_destroy_value(val_p)
+
+
+def test_create_get_decimal():
+    val_p = ducklib.duckdb_create_decimal((10, 2, 12345, 0))
+    assert val_p != 0
+    result = ducklib.duckdb_get_decimal(val_p)
+    assert result[0] == 10
+    assert result[1] == 2
+    assert result[2] == 12345
+    assert result[3] == 0
+    aux_destroy_value(val_p)
+
+
+def test_create_get_uuid():
+    lower = numpy.uint64(0x0123456789ABCDEF)
+    upper = numpy.uint64(0xFEDCBA9876543210)
+    val_p = ducklib.duckdb_create_uuid((lower, upper))
+    assert val_p != 0
+    result = ducklib.duckdb_get_uuid(val_p)
+    assert result[0] == lower
+    assert result[1] == upper
+    aux_destroy_value(val_p)
+
+
+def test_create_get_varint():
+    data_bytes = ctypes.create_string_buffer(b"\x01\x00", 2)
+    data_p = ctypes.cast(data_bytes, ctypes.c_void_p).value
+    val_p = ducklib.duckdb_create_varint((data_p, 2, 0))
+    assert val_p != 0
+    result = ducklib.duckdb_get_varint(val_p)
+    size = result[1]
+    assert size == 2
+    raw = (ctypes.c_char * size).from_address(result[0])
+    assert raw[:] == b"\x01\x00"
+    ducklib.duckdb_free(result[0])
+    aux_destroy_value(val_p)
+
+
+def test_create_get_bit():
+    data_bytes = ctypes.create_string_buffer(b"\x05\xA0", 2)
+    data_p = ctypes.cast(data_bytes, ctypes.c_void_p).value
+    val_p = ducklib.duckdb_create_bit((data_p, 2))
+    assert val_p != 0
+    result = ducklib.duckdb_get_bit(val_p)
+    assert result[1] == 2
+    ducklib.duckdb_free(result[0])
+    aux_destroy_value(val_p)
+
+
+# --- Scalar Value Creators/Getters ---
+
+
+def test_create_get_bool_true():
+    val_p = ducklib.duckdb_create_bool(1)
+    assert val_p != 0
+    result = ducklib.duckdb_get_bool(val_p)
+    assert result == 1
+    aux_destroy_value(val_p)
+
+
+def test_create_get_bool_false():
+    val_p = ducklib.duckdb_create_bool(0)
+    assert val_p != 0
+    result = ducklib.duckdb_get_bool(val_p)
+    assert result == 0
+    aux_destroy_value(val_p)
+
+
+def test_create_get_int8():
+    val_p = ducklib.duckdb_create_int8(-42)
+    assert val_p != 0
+    result = ducklib.duckdb_get_int8(val_p)
+    assert result == -42
+    aux_destroy_value(val_p)
+
+
+def test_create_get_int16():
+    val_p = ducklib.duckdb_create_int16(-1234)
+    assert val_p != 0
+    result = ducklib.duckdb_get_int16(val_p)
+    assert result == -1234
+    aux_destroy_value(val_p)
+
+
+def test_create_get_int32():
+    val_p = ducklib.duckdb_create_int32(-100000)
+    assert val_p != 0
+    result = ducklib.duckdb_get_int32(val_p)
+    assert result == -100000
+    aux_destroy_value(val_p)
+
+
+def test_create_get_int64():
+    val_p = ducklib.duckdb_create_int64(-9999999999)
+    assert val_p != 0
+    result = ducklib.duckdb_get_int64(val_p)
+    assert result == -9999999999
+    aux_destroy_value(val_p)
+
+
+def test_create_get_uint8():
+    val_p = ducklib.duckdb_create_uint8(200)
+    assert val_p != 0
+    result = ducklib.duckdb_get_uint8(val_p)
+    assert result == 200
+    aux_destroy_value(val_p)
+
+
+def test_create_get_uint16():
+    val_p = ducklib.duckdb_create_uint16(60000)
+    assert val_p != 0
+    result = ducklib.duckdb_get_uint16(val_p)
+    assert result == 60000
+    aux_destroy_value(val_p)
+
+
+def test_create_get_uint32():
+    val_p = ducklib.duckdb_create_uint32(3000000000)
+    assert val_p != 0
+    result = ducklib.duckdb_get_uint32(val_p)
+    assert result == 3000000000
+    aux_destroy_value(val_p)
+
+
+def test_create_get_uint64():
+    val_p = ducklib.duckdb_create_uint64(10000000000000000000)
+    assert val_p != 0
+    result = ducklib.duckdb_get_uint64(val_p)
+    assert result == 10000000000000000000
+    aux_destroy_value(val_p)
+
+
+def test_create_get_float():
+    val_p = ducklib.duckdb_create_float(numpy.float32(3.14))
+    assert val_p != 0
+    result = ducklib.duckdb_get_float(val_p)
+    assert abs(result - 3.14) < 0.01
+    aux_destroy_value(val_p)
+
+
+def test_create_get_double():
+    val_p = ducklib.duckdb_create_double(2.718281828)
+    assert val_p != 0
+    result = ducklib.duckdb_get_double(val_p)
+    assert abs(result - 2.718281828) < 1e-9
+    aux_destroy_value(val_p)
+
+
+# --- String Value Functions ---
+
+
+def test_create_get_varchar():
+    text = ctypes.c_char_p(b"hello duckdb")
+    val_p = ducklib.duckdb_create_varchar(
+        ctypes.cast(text, ctypes.c_void_p).value
+    )
+    assert val_p != 0
+    str_p = ducklib.duckdb_get_varchar(val_p)
+    assert str_p != 0
+    result = ctypes.string_at(str_p)
+    assert result == b"hello duckdb"
+    ducklib.duckdb_free(str_p)
+    aux_destroy_value(val_p)
+
+
+def test_create_varchar_length():
+    text = ctypes.c_char_p(b"hello\x00world")
+    val_p = ducklib.duckdb_create_varchar_length(
+        ctypes.cast(text, ctypes.c_void_p).value, 5
+    )
+    assert val_p != 0
+    str_p = ducklib.duckdb_get_varchar(val_p)
+    assert str_p != 0
+    result = ctypes.string_at(str_p)
+    assert result == b"hello"
+    ducklib.duckdb_free(str_p)
+    aux_destroy_value(val_p)
+
+
+def test_value_to_string():
+    val_p = ducklib.duckdb_create_int32(42)
+    assert val_p != 0
+    str_p = ducklib.duckdb_value_to_string(val_p)
+    assert str_p != 0
+    result = ctypes.string_at(str_p)
+    assert result == b"42"
+    ducklib.duckdb_free(str_p)
+    aux_destroy_value(val_p)
+
+
+# --- Null Value Functions ---
+
+
+def test_create_null_value():
+    val_p = ducklib.duckdb_create_null_value()
+    assert val_p != 0
+    assert ducklib.duckdb_is_null_value(val_p) == 1
+    aux_destroy_value(val_p)
+
+
+def test_is_null_value_false():
+    val_p = ducklib.duckdb_create_int32(7)
+    assert val_p != 0
+    assert ducklib.duckdb_is_null_value(val_p) == 0
+    aux_destroy_value(val_p)
+
+
+# --- Value Type and Destroy ---
+
+
+def test_get_value_type():
+    val_p = ducklib.duckdb_create_int32(99)
+    assert val_p != 0
+    type_p = ducklib.duckdb_get_value_type(val_p)
+    assert type_p != 0
+    # duckdb_get_value_type returns the same handle as the value for
+    # scalar types — do NOT destroy both (double-free)
+    aux_destroy_value(val_p)
+
+
+def test_destroy_value():
+    val_p = ducklib.duckdb_create_int32(1)
+    assert val_p != 0
+    aux_destroy_value(val_p)
+
+
+# --- Struct size guard ---
+
+
+def test_struct_size_guard():
+    """Verify the size computation used by _call_lib_func_struct_in/out."""
+    from numba.core.types import UniTuple, Tuple, int32, int64, uint64, uint8
+
+    # 16-byte structs (should pass the ≤16 byte guard)
+    assert sum(t.bitwidth for t in UniTuple(int64, 2)) / 8 == 16
+    assert sum(t.bitwidth for t in UniTuple(uint64, 2)) / 8 == 16
+    assert sum(t.bitwidth for t in Tuple((uint64, int64))) / 8 == 16
+
+    # 8-byte struct
+    assert sum(t.bitwidth for t in UniTuple(int32, 2)) / 8 == 8
+
+    # Mixed-width tuples
+    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint64, int64))) / 8 == 18
+    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 == 19
+    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 > 16
+
+    # 24-byte struct (should fail the guard)
+    assert sum(t.bitwidth for t in UniTuple(int64, 3)) / 8 == 24
