@@ -40,9 +40,17 @@ def duckdb_func(arg):
 6. If a function returns a handle (e.g. `duckdb_logical_type`), also bind the corresponding destroy function (e.g. `duckdb_destroy_logical_type`)
 7. **Before submitting an upstream PR**, re-verify all signatures, parameter types, naming conventions (`_p`/`_pp`), and docstring links against `duckdb.h` — this is a second check; step 1 is the first
 
-### Special Case: duckdb_fetch_chunk
+### Struct-by-value helpers (ducklib.py)
 
-Uses a custom `@intrinsic` (`_duckdb_fetch_chunk`) instead of `_call_lib_func` because the result struct must be passed by pointer on the stack rather than by value.
+For C functions that pass or return structs by value, `ducklib.py` provides:
+
+- **`_call_lib_func_struct_in`** — ≤16-byte struct passed by value (SysV x86-64) or by pointer (Windows)
+- **`_call_lib_func_struct_out`** — ≤16-byte struct returned by value (SysV x86-64) or via sret (Windows)
+- **`_call_lib_func_byval`** — arg passed by pointer regardless of platform (e.g. `duckdb_result *`)
+- **`_emit_byval_call`** — shared codegen helper for alloca+store+call-via-pointer
+- **`_build_packed_interval`** — packs `{i32, i32, i64}` interval into `{i64, i64}` (LLVM drops the second i32 on SysV x86-64)
+
+Custom `@intrinsic` functions are used for >16-byte structs (decimal 24B, varint 24B) and interval (16B but needs repacking). These use `byval` + `optnone` on SysV x86-64 to prevent LLVM from optimizing away stack copies. See [llvmlite#300 comment](https://github.com/numba/llvmlite/issues/300#issuecomment-327235846) for the ABI rationale.
 
 ## Key Paths
 
@@ -81,3 +89,11 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - When told to "address" review feedback, implement your own recommendations — push back on items you assessed as not worth doing
 - Always show PR review comments verbatim — never summarize or paraphrase
 - Always include links to specific changed lines when responding to PR review comments
+
+## Project Status
+
+- **main** is synced with upstream/main (includes merged PR #13)
+- **PR #13** (Value Interface) — merged 2026-03-22. Added value interface bindings with struct-by-value support, ABI-aware intrinsics, and integration tests
+- **Completed PRs**: #11 (prepared statements), #12 (logical type + enum), #13 (value interface)
+- **Remote branches to clean up**: `value-interface` and `upstream-value-interface` on origin — branch protection rules prevented deletion via CLI, need manual cleanup via GitHub UI
+- **No active feature branches**
