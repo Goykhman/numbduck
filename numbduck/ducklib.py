@@ -204,6 +204,8 @@ signatures["duckdb_column_count"] = intp(intp)
 signatures["duckdb_column_logical_type"] = intp(intp, uint64)
 signatures["duckdb_column_name"] = intp(intp, uint64)
 signatures["duckdb_column_type"] = int32(intp, uint64)
+signatures["duckdb_config_count"] = uint64()
+signatures["duckdb_create_config"] = duckdb_state_ty(intp)
 signatures["duckdb_create_bit"] = intp(duckdb_bit_ty)
 signatures["duckdb_create_blob"] = intp(intp, uint64)
 signatures["duckdb_create_date"] = intp(int32)
@@ -253,6 +255,7 @@ signatures["duckdb_data_chunk_get_vector"] = intp(intp, intp)
 signatures["duckdb_decimal_internal_type"] = int32(intp)
 signatures["duckdb_decimal_scale"] = uint8(intp)
 signatures["duckdb_decimal_width"] = uint8(intp)
+signatures["duckdb_destroy_config"] = void(intp)
 signatures["duckdb_destroy_data_chunk"] = void(intp)
 signatures["duckdb_destroy_logical_type"] = void(intp)
 signatures["duckdb_destroy_prepare"] = void(intp)
@@ -268,6 +271,7 @@ signatures["duckdb_free"] = void(intp)
 signatures["duckdb_get_bit"] = duckdb_bit_ty(intp)
 signatures["duckdb_get_blob"] = duckdb_blob_ty(intp)
 signatures["duckdb_get_bool"] = int8(intp)
+signatures["duckdb_get_config_flag"] = duckdb_state_ty(uint64, intp, intp)
 signatures["duckdb_get_date"] = int32(intp)
 signatures["duckdb_get_double"] = float64(intp)
 signatures["duckdb_get_enum_value"] = uint64(intp)
@@ -316,6 +320,7 @@ signatures["duckdb_result_return_type"] = int32(duckdb_result_ty)
 signatures["duckdb_result_statement_type"] = int32(duckdb_result_ty)
 signatures["duckdb_row_count"] = intp(intp)
 signatures["duckdb_rows_changed"] = uint64(intp)
+signatures["duckdb_set_config"] = duckdb_state_ty(intp, intp, intp)
 signatures["duckdb_struct_type_child_count"] = uint64(intp)
 signatures["duckdb_struct_type_child_name"] = intp(intp, uint64)
 signatures["duckdb_struct_type_child_type"] = intp(intp, uint64)
@@ -494,6 +499,18 @@ def duckdb_column_name(duckdb_result_p, col):
 def duckdb_column_type(duckdb_result_p, col):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_column_type """
     return _call_lib_func("duckdb_column_type", (duckdb_result_p, col))
+
+
+@cres(signatures.get("duckdb_config_count"))
+def duckdb_config_count():
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_config_count """
+    return _call_lib_func("duckdb_config_count", ())
+
+
+@cres(signatures.get("duckdb_create_config"))
+def duckdb_create_config(config_pp):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_config """
+    return _call_lib_func("duckdb_create_config", (config_pp,))
 
 
 @cres(signatures.get("duckdb_create_array_type"))
@@ -886,6 +903,12 @@ def duckdb_decimal_width(type_p):
     return _call_lib_func("duckdb_decimal_width", (type_p,))
 
 
+@cres(signatures.get("duckdb_destroy_config"))
+def duckdb_destroy_config(config_pp):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_config """
+    return _call_lib_func("duckdb_destroy_config", (config_pp,))
+
+
 @cres(signatures.get("duckdb_destroy_data_chunk"))
 def duckdb_destroy_data_chunk(data_chunk_pp):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_data_chunk
@@ -951,6 +974,13 @@ def duckdb_execute_prepared(prepared_statement_p, out_result_p):
 def duckdb_get_bool(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_bool """
     return _call_lib_func("duckdb_get_bool", (val_p,))
+
+
+@cres(signatures.get("duckdb_get_config_flag"))
+def duckdb_get_config_flag(index, out_name_pp, out_description_pp):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_config_flag """
+    return _call_lib_func(
+        "duckdb_get_config_flag", (index, out_name_pp, out_description_pp))
 
 
 @cres(signatures.get("duckdb_get_double"))
@@ -1352,6 +1382,12 @@ def duckdb_row_count(duckdb_result_p):
 def duckdb_rows_changed(duckdb_result_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_rows_changed """
     return _call_lib_func("duckdb_rows_changed", (duckdb_result_p,))
+
+
+@cres(signatures.get("duckdb_set_config"))
+def duckdb_set_config(config_p, name_p, option_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_set_config """
+    return _call_lib_func("duckdb_set_config", (config_p, name_p, option_p))
 
 
 @cres(signatures.get("duckdb_struct_type_child_count"))

@@ -8,6 +8,12 @@ def allocate_buffer(sz: int):
 
 
 @njit
+def create_duckdb_config():
+    """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L475 """
+    return allocate_buffer(1)
+
+
+@njit
 def create_duckdb_connection():
     """ https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L469 """
     return allocate_buffer(1)
