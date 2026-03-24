@@ -92,10 +92,5 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 
 ## Project Status
 
-- **main** is synced with upstream/main (includes merged PR #14)
-- **Completed PRs**: #11 (prepared statements), #12 (logical type + enum), #13 (value interface), #14 (logical type interface)
-- **Phase 5**: upstream PR Goykhman/numbduck#15 open — configuration (5 bindings, 3 tests)
-- **Active branches**: `configuration` (fork PR #16), `upstream-configuration` (upstream PR #15)
-- **Remote branches to clean up**: `abi-reproducer`, `bind-types`, `fork-only-updates`, `jit-prepared-statements`, `logical-types`, `result-metadata`, `upstream-bind-types`, `upstream-logical-types`, `upstream-result-metadata`, `upstream-value-interface`, `value-interface` — repository rulesets prevent CLI deletion, need manual cleanup via GitHub UI (https://github.com/nelson2005/numbduck/branches)
-- **Implementation plan**: `docs/plans/2026-03-15-complete-api-plan.md` — fork-only file, excluded from upstream PRs
-- **All phases complete** — Plan fully implemented
+- **Branches to clean up**: `abi-reproducer`, `bind-types`, `configuration`, `fork-only-updates`, `jit-prepared-statements`, `logical-types`, `result-metadata`, `upstream-bind-types`, `upstream-configuration`, `upstream-logical-types`, `upstream-result-metadata`, `upstream-value-interface`, `value-interface` — rulesets may prevent CLI deletion, use GitHub UI (https://github.com/nelson2005/numbduck/branches)
+- **Known gap**: Task 17 container value tests (list/map/struct) deferred — segfault in JIT when combining `duckdb_column_logical_type` with container creators; bindings compile correctly
