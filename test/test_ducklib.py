@@ -1329,8 +1329,10 @@ def test_create_get_uuid():
     aux_destroy_value(val_p)
 
 
-@pytest.mark.skipif(not hasattr(ducklib, 'duckdb_create_varint'),
-                    reason="duckdb_create_varint not available in this duckdb version")
+@pytest.mark.skipif(
+    not (hasattr(ducklib, 'duckdb_create_varint') and hasattr(ducklib, 'duckdb_get_varint')),
+    reason="duckdb_create_varint or duckdb_get_varint not available in this duckdb version",
+)
 def test_create_get_varint():
     data_bytes = ctypes.create_string_buffer(b"\x01\x00", 2)
     data_p = ctypes.cast(data_bytes, ctypes.c_void_p).value
