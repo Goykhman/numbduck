@@ -1330,7 +1330,7 @@ def test_create_get_uuid():
 
 
 @pytest.mark.skipif(
-    not (hasattr(ducklib, 'duckdb_create_varint') and hasattr(ducklib, 'duckdb_get_varint')),
+    not (ducklib._has_symbol('duckdb_create_varint') and ducklib._has_symbol('duckdb_get_varint')),
     reason="duckdb_create_varint or duckdb_get_varint not available in this duckdb version",
 )
 def test_create_get_varint():
