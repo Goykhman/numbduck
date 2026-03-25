@@ -1,6 +1,7 @@
 import ctypes
 
 import numpy
+import pytest
 from numba import njit
 from numba import carray
 from numbox.utils.lowlevel import get_unicode_data_p
@@ -1328,6 +1329,8 @@ def test_create_get_uuid():
     aux_destroy_value(val_p)
 
 
+@pytest.mark.skipif(not hasattr(ducklib, 'duckdb_create_varint'),
+                    reason="duckdb_create_varint not available in this duckdb version")
 def test_create_get_varint():
     data_bytes = ctypes.create_string_buffer(b"\x01\x00", 2)
     data_p = ctypes.cast(data_bytes, ctypes.c_void_p).value
