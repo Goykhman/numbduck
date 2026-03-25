@@ -5,7 +5,7 @@ from numba.extending import intrinsic
 from numbox.core.bindings.call import _call_lib_func
 from numbox.core.bindings.signatures import signatures
 from numba.core.cgutils import get_or_insert_function
-from numbox.utils.highlevel import cres
+from numbox.utils.highlevel import cres as _cres
 
 import platform
 import sys
@@ -20,12 +20,26 @@ _is_sysv_x86_64 = platform.machine() == 'x86_64'
 
 
 def _has_symbol(name):
-    import ctypes
-    try:
-        ctypes.cast(getattr(duckdb_lib, name), ctypes.c_void_p)
-        return True
-    except AttributeError:
-        return False
+    return hasattr(duckdb_lib, name)
+
+
+def _unavailable(name):
+    def stub(*args, **kwargs):
+        raise NotImplementedError(f"{name} is not available in this duckdb version")
+    stub.__name__ = name
+    return stub
+
+
+def cres(sig, if_available=False, **kwargs):
+    if not if_available:
+        return _cres(sig, **kwargs)
+
+    def decorator(func):
+        if _has_symbol(func.__name__):
+            return _cres(sig, **kwargs)(func)
+        return _unavailable(func.__name__)
+    return decorator
+
 
 duckdb_state_ty = int32
 
@@ -856,36 +870,36 @@ def duckdb_create_uuid(val):
     return _call_lib_func_struct_in("duckdb_create_uuid", val)
 
 
-if _has_symbol("duckdb_create_varint"):
-    @intrinsic
-    def _duckdb_create_varint(typingctx, varint_tup_ty):
-        """Custom intrinsic for duckdb_create_varint.
+@intrinsic
+def _duckdb_create_varint(typingctx, varint_tup_ty):
+    """Custom intrinsic for duckdb_create_varint.
 
-        duckdb_varint is 24 bytes ({intp, uint64, int8}) — same >16-byte
-        case as decimal. See _duckdb_create_decimal docstring for details.
-        """
-        def codegen(context, builder, signature, arguments):
-            varint_tup = arguments[0]
-            varint_ll_ty = context.get_value_type(duckdb_varint_ty)
-            stack_p = builder.alloca(varint_ll_ty)
-            builder.store(varint_tup, stack_p)
-            func_ty_ll = FunctionType(
-                context.get_value_type(signature.return_type),
-                [varint_ll_ty.as_pointer()]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, "duckdb_create_varint")
-            if _is_sysv_x86_64:
-                func_p.args[0].add_attribute('byval')
-                builder.function.attributes.add('optnone')
-                builder.function.attributes.add('noinline')
-            return builder.call(func_p, [stack_p])
-        return intp(duckdb_varint_ty), codegen
+    duckdb_varint is 24 bytes ({intp, uint64, int8}) — same >16-byte
+    case as decimal. See _duckdb_create_decimal docstring for details.
+    """
+    def codegen(context, builder, signature, arguments):
+        varint_tup = arguments[0]
+        varint_ll_ty = context.get_value_type(duckdb_varint_ty)
+        stack_p = builder.alloca(varint_ll_ty)
+        builder.store(varint_tup, stack_p)
+        func_ty_ll = FunctionType(
+            context.get_value_type(signature.return_type),
+            [varint_ll_ty.as_pointer()]
+        )
+        func_p = get_or_insert_function(
+            builder.module, func_ty_ll, "duckdb_create_varint")
+        if _is_sysv_x86_64:
+            func_p.args[0].add_attribute('byval')
+            builder.function.attributes.add('optnone')
+            builder.function.attributes.add('noinline')
+        return builder.call(func_p, [stack_p])
+    return intp(duckdb_varint_ty), codegen
 
-    @cres(intp(duckdb_varint_ty))
-    def duckdb_create_varint(val):
-        """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_create_varint """
-        return _duckdb_create_varint(val)
+
+@cres(intp(duckdb_varint_ty), if_available=True)
+def duckdb_create_varint(val):
+    """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_create_varint """
+    return _duckdb_create_varint(val)
 
 
 @cres(signatures.get("duckdb_data_chunk_get_vector"))
@@ -1273,28 +1287,28 @@ def duckdb_get_uuid(val_p):
     return _call_lib_func_struct_out("duckdb_get_uuid", val_p)
 
 
-if _has_symbol("duckdb_get_varint"):
-    @intrinsic
-    def _duckdb_get_varint(typingctx, val_p_ty):
-        def codegen(context, builder, signature, arguments):
-            val_p = arguments[0]
-            varint_ll_ty = context.get_value_type(duckdb_varint_ty)
-            sret_p = builder.alloca(varint_ll_ty)
-            func_ty_ll = FunctionType(
-                ir.VoidType(),
-                [varint_ll_ty.as_pointer(), val_p.type]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, "duckdb_get_varint")
-            func_p.args[0].add_attribute('sret')
-            builder.call(func_p, [sret_p, val_p])
-            return builder.load(sret_p)
-        return duckdb_varint_ty(intp), codegen
+@intrinsic
+def _duckdb_get_varint(typingctx, val_p_ty):
+    def codegen(context, builder, signature, arguments):
+        val_p = arguments[0]
+        varint_ll_ty = context.get_value_type(duckdb_varint_ty)
+        sret_p = builder.alloca(varint_ll_ty)
+        func_ty_ll = FunctionType(
+            ir.VoidType(),
+            [varint_ll_ty.as_pointer(), val_p.type]
+        )
+        func_p = get_or_insert_function(
+            builder.module, func_ty_ll, "duckdb_get_varint")
+        func_p.args[0].add_attribute('sret')
+        builder.call(func_p, [sret_p, val_p])
+        return builder.load(sret_p)
+    return duckdb_varint_ty(intp), codegen
 
-    @cres(duckdb_varint_ty(intp))
-    def duckdb_get_varint(val_p):
-        """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
-        return _duckdb_get_varint(val_p)
+
+@cres(duckdb_varint_ty(intp), if_available=True)
+def duckdb_get_varint(val_p):
+    """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
+    return _duckdb_get_varint(val_p)
 
 
 @cres(signatures.get("duckdb_list_type_child_type"))
