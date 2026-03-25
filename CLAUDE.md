@@ -90,6 +90,11 @@ Bindings must mirror the DuckDB C API error-handling protocol exactly — return
 - Always show PR review comments verbatim — never summarize or paraphrase
 - Always include links to specific changed lines when responding to PR review comments
 
+## Related Projects
+
+- **[numbox](https://github.com/Goykhman/numbox)** — bindings toolkit that numbduck is built on. Provides `signatures` dict, `_call_lib_func`, `@cres` decorator, and shared library loading patterns. Read numbox source before implementing new binding patterns.
+- **[numbarrow](https://github.com/Goykhman/numbarrow)** — bridges PyArrow arrays into numba `@njit` code (Arrow → numpy direction). Read numbarrow source before designing any Arrow-based features in numbduck (e.g., virtual tables). numbduck's Arrow work would be the inverse direction (numpy → Arrow/DuckDB).
+
 ## Project Status
 
 - **Branches to clean up**: `abi-reproducer`, `bind-types`, `configuration`, `fork-only-updates`, `jit-prepared-statements`, `logical-types`, `result-metadata`, `upstream-bind-types`, `upstream-configuration`, `upstream-logical-types`, `upstream-result-metadata`, `upstream-value-interface`, `value-interface` — rulesets may prevent CLI deletion, use GitHub UI (https://github.com/nelson2005/numbduck/branches)
