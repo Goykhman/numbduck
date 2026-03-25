@@ -884,7 +884,7 @@ if _has_symbol("duckdb_create_varint"):
 
     @cres(intp(duckdb_varint_ty))
     def duckdb_create_varint(val):
-        """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_varint """
+        """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_create_varint """
         return _duckdb_create_varint(val)
 
 
@@ -1293,7 +1293,7 @@ if _has_symbol("duckdb_get_varint"):
 
     @cres(duckdb_varint_ty(intp))
     def duckdb_get_varint(val_p):
-        """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_varint """
+        """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
         return _duckdb_get_varint(val_p)
 
 
