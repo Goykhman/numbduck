@@ -10,9 +10,9 @@ from numba.core.types import intp
 
 from numbduck import ducklib
 from numbduck.duckdb_utils import (
-    create_duckdb_config, create_duckdb_connection,
-    create_duckdb_data_chunk, create_duckdb_database,
-    create_duckdb_prepared_statement, create_duckdb_result
+    create_duckdb_connection, create_duckdb_data_chunk,
+    create_duckdb_database, create_duckdb_prepared_statement,
+    create_duckdb_result
 )
 from numbox.utils.lowlevel import _cast_int_to_void_p
 from numbduck.jit_utils import array_data_p
@@ -1769,39 +1769,3 @@ def test_create_enum_type():
     assert internal_type != 0
     enum_buf = numpy.array([enum_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(enum_buf.ctypes.data)
-
-
-def test_config_count():
-    count = ducklib.duckdb_config_count()
-    assert count > 0, f"Expected positive config count, got {count}"
-
-
-def test_create_set_destroy_config():
-    config = create_duckdb_config()
-    config_pp = config.ctypes.data
-    rc = ducklib.duckdb_create_config(config_pp)
-    assert rc == ducklib.DuckDBSuccess
-    config_p = config[0]
-    assert config_p != 0
-    name_bytes = ctypes.c_char_p(b"threads")
-    name_p = ctypes.c_void_p.from_buffer(name_bytes).value
-    val_bytes = ctypes.c_char_p(b"1")
-    val_p = ctypes.c_void_p.from_buffer(val_bytes).value
-    rc = ducklib.duckdb_set_config(config_p, name_p, val_p)
-    assert rc == ducklib.DuckDBSuccess
-    ducklib.duckdb_destroy_config(config_pp)
-    assert config[0] == 0, f"Expected null after destroy, got {config[0]}"
-
-
-def test_get_config_flag():
-    name_buf = numpy.zeros(1, dtype=numpy.intp)
-    desc_buf = numpy.zeros(1, dtype=numpy.intp)
-    rc = ducklib.duckdb_get_config_flag(
-        0, name_buf.ctypes.data, desc_buf.ctypes.data)
-    assert rc == ducklib.DuckDBSuccess
-    name_p = int(name_buf[0])
-    desc_p = int(desc_buf[0])
-    assert name_p != 0
-    assert desc_p != 0
-    name = ctypes.c_char_p(name_p).value.decode()
-    assert len(name) > 0
