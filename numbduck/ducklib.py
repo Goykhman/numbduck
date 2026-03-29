@@ -350,6 +350,45 @@ signatures["duckdb_value_to_string"] = intp(intp)
 signatures["duckdb_vector_get_data"] = intp(intp)
 signatures["duckdb_vector_get_validity"] = uint64(intp)
 
+# ── Scalar Functions ─────────────────────────────────────────────────
+signatures["duckdb_create_scalar_function"] = intp()
+signatures["duckdb_destroy_scalar_function"] = void(intp)
+signatures["duckdb_register_scalar_function"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_scalar_function_set_name"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_scalar_function_add_parameter"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_scalar_function_set_return_type"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_scalar_function_set_function"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_scalar_function_set_bind"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_scalar_function_set_extra_info"] = duckdb_state_ty(intp, intp, intp)
+signatures["duckdb_scalar_function_set_varargs"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_scalar_function_set_volatile"] = duckdb_state_ty(intp)
+signatures["duckdb_scalar_function_set_special_handling"] = duckdb_state_ty(intp)
+signatures["duckdb_scalar_function_set_init"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_create_scalar_function_set"] = intp(intp)
+signatures["duckdb_destroy_scalar_function_set"] = void(intp)
+signatures["duckdb_add_scalar_function_to_set"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_register_scalar_function_set"] = duckdb_state_ty(intp, intp)
+
+# ── Aggregate Functions ──────────────────────────────────────────────
+signatures["duckdb_create_aggregate_function"] = intp()
+signatures["duckdb_destroy_aggregate_function"] = void(intp)
+signatures["duckdb_register_aggregate_function"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_aggregate_function_set_name"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_aggregate_function_add_parameter"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_aggregate_function_set_return_type"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_aggregate_function_set_functions"] = duckdb_state_ty(intp, intp, intp, intp, intp, intp)
+signatures["duckdb_aggregate_function_set_destructor"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_aggregate_function_set_extra_info"] = duckdb_state_ty(intp, intp, intp)
+signatures["duckdb_aggregate_function_set_special_handling"] = duckdb_state_ty(intp)
+signatures["duckdb_create_aggregate_function_set"] = intp(intp)
+signatures["duckdb_destroy_aggregate_function_set"] = void(intp)
+signatures["duckdb_add_aggregate_function_to_set"] = duckdb_state_ty(intp, intp)
+signatures["duckdb_register_aggregate_function_set"] = duckdb_state_ty(intp, intp)
+
+# ── Callback-Side Accessors ──────────────────────────────────────────
+signatures["duckdb_function_get_extra_info"] = intp(intp)
+signatures["duckdb_function_set_error"] = void(intp, intp)
+
 
 @cres(signatures.get("duckdb_array_type_array_size"))
 def duckdb_array_type_array_size(type_p):
@@ -1435,6 +1474,210 @@ def duckdb_vector_get_data(duckdb_vector_p):
 def duckdb_vector_get_validity(duckdb_vector_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_vector_get_validity """
     return _call_lib_func("duckdb_vector_get_validity", (duckdb_vector_p,))
+
+
+# ── Scalar Functions ─────────────────────────────────────────────────
+
+@cres(signatures.get("duckdb_create_scalar_function"))
+def duckdb_create_scalar_function():
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_scalar_function """
+    return _call_lib_func("duckdb_create_scalar_function", ())
+
+
+@cres(signatures.get("duckdb_destroy_scalar_function"))
+def duckdb_destroy_scalar_function(scalar_function_pp):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_scalar_function """
+    return _call_lib_func("duckdb_destroy_scalar_function", (scalar_function_pp,))
+
+
+@cres(signatures.get("duckdb_register_scalar_function"))
+def duckdb_register_scalar_function(connection_p, scalar_function_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_register_scalar_function """
+    return _call_lib_func("duckdb_register_scalar_function", (connection_p, scalar_function_p))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_name"))
+def duckdb_scalar_function_set_name(scalar_function_p, name_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_name """
+    return _call_lib_func("duckdb_scalar_function_set_name", (scalar_function_p, name_p))
+
+
+@cres(signatures.get("duckdb_scalar_function_add_parameter"))
+def duckdb_scalar_function_add_parameter(scalar_function_p, type_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_add_parameter """
+    return _call_lib_func("duckdb_scalar_function_add_parameter", (scalar_function_p, type_p))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_return_type"))
+def duckdb_scalar_function_set_return_type(scalar_function_p, type_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_return_type """
+    return _call_lib_func("duckdb_scalar_function_set_return_type", (scalar_function_p, type_p))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_function"))
+def duckdb_scalar_function_set_function(scalar_function_p, function_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_function """
+    return _call_lib_func("duckdb_scalar_function_set_function", (scalar_function_p, function_p))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_bind"))
+def duckdb_scalar_function_set_bind(scalar_function_p, bind_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_bind """
+    return _call_lib_func("duckdb_scalar_function_set_bind", (scalar_function_p, bind_p))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_extra_info"))
+def duckdb_scalar_function_set_extra_info(scalar_function_p, extra_info_p, destroy_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_extra_info """
+    return _call_lib_func("duckdb_scalar_function_set_extra_info", (scalar_function_p, extra_info_p, destroy_p))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_varargs"))
+def duckdb_scalar_function_set_varargs(scalar_function_p, type_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_varargs """
+    return _call_lib_func("duckdb_scalar_function_set_varargs", (scalar_function_p, type_p))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_volatile"))
+def duckdb_scalar_function_set_volatile(scalar_function_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_volatile """
+    return _call_lib_func("duckdb_scalar_function_set_volatile", (scalar_function_p,))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_special_handling"))
+def duckdb_scalar_function_set_special_handling(scalar_function_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_special_handling """
+    return _call_lib_func("duckdb_scalar_function_set_special_handling", (scalar_function_p,))
+
+
+@cres(signatures.get("duckdb_scalar_function_set_init"), if_available=True)
+def duckdb_scalar_function_set_init(scalar_function_p, init_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_init """
+    return _call_lib_func("duckdb_scalar_function_set_init", (scalar_function_p, init_p))
+
+
+@cres(signatures.get("duckdb_create_scalar_function_set"))
+def duckdb_create_scalar_function_set(name_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_scalar_function_set """
+    return _call_lib_func("duckdb_create_scalar_function_set", (name_p,))
+
+
+@cres(signatures.get("duckdb_destroy_scalar_function_set"))
+def duckdb_destroy_scalar_function_set(set_pp):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_scalar_function_set """
+    return _call_lib_func("duckdb_destroy_scalar_function_set", (set_pp,))
+
+
+@cres(signatures.get("duckdb_add_scalar_function_to_set"))
+def duckdb_add_scalar_function_to_set(set_p, scalar_function_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_add_scalar_function_to_set """
+    return _call_lib_func("duckdb_add_scalar_function_to_set", (set_p, scalar_function_p))
+
+
+@cres(signatures.get("duckdb_register_scalar_function_set"))
+def duckdb_register_scalar_function_set(connection_p, set_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_register_scalar_function_set """
+    return _call_lib_func("duckdb_register_scalar_function_set", (connection_p, set_p))
+
+
+# ── Aggregate Functions ──────────────────────────────────────────────
+
+@cres(signatures.get("duckdb_create_aggregate_function"))
+def duckdb_create_aggregate_function():
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_aggregate_function """
+    return _call_lib_func("duckdb_create_aggregate_function", ())
+
+
+@cres(signatures.get("duckdb_destroy_aggregate_function"))
+def duckdb_destroy_aggregate_function(aggregate_function_pp):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_aggregate_function """
+    return _call_lib_func("duckdb_destroy_aggregate_function", (aggregate_function_pp,))
+
+
+@cres(signatures.get("duckdb_register_aggregate_function"))
+def duckdb_register_aggregate_function(connection_p, aggregate_function_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_register_aggregate_function """
+    return _call_lib_func("duckdb_register_aggregate_function", (connection_p, aggregate_function_p))
+
+
+@cres(signatures.get("duckdb_aggregate_function_set_name"))
+def duckdb_aggregate_function_set_name(aggregate_function_p, name_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_aggregate_function_set_name """
+    return _call_lib_func("duckdb_aggregate_function_set_name", (aggregate_function_p, name_p))
+
+
+@cres(signatures.get("duckdb_aggregate_function_add_parameter"))
+def duckdb_aggregate_function_add_parameter(aggregate_function_p, type_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_aggregate_function_add_parameter """
+    return _call_lib_func("duckdb_aggregate_function_add_parameter", (aggregate_function_p, type_p))
+
+
+@cres(signatures.get("duckdb_aggregate_function_set_return_type"))
+def duckdb_aggregate_function_set_return_type(aggregate_function_p, type_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_aggregate_function_set_return_type """
+    return _call_lib_func("duckdb_aggregate_function_set_return_type", (aggregate_function_p, type_p))
+
+
+@cres(signatures.get("duckdb_aggregate_function_set_functions"))
+def duckdb_aggregate_function_set_functions(aggregate_function_p, state_size_p, init_p, update_p, combine_p, finalize_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_aggregate_function_set_functions """
+    return _call_lib_func("duckdb_aggregate_function_set_functions", (aggregate_function_p, state_size_p, init_p, update_p, combine_p, finalize_p))
+
+
+@cres(signatures.get("duckdb_aggregate_function_set_destructor"))
+def duckdb_aggregate_function_set_destructor(aggregate_function_p, destroy_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_aggregate_function_set_destructor """
+    return _call_lib_func("duckdb_aggregate_function_set_destructor", (aggregate_function_p, destroy_p))
+
+
+@cres(signatures.get("duckdb_aggregate_function_set_extra_info"))
+def duckdb_aggregate_function_set_extra_info(aggregate_function_p, extra_info_p, destroy_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_aggregate_function_set_extra_info """
+    return _call_lib_func("duckdb_aggregate_function_set_extra_info", (aggregate_function_p, extra_info_p, destroy_p))
+
+
+@cres(signatures.get("duckdb_aggregate_function_set_special_handling"))
+def duckdb_aggregate_function_set_special_handling(aggregate_function_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_aggregate_function_set_special_handling """
+    return _call_lib_func("duckdb_aggregate_function_set_special_handling", (aggregate_function_p,))
+
+
+@cres(signatures.get("duckdb_create_aggregate_function_set"))
+def duckdb_create_aggregate_function_set(name_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_aggregate_function_set """
+    return _call_lib_func("duckdb_create_aggregate_function_set", (name_p,))
+
+
+@cres(signatures.get("duckdb_destroy_aggregate_function_set"))
+def duckdb_destroy_aggregate_function_set(set_pp):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_aggregate_function_set """
+    return _call_lib_func("duckdb_destroy_aggregate_function_set", (set_pp,))
+
+
+@cres(signatures.get("duckdb_add_aggregate_function_to_set"))
+def duckdb_add_aggregate_function_to_set(set_p, aggregate_function_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_add_aggregate_function_to_set """
+    return _call_lib_func("duckdb_add_aggregate_function_to_set", (set_p, aggregate_function_p))
+
+
+@cres(signatures.get("duckdb_register_aggregate_function_set"))
+def duckdb_register_aggregate_function_set(connection_p, set_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_register_aggregate_function_set """
+    return _call_lib_func("duckdb_register_aggregate_function_set", (connection_p, set_p))
+
+
+# ── Callback-Side Accessors ──────────────────────────────────────────
+
+@cres(signatures.get("duckdb_function_get_extra_info"))
+def duckdb_function_get_extra_info(info_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_function_get_extra_info """
+    return _call_lib_func("duckdb_function_get_extra_info", (info_p,))
+
+
+@cres(signatures.get("duckdb_function_set_error"))
+def duckdb_function_set_error(info_p, error_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_function_set_error """
+    return _call_lib_func("duckdb_function_set_error", (info_p, error_p))
 
 
 @intrinsic
