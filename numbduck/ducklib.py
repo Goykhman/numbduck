@@ -1681,6 +1681,22 @@ def duckdb_scalar_function_set_error(info_p, error_p):
 
 
 @intrinsic
+def as_voidptr(typingctx, val):
+    """Cast intp (int64) to voidptr for use with carray() in @njit code.
+
+    numbduck returns all pointers as intp, but numba's carray() requires
+    voidptr.  This intrinsic emits an LLVM inttoptr to bridge the two.
+    """
+    from numba.core import types as nb_types
+    sig = nb_types.voidptr(nb_types.intp)
+
+    def codegen(context, builder, sig, args):
+        return builder.inttoptr(
+            args[0], context.get_value_type(nb_types.voidptr))
+    return sig, codegen
+
+
+@intrinsic
 def _duckdb_bind_hugeint(typingctx, prepared_statement_p_ty, param_idx_ty, hugeint_tup_ty):
     def codegen(context, builder: IRBuilder, signature, arguments):
         prepared_statement_p, param_idx, hugeint_tup = arguments

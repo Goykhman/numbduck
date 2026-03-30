@@ -4,7 +4,6 @@ import numpy
 import pytest
 from numba import njit, cfunc, carray
 from numba import types as nb_types
-from numba.extending import intrinsic
 from numbox.utils.lowlevel import get_unicode_data_p
 
 from numba.core.types import intp
@@ -1883,15 +1882,7 @@ def test_create_enum_type():
 # ── Scalar Function Tests ────────────────────────────────────────────
 
 
-@intrinsic
-def _as_voidptr(typingctx, val):
-    """Cast intp (int64) to voidptr for use with carray in @njit code."""
-    sig = nb_types.voidptr(nb_types.intp)
-
-    def codegen(context, builder, sig, args):
-        return builder.inttoptr(
-            args[0], context.get_value_type(nb_types.voidptr))
-    return sig, codegen
+_as_voidptr = ducklib.as_voidptr
 
 
 @njit
@@ -2214,6 +2205,27 @@ def _agg_update_cb(info, chunk, states):
 
 
 @njit
+def _agg_update_i64_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    state_ptrs = carray(
+        _as_voidptr(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _as_voidptr(in_data), (n,), dtype=numpy.int64)
+    for i in range(n):
+        acc = carray(
+            _as_voidptr(state_ptrs[i]),
+            (1,), dtype=numpy.int64)
+        acc[0] += in_vals[i]
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _agg_update_i64_cb(info, chunk, states):
+    _agg_update_i64_impl(info, chunk, states)
+
+
+@njit
 def _agg_combine_impl(info, source, target, count):
     src_ptrs = carray(_as_voidptr(source), (count,), dtype=numpy.intp)
     tgt_ptrs = carray(_as_voidptr(target), (count,), dtype=numpy.intp)
@@ -2306,4 +2318,181 @@ def test_aggregate_function_round_trip():
     chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
     ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+# ── Version-Conditional Tests ────────────────────────────────────────
+
+
+@njit
+def _init_cb_impl(info):
+    pass
+
+
+@cfunc(nb_types.void(nb_types.intp))
+def _init_cb(info):
+    _init_cb_impl(info)
+
+
+@pytest.mark.skipif(
+    not ducklib._has_symbol('duckdb_scalar_function_set_init'),
+    reason="duckdb_scalar_function_set_init not available",
+)
+def test_scalar_function_set_init():
+    """Verify set_init callback is accepted (v1.5+ only)."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("with_init"))
+
+    DUCKDB_TYPE_INTEGER = 4
+    int_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(
+        func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(
+        func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(
+        func_p, _add_one_cb.address)
+    ducklib.duckdb_scalar_function_set_init(
+        func_p, _init_cb.address)
+
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT with_init(42)")
+    rc = ducklib.duckdb_query(
+        conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int32 * 1).from_address(data_p)[0]
+    assert val == 43, f"Expected 43, got {val}"
+
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+# ── Aggregate Function Set Tests ─────────────────────────────────────
+
+
+def test_aggregate_function_set_overloads():
+    """Register overloaded aggregate with int32 and int64 variants."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t2 AS SELECT * FROM"
+        " (VALUES (1), (2), (3)) AS t(v)")
+    rc = ducklib.duckdb_query(
+        conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    DUCKDB_TYPE_INTEGER = 4
+    DUCKDB_TYPE_BIGINT = 5
+
+    # Integer input variant (reuses existing agg callbacks)
+    int_func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(
+        int_func_p, get_unicode_data_p("my_sum2"))
+    int_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_INTEGER)
+    bigint_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_aggregate_function_add_parameter(
+        int_func_p, int_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(
+        int_func_p, bigint_type_p)
+    ducklib.duckdb_aggregate_function_set_functions(
+        int_func_p, _agg_state_size_cb.address,
+        _agg_init_cb.address, _agg_update_cb.address,
+        _agg_combine_cb.address, _agg_finalize_cb.address)
+
+    # Bigint input variant
+    big_func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(
+        big_func_p, get_unicode_data_p("my_sum2"))
+    ducklib.duckdb_aggregate_function_add_parameter(
+        big_func_p, bigint_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(
+        big_func_p, bigint_type_p)
+    ducklib.duckdb_aggregate_function_set_functions(
+        big_func_p, _agg_state_size_cb.address,
+        _agg_init_cb.address, _agg_update_i64_cb.address,
+        _agg_combine_cb.address, _agg_finalize_cb.address)
+
+    for tp in [int_type_p, bigint_type_p]:
+        buf = numpy.array([tp], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+    # Create set, add both, register
+    set_p = ducklib.duckdb_create_aggregate_function_set(
+        get_unicode_data_p("my_sum2"))
+    rc = ducklib.duckdb_add_aggregate_function_to_set(
+        set_p, int_func_p)
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_add_aggregate_function_to_set(
+        set_p, big_func_p)
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_register_aggregate_function_set(
+        conn_p, set_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    for p in [int_func_p, big_func_p]:
+        buf = numpy.array([p], dtype=numpy.intp)
+        ducklib.duckdb_destroy_aggregate_function(
+            buf.ctypes.data)
+    set_buf = numpy.array([set_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function_set(
+        set_buf.ctypes.data)
+
+    # Test integer input variant
+    result = create_duckdb_result()
+    rc = ducklib.duckdb_query(
+        conn_p,
+        get_unicode_data_p(
+            "SELECT my_sum2(v::INTEGER) FROM t2"),
+        result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert val == 6, f"Expected 6, got {val}"
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    # Test bigint input variant
+    result = create_duckdb_result()
+    rc = ducklib.duckdb_query(
+        conn_p,
+        get_unicode_data_p(
+            "SELECT my_sum2(v::BIGINT) FROM t2"),
+        result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert val == 6, f"Expected 6, got {val}"
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
     aux_close_db(duckdb_database, duckdb_connection)
