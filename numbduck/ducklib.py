@@ -350,7 +350,6 @@ signatures["duckdb_value_to_string"] = intp(intp)
 signatures["duckdb_vector_get_data"] = intp(intp)
 signatures["duckdb_vector_get_validity"] = uint64(intp)
 
-# ── Scalar Functions ─────────────────────────────────────────────────
 signatures["duckdb_create_scalar_function"] = intp()
 signatures["duckdb_destroy_scalar_function"] = void(intp)
 signatures["duckdb_register_scalar_function"] = duckdb_state_ty(intp, intp)
@@ -369,7 +368,6 @@ signatures["duckdb_destroy_scalar_function_set"] = void(intp)
 signatures["duckdb_add_scalar_function_to_set"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_register_scalar_function_set"] = duckdb_state_ty(intp, intp)
 
-# ── Aggregate Functions ──────────────────────────────────────────────
 signatures["duckdb_create_aggregate_function"] = intp()
 signatures["duckdb_destroy_aggregate_function"] = void(intp)
 signatures["duckdb_register_aggregate_function"] = duckdb_state_ty(intp, intp)
@@ -385,7 +383,6 @@ signatures["duckdb_destroy_aggregate_function_set"] = void(intp)
 signatures["duckdb_add_aggregate_function_to_set"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_register_aggregate_function_set"] = duckdb_state_ty(intp, intp)
 
-# ── Callback-Side Accessors ──────────────────────────────────────────
 signatures["duckdb_scalar_function_get_extra_info"] = intp(intp)
 signatures["duckdb_scalar_function_set_error"] = void(intp, intp)
 
@@ -1476,8 +1473,6 @@ def duckdb_vector_get_validity(duckdb_vector_p):
     return _call_lib_func("duckdb_vector_get_validity", (duckdb_vector_p,))
 
 
-# ── Scalar Functions ─────────────────────────────────────────────────
-
 @cres(signatures.get("duckdb_create_scalar_function"))
 def duckdb_create_scalar_function():
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_scalar_function """
@@ -1580,8 +1575,6 @@ def duckdb_register_scalar_function_set(connection_p, set_p):
     return _call_lib_func("duckdb_register_scalar_function_set", (connection_p, set_p))
 
 
-# ── Aggregate Functions ──────────────────────────────────────────────
-
 @cres(signatures.get("duckdb_create_aggregate_function"))
 def duckdb_create_aggregate_function():
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_aggregate_function """
@@ -1666,8 +1659,6 @@ def duckdb_register_aggregate_function_set(connection_p, set_p):
     return _call_lib_func("duckdb_register_aggregate_function_set", (connection_p, set_p))
 
 
-# ── Callback-Side Accessors ──────────────────────────────────────────
-
 @cres(signatures.get("duckdb_scalar_function_get_extra_info"))
 def duckdb_scalar_function_get_extra_info(info_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_get_extra_info """
@@ -1679,21 +1670,6 @@ def duckdb_scalar_function_set_error(info_p, error_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_error """
     return _call_lib_func("duckdb_scalar_function_set_error", (info_p, error_p))
 
-
-@intrinsic
-def as_voidptr(typingctx, val):
-    """Cast intp (pointer-sized integer) to voidptr for use with carray() in @njit code.
-
-    numbduck returns all pointers as intp, but numba's carray() requires
-    voidptr.  This intrinsic emits an LLVM inttoptr to bridge the two.
-    """
-    from numba.core import types as nb_types
-    sig = nb_types.voidptr(nb_types.intp)
-
-    def codegen(context, builder, sig, args):
-        return builder.inttoptr(
-            args[0], context.get_value_type(nb_types.voidptr))
-    return sig, codegen
 
 
 @intrinsic

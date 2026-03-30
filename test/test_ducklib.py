@@ -1882,8 +1882,6 @@ def test_create_enum_type():
 # ── Scalar Function Tests ────────────────────────────────────────────
 
 
-_as_voidptr = ducklib.as_voidptr
-
 
 @njit
 def _add_one_impl(info, chunk, output):
@@ -1891,8 +1889,8 @@ def _add_one_impl(info, chunk, output):
     input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
     in_data = ducklib.duckdb_vector_get_data(input_vec)
     out_data = ducklib.duckdb_vector_get_data(output)
-    in_arr = carray(_as_voidptr(in_data), (n,), dtype=numpy.int32)
-    out_arr = carray(_as_voidptr(out_data), (n,), dtype=numpy.int32)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
     for i in range(n):
         out_arr[i] = in_arr[i] + 1
 
@@ -1953,7 +1951,7 @@ def _extra_info_impl(info, chunk, output):
     extra = ducklib.duckdb_scalar_function_get_extra_info(info)
     n = ducklib.duckdb_data_chunk_get_size(chunk)
     out_data = ducklib.duckdb_vector_get_data(output)
-    out_arr = carray(_as_voidptr(out_data), (n,), dtype=numpy.int64)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int64)
     for i in range(n):
         out_arr[i] = extra
 
@@ -2053,8 +2051,8 @@ def _double_it_int_impl(info, chunk, output):
     in_data = ducklib.duckdb_vector_get_data(
         ducklib.duckdb_data_chunk_get_vector(chunk, 0))
     out_data = ducklib.duckdb_vector_get_data(output)
-    in_arr = carray(_as_voidptr(in_data), (n,), dtype=numpy.int32)
-    out_arr = carray(_as_voidptr(out_data), (n,), dtype=numpy.int32)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
     for i in range(n):
         out_arr[i] = in_arr[i] * 2
 
@@ -2070,8 +2068,8 @@ def _double_it_dbl_impl(info, chunk, output):
     in_data = ducklib.duckdb_vector_get_data(
         ducklib.duckdb_data_chunk_get_vector(chunk, 0))
     out_data = ducklib.duckdb_vector_get_data(output)
-    in_arr = carray(_as_voidptr(in_data), (n,), dtype=numpy.float64)
-    out_arr = carray(_as_voidptr(out_data), (n,), dtype=numpy.float64)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.float64)
     for i in range(n):
         out_arr[i] = in_arr[i] * 2.0
 
@@ -2183,7 +2181,7 @@ def _agg_state_size_cb(info):
 
 @njit
 def _agg_init_impl(info, state):
-    carray(_as_voidptr(state), (1,), dtype=numpy.int64)[0] = 0
+    carray(_cast_int_to_void_p(state), (1,), dtype=numpy.int64)[0] = 0
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp))
@@ -2196,10 +2194,10 @@ def _agg_update_impl(info, chunk, states):
     n = ducklib.duckdb_data_chunk_get_size(chunk)
     input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
     in_data = ducklib.duckdb_vector_get_data(input_vec)
-    state_ptrs = carray(_as_voidptr(states), (n,), dtype=numpy.intp)
-    in_vals = carray(_as_voidptr(in_data), (n,), dtype=numpy.int32)
+    state_ptrs = carray(_cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
     for i in range(n):
-        acc = carray(_as_voidptr(state_ptrs[i]), (1,), dtype=numpy.int64)
+        acc = carray(_cast_int_to_void_p(state_ptrs[i]), (1,), dtype=numpy.int64)
         acc[0] += in_vals[i]
 
 
@@ -2214,12 +2212,12 @@ def _agg_update_i64_impl(info, chunk, states):
     input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
     in_data = ducklib.duckdb_vector_get_data(input_vec)
     state_ptrs = carray(
-        _as_voidptr(states), (n,), dtype=numpy.intp)
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
     in_vals = carray(
-        _as_voidptr(in_data), (n,), dtype=numpy.int64)
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.int64)
     for i in range(n):
         acc = carray(
-            _as_voidptr(state_ptrs[i]),
+            _cast_int_to_void_p(state_ptrs[i]),
             (1,), dtype=numpy.int64)
         acc[0] += in_vals[i]
 
@@ -2231,11 +2229,11 @@ def _agg_update_i64_cb(info, chunk, states):
 
 @njit
 def _agg_combine_impl(info, source, target, count):
-    src_ptrs = carray(_as_voidptr(source), (count,), dtype=numpy.intp)
-    tgt_ptrs = carray(_as_voidptr(target), (count,), dtype=numpy.intp)
+    src_ptrs = carray(_cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_ptrs = carray(_cast_int_to_void_p(target), (count,), dtype=numpy.intp)
     for i in range(count):
-        src_acc = carray(_as_voidptr(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
-        tgt_acc = carray(_as_voidptr(tgt_ptrs[i]), (1,), dtype=numpy.int64)
+        src_acc = carray(_cast_int_to_void_p(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
+        tgt_acc = carray(_cast_int_to_void_p(tgt_ptrs[i]), (1,), dtype=numpy.int64)
         tgt_acc[0] += src_acc
 
 
@@ -2249,12 +2247,12 @@ def _agg_combine_cb(info, source, target, count):
 def _agg_finalize_impl(info, source, result, count, offset):
     out_data = ducklib.duckdb_vector_get_data(result)
     src_ptrs = carray(
-        _as_voidptr(source), (count,), dtype=numpy.intp)
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
     out_vals = carray(
-        _as_voidptr(out_data), (offset + count,),
+        _cast_int_to_void_p(out_data), (offset + count,),
         dtype=numpy.int64)
     for i in range(count):
-        acc = carray(_as_voidptr(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
+        acc = carray(_cast_int_to_void_p(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
         out_vals[offset + i] = acc
 
 
