@@ -1102,9 +1102,7 @@ def jit_connect_query_disconnect():
 
 
 def test_jit_connect_query_disconnect():
-    (open_rc, db_p, connect_rc, conn_p,
-     query_rc, conn_after) = jit_connect_query_disconnect(
-        )
+    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after = jit_connect_query_disconnect()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert db_p != 0, f"expected valid db pointer, got {db_p}"
     assert connect_rc == ducklib.DuckDBSuccess, (
