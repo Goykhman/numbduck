@@ -1891,9 +1891,10 @@ def _add_one_impl(info, chunk, output):
     input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
     in_data = ducklib.duckdb_vector_get_data(input_vec)
     out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_as_voidptr(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_as_voidptr(out_data), (n,), dtype=numpy.int32)
     for i in range(n):
-        val = carray(_as_voidptr(in_data), (n,), dtype=numpy.int32)[i]
-        carray(_as_voidptr(out_data), (n,), dtype=numpy.int32)[i] = val + 1
+        out_arr[i] = in_arr[i] + 1
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
@@ -1952,8 +1953,9 @@ def _extra_info_impl(info, chunk, output):
     extra = ducklib.duckdb_scalar_function_get_extra_info(info)
     n = ducklib.duckdb_data_chunk_get_size(chunk)
     out_data = ducklib.duckdb_vector_get_data(output)
+    out_arr = carray(_as_voidptr(out_data), (n,), dtype=numpy.int64)
     for i in range(n):
-        carray(_as_voidptr(out_data), (n,), dtype=numpy.int64)[i] = extra
+        out_arr[i] = extra
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
@@ -2051,9 +2053,10 @@ def _double_it_int_impl(info, chunk, output):
     in_data = ducklib.duckdb_vector_get_data(
         ducklib.duckdb_data_chunk_get_vector(chunk, 0))
     out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_as_voidptr(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_as_voidptr(out_data), (n,), dtype=numpy.int32)
     for i in range(n):
-        carray(_as_voidptr(out_data), (n,), dtype=numpy.int32)[i] = (
-            carray(_as_voidptr(in_data), (n,), dtype=numpy.int32)[i] * 2)
+        out_arr[i] = in_arr[i] * 2
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
@@ -2067,9 +2070,10 @@ def _double_it_dbl_impl(info, chunk, output):
     in_data = ducklib.duckdb_vector_get_data(
         ducklib.duckdb_data_chunk_get_vector(chunk, 0))
     out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_as_voidptr(in_data), (n,), dtype=numpy.float64)
+    out_arr = carray(_as_voidptr(out_data), (n,), dtype=numpy.float64)
     for i in range(n):
-        carray(_as_voidptr(out_data), (n,), dtype=numpy.float64)[i] = (
-            carray(_as_voidptr(in_data), (n,), dtype=numpy.float64)[i] * 2.0)
+        out_arr[i] = in_arr[i] * 2.0
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))

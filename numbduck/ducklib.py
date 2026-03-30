@@ -1682,7 +1682,7 @@ def duckdb_scalar_function_set_error(info_p, error_p):
 
 @intrinsic
 def as_voidptr(typingctx, val):
-    """Cast intp (int64) to voidptr for use with carray() in @njit code.
+    """Cast intp (pointer-sized integer) to voidptr for use with carray() in @njit code.
 
     numbduck returns all pointers as intp, but numba's carray() requires
     voidptr.  This intrinsic emits an LLVM inttoptr to bridge the two.
