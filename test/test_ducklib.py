@@ -2,8 +2,9 @@ import ctypes
 
 import numpy
 import pytest
-from numba import njit
-from numba import carray
+from numba import njit, cfunc, carray
+from numba import types as nb_types
+from numba.extending import intrinsic
 from numbox.utils.lowlevel import get_unicode_data_p
 
 from numba.core.types import intp
@@ -22,7 +23,9 @@ def aux_open_database(db_name_p_):
     duckdb_database = create_duckdb_database()
     duckdb_database_pp = duckdb_database.ctypes.data
     duckdb_open_rc = ducklib.duckdb_open(db_name_p_, duckdb_database_pp)
-    assert duckdb_open_rc == ducklib.DuckDBSuccess, f"Failed to open duckdb, rc = {duckdb_open_rc}"
+    assert duckdb_open_rc == ducklib.DuckDBSuccess, (
+        f"Failed to open duckdb, rc = {duckdb_open_rc}"
+    )
     return duckdb_database
 
 
@@ -31,7 +34,9 @@ def test_open_close_database():
     db_name_p = ctypes.c_void_p.from_buffer(db_name_bytes).value
     duckdb_database = aux_open_database(db_name_p)
     duckdb_database_p = duckdb_database[0]
-    assert duckdb_database_p != 0, f"Expected pointer to DB, got {duckdb_database_p}"
+    assert duckdb_database_p != 0, (
+        f"Expected pointer to DB, got {duckdb_database_p}"
+    )
     duckdb_database_pp = duckdb_database.ctypes.data
     ducklib.duckdb_close(duckdb_database_pp)
 
@@ -42,7 +47,9 @@ def test_open_invalid_path():
     duckdb_database = create_duckdb_database()
     duckdb_database_pp = duckdb_database.ctypes.data
     rc = ducklib.duckdb_open(db_name_p, duckdb_database_pp)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid path, got {rc}"
+    assert rc == ducklib.DuckDBError, (
+        f"Expected DuckDBError for invalid path, got {rc}"
+    )
     ducklib.duckdb_close(duckdb_database_pp)
 
 
@@ -52,7 +59,8 @@ def aux_connect_db():
 
     duckdb_connection = create_duckdb_connection()
     duckdb_connection_pp = duckdb_connection.ctypes.data
-    duckdb_connect_rc = ducklib.duckdb_connect(duckdb_database_p, duckdb_connection_pp)
+    duckdb_connect_rc = ducklib.duckdb_connect(
+        duckdb_database_p, duckdb_connection_pp)
     assert duckdb_connect_rc == ducklib.DuckDBSuccess, duckdb_connect_rc
     return duckdb_database, duckdb_connection
 
@@ -66,8 +74,12 @@ def test_connect():
     duckdb_database, duckdb_connection = aux_connect_db()
     duckdb_database_p = duckdb_database[0]
     duckdb_connection_p = duckdb_connection[0]
-    assert duckdb_database_p != 0, f"Expected pointer to DB, got {duckdb_database_p}"
-    assert duckdb_connection_p != 0, f"Expected pointer to connection, got {duckdb_connection_p}"
+    assert duckdb_database_p != 0, (
+        f"Expected pointer to DB, got {duckdb_database_p}"
+    )
+    assert duckdb_connection_p != 0, (
+        f"Expected pointer to connection, got {duckdb_connection_p}"
+    )
     aux_close_db(duckdb_database, duckdb_connection)
 
 
@@ -75,20 +87,28 @@ def test_connect_invalid_database():
     duckdb_connection = create_duckdb_connection()
     duckdb_connection_pp = duckdb_connection.ctypes.data
     rc = ducklib.duckdb_connect(0, duckdb_connection_pp)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for null database, got {rc}"
+    assert rc == ducklib.DuckDBError, (
+        f"Expected DuckDBError for null database, got {rc}"
+    )
 
 
 def test_disconnect():
     duckdb_database, duckdb_connection = aux_connect_db()
     duckdb_connection_p = duckdb_connection[0]
-    assert duckdb_connection_p != 0, f"Expected pointer to connection, got {duckdb_connection_p}"
+    assert duckdb_connection_p != 0, (
+        f"Expected pointer to connection, got {duckdb_connection_p}"
+    )
     query_txt = "SELECT 1;"
     query_p = get_unicode_data_p(query_txt)
     rc = ducklib.duckdb_query(duckdb_connection_p, query_p, 0)
-    assert rc == ducklib.DuckDBSuccess, f"Query before disconnect failed, rc = {rc}"
+    assert rc == ducklib.DuckDBSuccess, (
+        f"Query before disconnect failed, rc = {rc}"
+    )
     duckdb_connection_pp = duckdb_connection.ctypes.data
     ducklib.duckdb_disconnect(duckdb_connection_pp)
-    assert duckdb_connection[0] == 0, f"Expected null pointer after disconnect, got {duckdb_connection[0]}"
+    assert duckdb_connection[0] == 0, (
+        f"Expected null pointer after disconnect, got {duckdb_connection[0]}"
+    )
     ducklib.duckdb_close(duckdb_database.ctypes.data)
 
 
@@ -116,7 +136,8 @@ def aux_query_1():
     query_p = get_unicode_data_p(query_txt)
     out_result = create_duckdb_result()
     out_result_p = out_result.ctypes.data
-    duckdb_query_rc = ducklib.duckdb_query(duckdb_connection_p, query_p, out_result_p)
+    duckdb_query_rc = ducklib.duckdb_query(
+        duckdb_connection_p, query_p, out_result_p)
     assert duckdb_query_rc == ducklib.DuckDBSuccess, duckdb_query_rc
 
     return out_result, duckdb_database, duckdb_connection
@@ -126,7 +147,9 @@ def test_query():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     print(f"out_result = {out_result}")
     num_of_columns = out_result[0]
-    assert num_of_columns == 2, f"expected 'i', 'j', got {num_of_columns} columns"
+    assert num_of_columns == 2, (
+        f"expected 'i', 'j', got {num_of_columns} columns"
+    )
     aux_close_db(duckdb_database, duckdb_connection)
 
 
@@ -138,7 +161,9 @@ def test_query_invalid_sql():
     out_result = create_duckdb_result()
     out_result_p = out_result.ctypes.data
     rc = ducklib.duckdb_query(duckdb_connection_p, query_p, out_result_p)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid SQL, got {rc}"
+    assert rc == ducklib.DuckDBError, (
+        f"Expected DuckDBError for invalid SQL, got {rc}"
+    )
     ducklib.duckdb_destroy_result(out_result_p)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -157,7 +182,9 @@ def test_duckdb_destroy_result():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     out_result_p = out_result.ctypes.data
     num_of_cols = ducklib.duckdb_column_count(out_result_p)
-    assert num_of_cols == 2, f"Expected valid result before destroy, got {num_of_cols} columns"
+    assert num_of_cols == 2, (
+        f"Expected valid result before destroy, got {num_of_cols} columns"
+    )
     ducklib.duckdb_destroy_result(out_result_p)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -176,29 +203,38 @@ def aux_get_data_vector():
 
 
 def test_duckdb_data_chunk_get_column_count():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    (duckdb_result, data_chunk_p,
+     duckdb_database, duckdb_connection) = aux_get_data_vector()
     col_count = ducklib.duckdb_data_chunk_get_column_count(data_chunk_p)
     assert col_count == 2, f"Expected 2 columns, got {col_count}"
     aux_close_db(duckdb_database, duckdb_connection)
 
 
 def test_duckdb_data_chunk_get_size():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    (duckdb_result, data_chunk_p,
+     duckdb_database, duckdb_connection) = aux_get_data_vector()
     chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
     assert chunk_size == 3, f"Expected 3 rows in chunk, got {chunk_size}"
     aux_close_db(duckdb_database, duckdb_connection)
 
 
 def test_duckdb_destroy_data_chunk():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
-    assert data_chunk_p != 0, f"Expected valid chunk pointer, got {data_chunk_p}"
+    (duckdb_result, data_chunk_p,
+     duckdb_database, duckdb_connection) = aux_get_data_vector()
+    assert data_chunk_p != 0, (
+        f"Expected valid chunk pointer, got {data_chunk_p}"
+    )
     chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
-    assert chunk_size > 0, f"Expected rows in chunk before destroy, got {chunk_size}"
+    assert chunk_size > 0, (
+        f"Expected rows in chunk before destroy, got {chunk_size}"
+    )
     data_chunk = create_duckdb_data_chunk()
     data_chunk[0] = data_chunk_p
     data_chunk_pp = data_chunk.ctypes.data
     ducklib.duckdb_destroy_data_chunk(data_chunk_pp)
-    assert data_chunk[0] == 0, f"Expected null after destroy, got {data_chunk[0]}"
+    assert data_chunk[0] == 0, (
+        f"Expected null after destroy, got {data_chunk[0]}"
+    )
     aux_close_db(duckdb_database, duckdb_connection)
 
 
@@ -213,15 +249,22 @@ def test_duckdb_fetch_chunk_exhausted():
 
 
 def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    (duckdb_result, data_chunk_p,
+     duckdb_database, duckdb_connection) = aux_get_data_vector()
     assert data_chunk_p
     j_vec_p = ducklib.duckdb_data_chunk_get_vector(data_chunk_p, 1)
     j_vec_data_p = ducklib.duckdb_vector_get_data(j_vec_p)
     j_validity_p = ducklib.duckdb_vector_get_validity(j_vec_p)
     j_arr = arr_ty.from_address(j_vec_data_p)
-    j_val = [ducklib.duckdb_validity_row_is_valid(j_validity_p, ind_) for ind_ in range(3)]
+    j_val = [
+        ducklib.duckdb_validity_row_is_valid(j_validity_p, ind_)
+        for ind_ in range(3)
+    ]
     assert j_val == [1, 1, 0]
-    assert all([j_val and j_arr_ == j_col_ or True for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)])
+    assert all([
+        j_val and j_arr_ == j_col_ or True
+        for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)
+    ])
     aux_close_db(duckdb_database, duckdb_connection)
 
 
@@ -237,7 +280,10 @@ def aux_prepare(connection_p, sql):
 
 
 def aux_execute_prepared(stmt_p):
-    """Execute a prepared statement, fetch the first chunk. Returns (result, chunk_p)."""
+    """Execute prepared statement, fetch first chunk.
+
+    Returns (result, chunk_p).
+    """
     out_result = create_duckdb_result()
     out_result_p = out_result.ctypes.data
     rc = ducklib.duckdb_execute_prepared(stmt_p, out_result_p)
@@ -381,7 +427,9 @@ def test_bind_invalid_param_index():
     stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
     assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
     rc = ducklib.duckdb_bind_int32(stmt[0], 999, 42)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid param index, got {rc}"
+    assert rc == ducklib.DuckDBError, (
+        f"Expected DuckDBError for invalid param index, got {rc}"
+    )
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -394,7 +442,9 @@ def test_execute_prepared_unbound_params():
     out_result = create_duckdb_result()
     out_result_p = out_result.ctypes.data
     rc = ducklib.duckdb_execute_prepared(stmt[0], out_result_p)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for unbound params, got {rc}"
+    assert rc == ducklib.DuckDBError, (
+        f"Expected DuckDBError for unbound params, got {rc}"
+    )
     ducklib.duckdb_destroy_result(out_result_p)
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
@@ -403,8 +453,11 @@ def test_execute_prepared_unbound_params():
 # --- Error Messages ---
 
 def test_prepare_error_on_invalid_sql():
-    """duckdb_prepare_error returns a non-null pointer with error text after failed prepare.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare_error """
+    """duckdb_prepare_error returns non-null pointer with error text.
+
+    After failed prepare.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare_error
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "NOT VALID SQL;")
@@ -425,14 +478,19 @@ def test_prepare_error_on_valid_sql():
     stmt, rc = aux_prepare(connection_p, "SELECT 1;")
     assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
     err_p = ducklib.duckdb_prepare_error(stmt[0])
-    assert err_p == 0, f"Expected null error pointer for valid SQL, got {err_p}"
+    assert err_p == 0, (
+        f"Expected null error pointer for valid SQL, got {err_p}"
+    )
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
 def test_result_error_on_invalid_query():
-    """duckdb_result_error returns a non-null pointer with error text after failed query.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_error """
+    """duckdb_result_error returns non-null pointer with error text.
+
+    After failed query.
+    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_error
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("NOT VALID SQL;")
@@ -459,7 +517,9 @@ def test_result_error_on_valid_query():
     rc = ducklib.duckdb_query(connection_p, query_p, out_result_p)
     assert rc == ducklib.DuckDBSuccess, f"Query failed, rc = {rc}"
     err_p = ducklib.duckdb_result_error(out_result_p)
-    assert err_p == 0, f"Expected null error pointer for valid query, got {err_p}"
+    assert err_p == 0, (
+        f"Expected null error pointer for valid query, got {err_p}"
+    )
     ducklib.duckdb_destroy_result(out_result_p)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -813,7 +873,8 @@ def test_bind_parameter_index():
     idx_buf = numpy.zeros(1, dtype=numpy.uint64)
     name_bytes = ctypes.c_char_p(b"1")
     name_p = ctypes.c_void_p.from_buffer(name_bytes).value
-    rc = ducklib.duckdb_bind_parameter_index(stmt[0], idx_buf.ctypes.data, name_p)
+    rc = ducklib.duckdb_bind_parameter_index(
+        stmt[0], idx_buf.ctypes.data, name_p)
     assert rc == ducklib.DuckDBSuccess
     assert idx_buf[0] == 1
     aux_destroy_prepared(stmt)
@@ -956,7 +1017,9 @@ def test_result_error_type_on_success():
     out_result_p = out_result.ctypes.data
     # DUCKDB_ERROR_INVALID = 0 (no error)
     error_type = ducklib.duckdb_result_error_type(out_result_p)
-    assert error_type == 0, f"Expected DUCKDB_ERROR_INVALID (0), got {error_type}"
+    assert error_type == 0, (
+        f"Expected DUCKDB_ERROR_INVALID (0), got {error_type}"
+    )
     ducklib.duckdb_destroy_result(out_result_p)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -966,7 +1029,9 @@ def test_result_return_type():
     result_tup = tuple(out_result)
     # DUCKDB_RESULT_TYPE_QUERY_RESULT = 3
     ret_type = ducklib.duckdb_result_return_type(result_tup)
-    assert ret_type == 3, f"Expected DUCKDB_RESULT_TYPE_QUERY_RESULT (3), got {ret_type}"
+    assert ret_type == 3, (
+        f"Expected DUCKDB_RESULT_TYPE_QUERY_RESULT (3), got {ret_type}"
+    )
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -1038,10 +1103,14 @@ def jit_connect_query_disconnect():
 
 
 def test_jit_connect_query_disconnect():
-    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after = jit_connect_query_disconnect()
+    (open_rc, db_p, connect_rc, conn_p,
+     query_rc, conn_after) = jit_connect_query_disconnect(
+        )
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert db_p != 0, f"expected valid db pointer, got {db_p}"
-    assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
+    assert connect_rc == ducklib.DuckDBSuccess, (
+        f"connect failed, rc={connect_rc}"
+    )
     assert conn_p != 0, f"expected valid connection pointer, got {conn_p}"
     assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
     assert conn_after == 0, f"expected null after disconnect, got {conn_after}"
@@ -1069,9 +1138,12 @@ def jit_prepare_bind_execute():
     nparams = ducklib.duckdb_nparams(stmt_p)
 
     # bind values
-    bind1_rc = ducklib.duckdb_bind_int32(stmt_p, numpy.uint64(1), numpy.int32(99))
-    bind2_rc = ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(2), numpy.int64(2**40))
-    bind3_rc = ducklib.duckdb_bind_double(stmt_p, numpy.uint64(3), numpy.float64(3.14))
+    bind1_rc = ducklib.duckdb_bind_int32(
+        stmt_p, numpy.uint64(1), numpy.int32(99))
+    bind2_rc = ducklib.duckdb_bind_int64(
+        stmt_p, numpy.uint64(2), numpy.int64(2**40))
+    bind3_rc = ducklib.duckdb_bind_double(
+        stmt_p, numpy.uint64(3), numpy.float64(3.14))
     bind4_rc = ducklib.duckdb_bind_null(stmt_p, numpy.uint64(4))
 
     # execute
@@ -1123,26 +1195,41 @@ def jit_prepare_bind_execute():
 
 
 def test_jit_prepare_bind_execute():
-    """Prepared statement with parameter binding from JIT context.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_nparams
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int32
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int64
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_double
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_null
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_execute_prepared
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_prepare """
+    """Prepared stmt with parameter binding from JIT context.
+
+    See:
+    - duckdb_prepare
+    - duckdb_nparams
+    - duckdb_bind_int32
+    - duckdb_bind_int64
+    - duckdb_bind_double
+    - duckdb_bind_null
+    - duckdb_execute_prepared
+    - duckdb_destroy_prepare
+    """
     (open_rc, connect_rc, prepare_rc, nparams,
      bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
      chunk_size, col0, col1, col2, col3_valid) = jit_prepare_bind_execute()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
-    assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
-    assert prepare_rc == ducklib.DuckDBSuccess, f"prepare failed, rc={prepare_rc}"
+    assert connect_rc == ducklib.DuckDBSuccess, (
+        f"connect failed, rc={connect_rc}"
+    )
+    assert prepare_rc == ducklib.DuckDBSuccess, (
+        f"prepare failed, rc={prepare_rc}"
+    )
     assert nparams == 4, f"expected 4 params, got {nparams}"
-    assert bind1_rc == ducklib.DuckDBSuccess, f"bind int32 failed, rc={bind1_rc}"
-    assert bind2_rc == ducklib.DuckDBSuccess, f"bind int64 failed, rc={bind2_rc}"
-    assert bind3_rc == ducklib.DuckDBSuccess, f"bind double failed, rc={bind3_rc}"
-    assert bind4_rc == ducklib.DuckDBSuccess, f"bind null failed, rc={bind4_rc}"
+    assert bind1_rc == ducklib.DuckDBSuccess, (
+        f"bind int32 failed, rc={bind1_rc}"
+    )
+    assert bind2_rc == ducklib.DuckDBSuccess, (
+        f"bind int64 failed, rc={bind2_rc}"
+    )
+    assert bind3_rc == ducklib.DuckDBSuccess, (
+        f"bind double failed, rc={bind3_rc}"
+    )
+    assert bind4_rc == ducklib.DuckDBSuccess, (
+        f"bind null failed, rc={bind4_rc}"
+    )
     assert exec_rc == ducklib.DuckDBSuccess, f"execute failed, rc={exec_rc}"
     assert chunk_size == 1, f"expected 1 row, got {chunk_size}"
     assert col0 == 99, f"col0: expected 99, got {col0}"
@@ -1330,8 +1417,12 @@ def test_create_get_uuid():
 
 
 @pytest.mark.skipif(
-    not (ducklib._has_symbol('duckdb_create_varint') and ducklib._has_symbol('duckdb_get_varint')),
-    reason="duckdb_create_varint or duckdb_get_varint not available in this duckdb version",
+    not (ducklib._has_symbol('duckdb_create_varint')
+         and ducklib._has_symbol('duckdb_get_varint')),
+    reason=(
+        "duckdb_create_varint or duckdb_get_varint "
+        "not available in this duckdb version"
+    ),
 )
 def test_create_get_varint():
     data_bytes = ctypes.create_string_buffer(b"\x01\x00", 2)
@@ -1551,9 +1642,17 @@ def test_struct_size_guard():
     assert sum(t.bitwidth for t in UniTuple(int32, 2)) / 8 == 8
 
     # Mixed-width tuples
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint64, int64))) / 8 == 18
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 == 19
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 > 16
+    assert sum(
+        t.bitwidth for t in Tuple((uint8, uint8, uint64, int64))
+    ) / 8 == 18
+    assert sum(
+        t.bitwidth
+        for t in Tuple((uint8, uint8, uint8, uint64, int64))
+    ) / 8 == 19
+    assert sum(
+        t.bitwidth
+        for t in Tuple((uint8, uint8, uint8, uint64, int64))
+    ) / 8 > 16
 
     # 24-byte struct (should fail the guard)
     assert sum(t.bitwidth for t in UniTuple(int64, 3)) / 8 == 24
@@ -1673,16 +1772,21 @@ def test_create_struct_type():
     DUCKDB_TYPE_STRUCT = 25
     DUCKDB_TYPE_INTEGER = 4
     DUCKDB_TYPE_VARCHAR = 17
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
-    varchar_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
-    types_arr = numpy.array([int_type_p, varchar_type_p], dtype=numpy.intp)
+    int_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_INTEGER)
+    varchar_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_VARCHAR)
+    types_arr = numpy.array(
+        [int_type_p, varchar_type_p], dtype=numpy.intp)
     name1 = ctypes.c_char_p(b"id")
     name2 = ctypes.c_char_p(b"name")
     names_arr = numpy.array(
-        [ctypes.c_void_p.from_buffer(name1).value, ctypes.c_void_p.from_buffer(name2).value],
+        [ctypes.c_void_p.from_buffer(name1).value,
+         ctypes.c_void_p.from_buffer(name2).value],
         dtype=numpy.intp
     )
-    struct_p = ducklib.duckdb_create_struct_type(types_arr.ctypes.data, names_arr.ctypes.data, 2)
+    struct_p = ducklib.duckdb_create_struct_type(
+        types_arr.ctypes.data, names_arr.ctypes.data, 2)
     assert struct_p != 0
     type_id = ducklib.duckdb_get_type_id(struct_p)
     assert type_id == DUCKDB_TYPE_STRUCT
@@ -1709,16 +1813,21 @@ def test_create_union_type():
     DUCKDB_TYPE_UNION = 28
     DUCKDB_TYPE_INTEGER = 4
     DUCKDB_TYPE_VARCHAR = 17
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
-    varchar_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
-    types_arr = numpy.array([int_type_p, varchar_type_p], dtype=numpy.intp)
+    int_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_INTEGER)
+    varchar_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_VARCHAR)
+    types_arr = numpy.array(
+        [int_type_p, varchar_type_p], dtype=numpy.intp)
     name1 = ctypes.c_char_p(b"num")
     name2 = ctypes.c_char_p(b"str")
     names_arr = numpy.array(
-        [ctypes.c_void_p.from_buffer(name1).value, ctypes.c_void_p.from_buffer(name2).value],
+        [ctypes.c_void_p.from_buffer(name1).value,
+         ctypes.c_void_p.from_buffer(name2).value],
         dtype=numpy.intp
     )
-    union_p = ducklib.duckdb_create_union_type(types_arr.ctypes.data, names_arr.ctypes.data, 2)
+    union_p = ducklib.duckdb_create_union_type(
+        types_arr.ctypes.data, names_arr.ctypes.data, 2)
     assert union_p != 0
     type_id = ducklib.duckdb_get_type_id(union_p)
     assert type_id == DUCKDB_TYPE_UNION
@@ -1772,9 +1881,6 @@ def test_create_enum_type():
 
 
 # ── Scalar Function Tests ────────────────────────────────────────────
-
-from numba import cfunc, types as nb_types
-from numba.extending import intrinsic
 
 
 @intrinsic
@@ -1870,7 +1976,8 @@ def test_scalar_function_extra_info():
     conn_p = duckdb_connection[0]
 
     func_p = ducklib.duckdb_create_scalar_function()
-    ducklib.duckdb_scalar_function_set_name(func_p, get_unicode_data_p("get_extra"))
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("get_extra"))
 
     DUCKDB_TYPE_BIGINT = 5
     bigint_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_BIGINT)
@@ -1921,7 +2028,8 @@ def test_scalar_function_set_error():
     conn_p = duckdb_connection[0]
 
     func_p = ducklib.duckdb_create_scalar_function()
-    ducklib.duckdb_scalar_function_set_name(func_p, get_unicode_data_p("will_fail"))
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("will_fail"))
 
     DUCKDB_TYPE_INTEGER = 4
     int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
@@ -1992,8 +2100,10 @@ def test_scalar_function_set_overloads():
         int_func_p, get_unicode_data_p("double_it"))
     int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
     ducklib.duckdb_scalar_function_add_parameter(int_func_p, int_type_p)
-    ducklib.duckdb_scalar_function_set_return_type(int_func_p, int_type_p)
-    ducklib.duckdb_scalar_function_set_function(int_func_p, _double_it_int_cb.address)
+    ducklib.duckdb_scalar_function_set_return_type(
+        int_func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_function(
+        int_func_p, _double_it_int_cb.address)
     type_buf = numpy.array([int_type_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
 
@@ -2002,9 +2112,12 @@ def test_scalar_function_set_overloads():
     ducklib.duckdb_scalar_function_set_name(
         dbl_func_p, get_unicode_data_p("double_it"))
     dbl_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_DOUBLE)
-    ducklib.duckdb_scalar_function_add_parameter(dbl_func_p, dbl_type_p)
-    ducklib.duckdb_scalar_function_set_return_type(dbl_func_p, dbl_type_p)
-    ducklib.duckdb_scalar_function_set_function(dbl_func_p, _double_it_dbl_cb.address)
+    ducklib.duckdb_scalar_function_add_parameter(
+        dbl_func_p, dbl_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(
+        dbl_func_p, dbl_type_p)
+    ducklib.duckdb_scalar_function_set_function(
+        dbl_func_p, _double_it_dbl_cb.address)
     type_buf = numpy.array([dbl_type_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
 
@@ -2119,8 +2232,11 @@ def _agg_combine_cb(info, source, target, count):
 @njit
 def _agg_finalize_impl(info, source, result, count, offset):
     out_data = ducklib.duckdb_vector_get_data(result)
-    src_ptrs = carray(_as_voidptr(source), (count,), dtype=numpy.intp)
-    out_vals = carray(_as_voidptr(out_data), (offset + count,), dtype=numpy.int64)
+    src_ptrs = carray(
+        _as_voidptr(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _as_voidptr(out_data), (offset + count,),
+        dtype=numpy.int64)
     for i in range(count):
         acc = carray(_as_voidptr(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
         out_vals[offset + i] = acc
