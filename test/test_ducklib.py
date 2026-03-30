@@ -261,7 +261,7 @@ def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
     ]
     assert j_val == [1, 1, 0]
     assert all([
-        j_val and j_arr_ == j_col_ or True
+        (j_arr_ == j_col_) if j_val_ else True
         for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)
     ])
     aux_close_db(duckdb_database, duckdb_connection)
