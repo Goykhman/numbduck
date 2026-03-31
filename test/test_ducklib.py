@@ -2595,8 +2595,8 @@ def test_jit_udf_vs_python_udf():
     conn.create_function(
         "py_triple",
         lambda x: x * 3,
-        [duckdb.typing.INTEGER],
-        duckdb.typing.INTEGER,
+        ["INTEGER"],
+        "INTEGER",
     )
 
     conn_ptr = extract_connection_ptr(conn)
