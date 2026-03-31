@@ -1,5 +1,6 @@
 import ctypes
 
+import duckdb
 import numpy
 import pytest
 from numba import njit, cfunc, carray
@@ -2496,3 +2497,138 @@ def test_aggregate_function_set_overloads():
     ducklib.duckdb_destroy_result(result.ctypes.data)
 
     aux_close_db(duckdb_database, duckdb_connection)
+
+
+# ── Hybrid Python + JIT UDF Tests ────────────────────────────────────
+
+
+@njit
+def _isqrt_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        x = numpy.int32(in_arr[i])
+        guess = x
+        for _ in range(16):
+            next_g = (guess + x // max(guess, numpy.int32(1))) // numpy.int32(2)
+            if next_g >= guess:
+                break
+            guess = next_g
+        out_arr[i] = guess
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _isqrt_cb(info, chunk, output):
+    _isqrt_impl(info, chunk, output)
+
+
+def test_hybrid_jit_udf_on_python_connection():
+    """Register a JIT-compiled UDF on a Python duckdb connection via numbduck."""
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    conn.execute(
+        "CREATE TABLE nums AS SELECT range::INTEGER + 1 AS x FROM range(10)")
+    conn_ptr = extract_connection_ptr(conn)
+
+    DUCKDB_TYPE_INTEGER = 4
+    func_p = ducklib.duckdb_create_scalar_function()
+    assert func_p != 0
+
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("jit_isqrt"))
+
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(func_p, _isqrt_cb.address)
+
+    rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    rows = conn.execute(
+        "SELECT x, jit_isqrt(x) FROM nums").fetchall()
+
+    for x, got in rows:
+        expected = int(x ** 0.5)
+        assert got == expected, (
+            f"jit_isqrt({x}): expected {expected}, got {got}")
+
+    conn.close()
+
+
+@njit
+def _triple_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        out_arr[i] = in_arr[i] * numpy.int32(3)
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _triple_cb(info, chunk, output):
+    _triple_impl(info, chunk, output)
+
+
+def test_jit_udf_vs_python_udf():
+    """Compare JIT UDF registered via numbduck C API with a pure Python UDF."""
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    conn.execute(
+        "CREATE TABLE vals AS SELECT range::INTEGER + 1 AS x FROM range(100)")
+
+    conn.create_function(
+        "py_triple",
+        lambda x: x * 3,
+        [duckdb.typing.INTEGER],
+        duckdb.typing.INTEGER,
+    )
+
+    conn_ptr = extract_connection_ptr(conn)
+
+    DUCKDB_TYPE_INTEGER = 4
+    func_p = ducklib.duckdb_create_scalar_function()
+    assert func_p != 0
+
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("jit_triple"))
+
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(func_p, _triple_cb.address)
+
+    rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    rows = conn.execute(
+        "SELECT py_triple(x), jit_triple(x) FROM vals").fetchall()
+
+    assert len(rows) == 100
+    for py_val, jit_val in rows:
+        assert py_val == jit_val, (
+            f"Mismatch: py_triple={py_val}, jit_triple={jit_val}")
+
+    conn.remove_function("py_triple")
+    conn.close()
