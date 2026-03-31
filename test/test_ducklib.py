@@ -1773,7 +1773,8 @@ def test_create_enum_type():
     assert internal_type != 0
     enum_buf = numpy.array([enum_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(enum_buf.ctypes.data)
-# ── Scalar Function Tests ────────────────────────────────────────────
+
+
 
 
 
@@ -2058,7 +2059,8 @@ def test_scalar_function_set_overloads():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# ── Aggregate Function Tests ─────────────────────────────────────────
+
+
 
 AGG_STATE_SIZE = 8  # int64 accumulator
 
@@ -2217,7 +2219,8 @@ def test_aggregate_function_round_trip():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# ── Version-Conditional Tests ────────────────────────────────────────
+
+
 
 
 @njit
@@ -2282,7 +2285,8 @@ def test_scalar_function_set_init():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# ── Aggregate Function Set Tests ─────────────────────────────────────
+
+
 
 
 def test_aggregate_function_set_overloads():
@@ -2394,7 +2398,8 @@ def test_aggregate_function_set_overloads():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# ── Hybrid Python + JIT UDF Tests ────────────────────────────────────
+
+
 
 
 @njit
