@@ -2591,6 +2591,7 @@ def test_jit_udf_vs_python_udf():
     conn = duckdb.connect()
     conn.execute(
         "CREATE TABLE vals AS SELECT range::INTEGER + 1 AS x FROM range(100)")
+    conn_ptr = extract_connection_ptr(conn)
 
     conn.create_function(
         "py_triple",
@@ -2598,8 +2599,6 @@ def test_jit_udf_vs_python_udf():
         ["INTEGER"],
         "INTEGER",
     )
-
-    conn_ptr = extract_connection_ptr(conn)
 
     DUCKDB_TYPE_INTEGER = 4
     func_p = ducklib.duckdb_create_scalar_function()
