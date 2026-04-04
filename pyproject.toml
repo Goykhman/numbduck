@@ -21,5 +21,10 @@ authors = [
 ]
 readme = 'README.md'
 
+[tool.pytest.ini_options]
+markers = [
+    "benchmark: slow benchmarks, run only locally (deselected in CI)",
+]
+
 [tool.setuptools.dynamic]
 version = {attr = "numbduck.__version__"}

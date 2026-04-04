@@ -2531,3 +2531,121 @@ def test_jit_udf_vs_python_udf():
 
     conn.remove_function("py_triple")
     conn.close()
+
+
+@njit
+def _bench_square_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int64)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int64)
+    for i in range(n):
+        out_arr[i] = in_arr[i] * in_arr[i]
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _bench_square_cb(info, chunk, output):
+    _bench_square_impl(info, chunk, output)
+
+
+@pytest.mark.benchmark
+def test_udf_benchmark(capsys):
+    """Benchmark three UDF approaches: Python scalar, Python Arrow, numbduck JIT.
+
+    Computes x*x at 10K, 100K, and 1M rows. The JIT UDF runs as a raw C
+    function pointer with no Python overhead per invocation, while the Python
+    UDFs round-trip through the interpreter (scalar: per-row, Arrow: per-batch
+    via pyarrow).
+
+    Results (WSL2, Python 3.10, duckdb 1.3.2, numba 0.60):
+        Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
+      10,000     0.827s      0.018s      0.001s     1,219x       26x
+     100,000     8.449s      0.021s      0.001s     6,296x       15x
+   1,000,000   134.604s      0.239s      0.001s   111,602x      198x
+    """
+    import time
+    from numbduck.pybridge import extract_connection_ptr
+
+    ROW_COUNTS = [10_000, 100_000, 1_000_000]
+
+    conn = duckdb.connect()
+
+    # Register Python scalar UDF
+    conn.create_function(
+        "py_square", lambda x: x * x, ["BIGINT"], "BIGINT")
+
+    # Register Python Arrow UDF
+    has_arrow = True
+    try:
+        import pyarrow.compute as pc
+        conn.create_function(
+            "arrow_square",
+            lambda x: pc.multiply(x, x),
+            ["BIGINT"], "BIGINT",
+            type=duckdb.functional.PythonUDFType.ARROW)
+    except ImportError:
+        has_arrow = False
+
+    # Register numbduck JIT UDF
+    conn_ptr = extract_connection_ptr(conn)
+    DUCKDB_TYPE_BIGINT = 5
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("jit_square"))
+    bigint_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, bigint_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, bigint_type_p)
+    type_buf = numpy.array([bigint_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+    ducklib.duckdb_scalar_function_set_function(
+        func_p, _bench_square_cb.address)
+    rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    results = []
+    for N in ROW_COUNTS:
+        conn.execute(
+            f"CREATE OR REPLACE TABLE bench "
+            f"AS SELECT range::BIGINT + 1 AS x FROM range({N})")
+
+        t0 = time.perf_counter()
+        py_result = conn.execute(
+            "SELECT SUM(py_square(x)) FROM bench").fetchone()
+        t_python = time.perf_counter() - t0
+
+        if has_arrow:
+            t0 = time.perf_counter()
+            arrow_result = conn.execute(
+                "SELECT SUM(arrow_square(x)) FROM bench").fetchone()
+            t_arrow = time.perf_counter() - t0
+            assert arrow_result == py_result
+        else:
+            t_arrow = None
+
+        t0 = time.perf_counter()
+        jit_result = conn.execute(
+            "SELECT SUM(jit_square(x)) FROM bench").fetchone()
+        t_jit = time.perf_counter() - t0
+
+        assert jit_result == py_result
+        results.append((N, t_python, t_arrow, t_jit))
+
+    conn.remove_function("py_square")
+    if has_arrow:
+        conn.remove_function("arrow_square")
+    conn.close()
+
+    with capsys.disabled():
+        print("\n  UDF benchmark (x*x):")
+        print(f"    {'Rows':>10s}  {'Python':>10s}  {'Arrow':>10s}"
+              f"  {'JIT':>10s}  {'Py/JIT':>8s}  {'Arr/JIT':>8s}")
+        for N, t_python, t_arrow, t_jit in results:
+            arrow_str = f"{t_arrow:.4f}s" if t_arrow is not None else "n/a"
+            arr_ratio = f"{t_arrow / t_jit:.0f}x" if t_arrow else "n/a"
+            print(f"    {N:>10,d}  {t_python:>9.4f}s  {arrow_str:>10s}"
+                  f"  {t_jit:>9.4f}s  {t_python / t_jit:>7.0f}x"
+                  f"  {arr_ratio:>8s}")
