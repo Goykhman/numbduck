@@ -1,9 +1,10 @@
 import ctypes
 
+import duckdb
 import numpy
 import pytest
-from numba import njit
-from numba import carray
+from numba import njit, cfunc, carray
+from numba import types as nb_types
 from numbox.utils.lowlevel import get_unicode_data_p
 
 from numba.core.types import intp
@@ -221,7 +222,10 @@ def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
     j_arr = arr_ty.from_address(j_vec_data_p)
     j_val = [ducklib.duckdb_validity_row_is_valid(j_validity_p, ind_) for ind_ in range(3)]
     assert j_val == [1, 1, 0]
-    assert all([j_val and j_arr_ == j_col_ or True for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)])
+    assert all([
+        (j_arr_ == j_col_) if j_val_ else True
+        for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)
+    ])
     aux_close_db(duckdb_database, duckdb_connection)
 
 
@@ -1769,3 +1773,889 @@ def test_create_enum_type():
     assert internal_type != 0
     enum_buf = numpy.array([enum_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(enum_buf.ctypes.data)
+
+
+
+
+
+@njit
+def _add_one_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        out_arr[i] = in_arr[i] + 1
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _add_one_cb(info, chunk, output):
+    _add_one_impl(info, chunk, output)
+
+
+def test_scalar_function_round_trip():
+    """Register a scalar UDF that adds 1 to an integer, call it from SQL."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    assert func_p != 0
+
+    name_p = get_unicode_data_p("add_one")
+    ducklib.duckdb_scalar_function_set_name(func_p, name_p)
+
+    DUCKDB_TYPE_INTEGER = 4
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(func_p, _add_one_cb.address)
+
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT add_one(42)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int32 * 1).from_address(data_p)[0]
+    assert val == 43, f"Expected 43, got {val}"
+
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+EXTRA_INFO_MAGIC = 0xDEADBEEF
+
+
+@njit
+def _extra_info_impl(info, chunk, output):
+    extra = ducklib.duckdb_scalar_function_get_extra_info(info)
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int64)
+    for i in range(n):
+        out_arr[i] = extra
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _extra_info_cb(info, chunk, output):
+    _extra_info_impl(info, chunk, output)
+
+
+def test_scalar_function_extra_info():
+    """Verify extra_info pointer round-trips through set/get."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("get_extra"))
+
+    DUCKDB_TYPE_BIGINT = 5
+    bigint_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, bigint_type_p)
+    type_buf = numpy.array([bigint_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(func_p, _extra_info_cb.address)
+    ducklib.duckdb_scalar_function_set_extra_info(func_p, EXTRA_INFO_MAGIC, 0)
+
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT get_extra()")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert val == EXTRA_INFO_MAGIC, f"Expected {EXTRA_INFO_MAGIC}, got {val}"
+
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+@njit
+def _error_impl(info, chunk, output):
+    ducklib.duckdb_scalar_function_set_error(
+        info, get_unicode_data_p("test error from callback"))
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _error_cb(info, chunk, output):
+    _error_impl(info, chunk, output)
+
+
+def test_scalar_function_set_error():
+    """Verify set_error in callback causes query failure."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("will_fail"))
+
+    DUCKDB_TYPE_INTEGER = 4
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(func_p, _error_cb.address)
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT will_fail(42)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
+
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+@njit
+def _double_it_int_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    in_data = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk, 0))
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        out_arr[i] = in_arr[i] * 2
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _double_it_int_cb(info, chunk, output):
+    _double_it_int_impl(info, chunk, output)
+
+
+@njit
+def _double_it_dbl_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    in_data = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk, 0))
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        out_arr[i] = in_arr[i] * 2.0
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _double_it_dbl_cb(info, chunk, output):
+    _double_it_dbl_impl(info, chunk, output)
+
+
+def test_scalar_function_set_overloads():
+    """Register overloaded scalar function with integer and double variants."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    DUCKDB_TYPE_INTEGER = 4
+    DUCKDB_TYPE_DOUBLE = 11
+
+    # Integer variant
+    int_func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        int_func_p, get_unicode_data_p("double_it"))
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(int_func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(
+        int_func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_function(
+        int_func_p, _double_it_int_cb.address)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    # Double variant
+    dbl_func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        dbl_func_p, get_unicode_data_p("double_it"))
+    dbl_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_DOUBLE)
+    ducklib.duckdb_scalar_function_add_parameter(
+        dbl_func_p, dbl_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(
+        dbl_func_p, dbl_type_p)
+    ducklib.duckdb_scalar_function_set_function(
+        dbl_func_p, _double_it_dbl_cb.address)
+    type_buf = numpy.array([dbl_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    # Create function set and register
+    set_p = ducklib.duckdb_create_scalar_function_set(
+        get_unicode_data_p("double_it"))
+    rc = ducklib.duckdb_add_scalar_function_to_set(set_p, int_func_p)
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_add_scalar_function_to_set(set_p, dbl_func_p)
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_register_scalar_function_set(conn_p, set_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    # Cleanup handles
+    for p in [int_func_p, dbl_func_p]:
+        buf = numpy.array([p], dtype=numpy.intp)
+        ducklib.duckdb_destroy_scalar_function(buf.ctypes.data)
+    set_buf = numpy.array([set_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function_set(set_buf.ctypes.data)
+
+    # Test integer variant
+    result = create_duckdb_result()
+    rc = ducklib.duckdb_query(
+        conn_p, get_unicode_data_p("SELECT double_it(21::INTEGER)"),
+        result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    val = (ctypes.c_int32 * 1).from_address(
+        ducklib.duckdb_vector_get_data(vec_p))[0]
+    assert val == 42, f"Expected 42, got {val}"
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    # Test double variant
+    result = create_duckdb_result()
+    rc = ducklib.duckdb_query(
+        conn_p, get_unicode_data_p("SELECT double_it(1.5::DOUBLE)"),
+        result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    val = (ctypes.c_double * 1).from_address(
+        ducklib.duckdb_vector_get_data(vec_p))[0]
+    assert val == 3.0, f"Expected 3.0, got {val}"
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+
+
+
+AGG_STATE_SIZE = 8  # int64 accumulator
+
+
+@njit
+def _agg_state_size_impl(info):
+    return AGG_STATE_SIZE
+
+
+@cfunc(nb_types.uint64(nb_types.intp))
+def _agg_state_size_cb(info):
+    return _agg_state_size_impl(info)
+
+
+@njit
+def _agg_init_impl(info, state):
+    carray(_cast_int_to_void_p(state), (1,), dtype=numpy.int64)[0] = 0
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp))
+def _agg_init_cb(info, state):
+    _agg_init_impl(info, state)
+
+
+@njit
+def _agg_update_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    state_ptrs = carray(_cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        acc = carray(_cast_int_to_void_p(state_ptrs[i]), (1,), dtype=numpy.int64)
+        acc[0] += in_vals[i]
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _agg_update_cb(info, chunk, states):
+    _agg_update_impl(info, chunk, states)
+
+
+@njit
+def _agg_update_i64_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    state_ptrs = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.int64)
+    for i in range(n):
+        acc = carray(
+            _cast_int_to_void_p(state_ptrs[i]),
+            (1,), dtype=numpy.int64)
+        acc[0] += in_vals[i]
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _agg_update_i64_cb(info, chunk, states):
+    _agg_update_i64_impl(info, chunk, states)
+
+
+@njit
+def _agg_combine_impl(info, source, target, count):
+    src_ptrs = carray(_cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_ptrs = carray(_cast_int_to_void_p(target), (count,), dtype=numpy.intp)
+    for i in range(count):
+        src_acc = carray(_cast_int_to_void_p(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
+        tgt_acc = carray(_cast_int_to_void_p(tgt_ptrs[i]), (1,), dtype=numpy.int64)
+        tgt_acc[0] += src_acc
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                     nb_types.intp, nb_types.uint64))
+def _agg_combine_cb(info, source, target, count):
+    _agg_combine_impl(info, source, target, count)
+
+
+@njit
+def _agg_finalize_impl(info, source, result, count, offset):
+    out_data = ducklib.duckdb_vector_get_data(result)
+    src_ptrs = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _cast_int_to_void_p(out_data), (offset + count,),
+        dtype=numpy.int64)
+    for i in range(count):
+        acc = carray(_cast_int_to_void_p(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
+        out_vals[offset + i] = acc
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                     nb_types.intp, nb_types.uint64, nb_types.uint64))
+def _agg_finalize_cb(info, source, result, count, offset):
+    _agg_finalize_impl(info, source, result, count, offset)
+
+
+def test_aggregate_function_round_trip():
+    """Register an aggregate UDF that sums int32 values, call it from SQL."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    # Create test table
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t AS SELECT * FROM (VALUES (1), (2), (3)) AS t(v)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    # Create and configure aggregate function
+    func_p = ducklib.duckdb_create_aggregate_function()
+    assert func_p != 0
+
+    name_p = get_unicode_data_p("my_sum")
+    ducklib.duckdb_aggregate_function_set_name(func_p, name_p)
+
+    DUCKDB_TYPE_INTEGER = 4
+    DUCKDB_TYPE_BIGINT = 5
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    bigint_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(
+        func_p, bigint_type_p)
+    for tp in [int_type_p, bigint_type_p]:
+        buf = numpy.array([tp], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, _agg_state_size_cb.address, _agg_init_cb.address,
+        _agg_update_cb.address, _agg_combine_cb.address,
+        _agg_finalize_cb.address
+    )
+
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(func_buf.ctypes.data)
+
+    # Query using the UDAF
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT my_sum(v) FROM t")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert val == 6, f"Expected 6, got {val}"
+
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+
+
+
+
+@njit
+def _init_cb_impl(info):
+    pass
+
+
+@cfunc(nb_types.void(nb_types.intp))
+def _init_cb(info):
+    _init_cb_impl(info)
+
+
+@pytest.mark.skipif(
+    not ducklib._has_symbol('duckdb_scalar_function_set_init'),
+    reason="duckdb_scalar_function_set_init not available",
+)
+def test_scalar_function_set_init():
+    """Verify set_init callback is accepted (v1.5+ only)."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("with_init"))
+
+    DUCKDB_TYPE_INTEGER = 4
+    int_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(
+        func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(
+        func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(
+        func_p, _add_one_cb.address)
+    ducklib.duckdb_scalar_function_set_init(
+        func_p, _init_cb.address)
+
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT with_init(42)")
+    rc = ducklib.duckdb_query(
+        conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int32 * 1).from_address(data_p)[0]
+    assert val == 43, f"Expected 43, got {val}"
+
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+
+
+
+
+def test_aggregate_function_set_overloads():
+    """Register overloaded aggregate with int32 and int64 variants."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t2 AS SELECT * FROM"
+        " (VALUES (1), (2), (3)) AS t(v)")
+    rc = ducklib.duckdb_query(
+        conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    DUCKDB_TYPE_INTEGER = 4
+    DUCKDB_TYPE_BIGINT = 5
+
+    # Integer input variant (reuses existing agg callbacks)
+    int_func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(
+        int_func_p, get_unicode_data_p("my_sum2"))
+    int_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_INTEGER)
+    bigint_type_p = ducklib.duckdb_create_logical_type(
+        DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_aggregate_function_add_parameter(
+        int_func_p, int_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(
+        int_func_p, bigint_type_p)
+    ducklib.duckdb_aggregate_function_set_functions(
+        int_func_p, _agg_state_size_cb.address,
+        _agg_init_cb.address, _agg_update_cb.address,
+        _agg_combine_cb.address, _agg_finalize_cb.address)
+
+    # Bigint input variant
+    big_func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(
+        big_func_p, get_unicode_data_p("my_sum2"))
+    ducklib.duckdb_aggregate_function_add_parameter(
+        big_func_p, bigint_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(
+        big_func_p, bigint_type_p)
+    ducklib.duckdb_aggregate_function_set_functions(
+        big_func_p, _agg_state_size_cb.address,
+        _agg_init_cb.address, _agg_update_i64_cb.address,
+        _agg_combine_cb.address, _agg_finalize_cb.address)
+
+    for tp in [int_type_p, bigint_type_p]:
+        buf = numpy.array([tp], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+
+    # Create set, add both, register
+    set_p = ducklib.duckdb_create_aggregate_function_set(
+        get_unicode_data_p("my_sum2"))
+    rc = ducklib.duckdb_add_aggregate_function_to_set(
+        set_p, int_func_p)
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_add_aggregate_function_to_set(
+        set_p, big_func_p)
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_register_aggregate_function_set(
+        conn_p, set_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    for p in [int_func_p, big_func_p]:
+        buf = numpy.array([p], dtype=numpy.intp)
+        ducklib.duckdb_destroy_aggregate_function(
+            buf.ctypes.data)
+    set_buf = numpy.array([set_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function_set(
+        set_buf.ctypes.data)
+
+    # Test integer input variant
+    result = create_duckdb_result()
+    rc = ducklib.duckdb_query(
+        conn_p,
+        get_unicode_data_p(
+            "SELECT my_sum2(v::INTEGER) FROM t2"),
+        result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert val == 6, f"Expected 6, got {val}"
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    # Test bigint input variant
+    result = create_duckdb_result()
+    rc = ducklib.duckdb_query(
+        conn_p,
+        get_unicode_data_p(
+            "SELECT my_sum2(v::BIGINT) FROM t2"),
+        result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert val == 6, f"Expected 6, got {val}"
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+
+
+
+
+@njit
+def _isqrt_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        x = numpy.int32(in_arr[i])
+        guess = x
+        for _ in range(16):
+            next_g = (guess + x // max(guess, numpy.int32(1))) // numpy.int32(2)
+            if next_g >= guess:
+                break
+            guess = next_g
+        out_arr[i] = guess
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _isqrt_cb(info, chunk, output):
+    _isqrt_impl(info, chunk, output)
+
+
+def test_hybrid_jit_udf_on_python_connection():
+    """Register a JIT-compiled UDF on a Python duckdb connection via numbduck."""
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    conn.execute(
+        "CREATE TABLE nums AS SELECT range::INTEGER + 1 AS x FROM range(10)")
+    conn_ptr = extract_connection_ptr(conn)
+
+    DUCKDB_TYPE_INTEGER = 4
+    func_p = ducklib.duckdb_create_scalar_function()
+    assert func_p != 0
+
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("jit_isqrt"))
+
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(func_p, _isqrt_cb.address)
+
+    rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    rows = conn.execute(
+        "SELECT x, jit_isqrt(x) FROM nums").fetchall()
+
+    for x, got in rows:
+        expected = int(x ** 0.5)
+        assert got == expected, (
+            f"jit_isqrt({x}): expected {expected}, got {got}")
+
+    conn.close()
+
+
+@njit
+def _triple_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        out_arr[i] = in_arr[i] * numpy.int32(3)
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _triple_cb(info, chunk, output):
+    _triple_impl(info, chunk, output)
+
+
+def test_jit_udf_vs_python_udf():
+    """Compare JIT UDF registered via numbduck C API with a pure Python UDF."""
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    conn.execute(
+        "CREATE TABLE vals AS SELECT range::INTEGER + 1 AS x FROM range(100)")
+    conn_ptr = extract_connection_ptr(conn)
+
+    conn.create_function(
+        "py_triple",
+        lambda x: x * 3,
+        ["INTEGER"],
+        "INTEGER",
+    )
+
+    DUCKDB_TYPE_INTEGER = 4
+    func_p = ducklib.duckdb_create_scalar_function()
+    assert func_p != 0
+
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("jit_triple"))
+
+    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+
+    ducklib.duckdb_scalar_function_set_function(func_p, _triple_cb.address)
+
+    rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    rows = conn.execute(
+        "SELECT py_triple(x), jit_triple(x) FROM vals").fetchall()
+
+    assert len(rows) == 100
+    for py_val, jit_val in rows:
+        assert py_val == jit_val, (
+            f"Mismatch: py_triple={py_val}, jit_triple={jit_val}")
+
+    conn.remove_function("py_triple")
+    conn.close()
+
+
+@njit
+def _bench_square_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    input_vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(input_vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int64)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int64)
+    for i in range(n):
+        out_arr[i] = in_arr[i] * in_arr[i]
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _bench_square_cb(info, chunk, output):
+    _bench_square_impl(info, chunk, output)
+
+
+@pytest.mark.benchmark
+def test_udf_benchmark(capsys):
+    """Benchmark three UDF approaches: Python scalar, Python Arrow, numbduck JIT.
+
+    Computes x*x at 10K, 100K, and 1M rows. The JIT UDF runs as a raw C
+    function pointer with no Python overhead per invocation, while the Python
+    UDFs round-trip through the interpreter (scalar: per-row, Arrow: per-batch
+    via pyarrow).
+
+    Results (WSL2, Python 3.12, duckdb 1.5.1, numba 0.60):
+        Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
+      10,000     0.749s      0.003s      0.000s     2,095x        7x
+     100,000     7.382s      0.019s      0.001s    13,879x       36x
+   1,000,000   118.835s      0.242s      0.001s   130,568x      266x
+    """
+    import sys
+    import time
+    from numbduck.pybridge import extract_connection_ptr
+
+    ROW_COUNTS = [10_000, 100_000, 1_000_000]
+
+    conn = duckdb.connect()
+
+    # Register Python scalar UDF
+    conn.create_function(
+        "py_square", lambda x: x * x, ["BIGINT"], "BIGINT")
+
+    # Register Python Arrow UDF
+    has_arrow = True
+    try:
+        import pyarrow.compute as pc
+        conn.create_function(
+            "arrow_square",
+            lambda x: pc.multiply(x, x),
+            ["BIGINT"], "BIGINT",
+            type="arrow")
+    except ImportError:
+        has_arrow = False
+
+    # Register numbduck JIT UDF
+    conn_ptr = extract_connection_ptr(conn)
+    DUCKDB_TYPE_BIGINT = 5
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("jit_square"))
+    bigint_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, bigint_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, bigint_type_p)
+    type_buf = numpy.array([bigint_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+    ducklib.duckdb_scalar_function_set_function(
+        func_p, _bench_square_cb.address)
+    rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    # Warm up each UDF with a small query before timing
+    conn.execute("CREATE TABLE warmup AS SELECT 1::BIGINT AS x")
+    conn.execute("SELECT py_square(x) FROM warmup").fetchone()
+    if has_arrow:
+        conn.execute("SELECT arrow_square(x) FROM warmup").fetchone()
+    conn.execute("SELECT jit_square(x) FROM warmup").fetchone()
+    conn.execute("DROP TABLE warmup")
+
+    results = []
+    for N in ROW_COUNTS:
+        conn.execute(
+            f"CREATE OR REPLACE TABLE bench "
+            f"AS SELECT range::BIGINT + 1 AS x FROM range({N})")
+
+        t0 = time.perf_counter()
+        py_result = conn.execute(
+            "SELECT SUM(py_square(x)) FROM bench").fetchone()
+        t_python = time.perf_counter() - t0
+
+        if has_arrow:
+            t0 = time.perf_counter()
+            arrow_result = conn.execute(
+                "SELECT SUM(arrow_square(x)) FROM bench").fetchone()
+            t_arrow = time.perf_counter() - t0
+            assert arrow_result == py_result
+        else:
+            t_arrow = None
+
+        t0 = time.perf_counter()
+        jit_result = conn.execute(
+            "SELECT SUM(jit_square(x)) FROM bench").fetchone()
+        t_jit = time.perf_counter() - t0
+
+        assert jit_result == py_result
+        results.append((N, t_python, t_arrow, t_jit))
+
+    conn.remove_function("py_square")
+    if has_arrow:
+        conn.remove_function("arrow_square")
+    conn.close()
+
+    with capsys.disabled():
+        pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        print(f"\n  UDF benchmark (x*x, Python {pyver}, duckdb {duckdb.__version__}):")
+        print(f"    {'Rows':>10s}  {'Python':>10s}  {'Arrow':>10s}"
+              f"  {'JIT':>10s}  {'Py/JIT':>8s}  {'Arr/JIT':>8s}")
+        for N, t_python, t_arrow, t_jit in results:
+            arrow_str = f"{t_arrow:.4f}s" if t_arrow is not None else "n/a"
+            arr_ratio = f"{t_arrow / t_jit:.0f}x" if t_arrow else "n/a"
+            print(f"    {N:>10,d}  {t_python:>9.4f}s  {arrow_str:>10s}"
+                  f"  {t_jit:>9.4f}s  {t_python / t_jit:>7.0f}x"
+                  f"  {arr_ratio:>8s}")
