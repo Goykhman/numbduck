@@ -2559,12 +2559,20 @@ def test_udf_benchmark(capsys):
     UDFs round-trip through the interpreter (scalar: per-row, Arrow: per-batch
     via pyarrow).
 
-    Results (WSL2, Python 3.10, duckdb 1.3.2, numba 0.60):
+    Results (WSL2, numba 0.60):
+                          Python 3.10 / duckdb 1.3.2
         Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
       10,000     0.827s      0.018s      0.001s     1,219x       26x
      100,000     8.449s      0.021s      0.001s     6,296x       15x
    1,000,000   134.604s      0.239s      0.001s   111,602x      198x
+
+                          Python 3.12 / duckdb 1.5.1
+        Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
+      10,000     0.783s      0.021s      0.001s     1,214x       33x
+     100,000    10.254s      0.018s      0.001s    15,869x       28x
+   1,000,000   117.370s      0.284s      0.001s   140,266x      339x
     """
+    import sys
     import time
     from numbduck.pybridge import extract_connection_ptr
 
@@ -2584,7 +2592,7 @@ def test_udf_benchmark(capsys):
             "arrow_square",
             lambda x: pc.multiply(x, x),
             ["BIGINT"], "BIGINT",
-            type=duckdb.functional.PythonUDFType.ARROW)
+            type="arrow")
     except ImportError:
         has_arrow = False
 
@@ -2605,6 +2613,14 @@ def test_udf_benchmark(capsys):
     assert rc == ducklib.DuckDBSuccess
     func_buf = numpy.array([func_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    # Warm up each UDF with a small query before timing
+    conn.execute("CREATE TABLE warmup AS SELECT 1::BIGINT AS x")
+    conn.execute("SELECT py_square(x) FROM warmup").fetchone()
+    if has_arrow:
+        conn.execute("SELECT arrow_square(x) FROM warmup").fetchone()
+    conn.execute("SELECT jit_square(x) FROM warmup").fetchone()
+    conn.execute("DROP TABLE warmup")
 
     results = []
     for N in ROW_COUNTS:
@@ -2640,7 +2656,8 @@ def test_udf_benchmark(capsys):
     conn.close()
 
     with capsys.disabled():
-        print("\n  UDF benchmark (x*x):")
+        pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        print(f"\n  UDF benchmark (x*x, Python {pyver}, duckdb {duckdb.__version__}):")
         print(f"    {'Rows':>10s}  {'Python':>10s}  {'Arrow':>10s}"
               f"  {'JIT':>10s}  {'Py/JIT':>8s}  {'Arr/JIT':>8s}")
         for N, t_python, t_arrow, t_jit in results:
