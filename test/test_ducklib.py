@@ -2559,18 +2559,11 @@ def test_udf_benchmark(capsys):
     UDFs round-trip through the interpreter (scalar: per-row, Arrow: per-batch
     via pyarrow).
 
-    Results (WSL2, numba 0.60):
-                          Python 3.10 / duckdb 1.3.2
+    Results (WSL2, Python 3.12, duckdb 1.5.1, numba 0.60):
         Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
-      10,000     0.827s      0.018s      0.001s     1,219x       26x
-     100,000     8.449s      0.021s      0.001s     6,296x       15x
-   1,000,000   134.604s      0.239s      0.001s   111,602x      198x
-
-                          Python 3.12 / duckdb 1.5.1
-        Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
-      10,000     0.783s      0.021s      0.001s     1,214x       33x
-     100,000    10.254s      0.018s      0.001s    15,869x       28x
-   1,000,000   117.370s      0.284s      0.001s   140,266x      339x
+      10,000     0.749s      0.003s      0.000s     2,095x        7x
+     100,000     7.382s      0.019s      0.001s    13,879x       36x
+   1,000,000   118.835s      0.242s      0.001s   130,568x      266x
     """
     import sys
     import time
