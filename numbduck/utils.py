@@ -13,8 +13,11 @@ class DuckdbResultTypeClass(StructRef):
     pass
 
 
-_LIBDUCKDB_CACHE_DIR = os.path.join(
+_LIBDUCKDB_CACHE_BASE = os.path.join(
     os.path.expanduser("~"), ".numbduck", "lib"
+)
+_LIBDUCKDB_CACHE_DIR = os.path.join(
+    _LIBDUCKDB_CACHE_BASE, duckdb.__version__
 )
 
 _MACOS_LIBDUCKDB_SEARCH_PATHS = [
@@ -31,6 +34,10 @@ def _find_standalone_libduckdb():
     env_path = os.environ.get("NUMBDUCK_LIBDUCKDB")
     if env_path and os.path.isfile(env_path):
         return env_path
+    # Remove old unversioned cache if present
+    old_cached = os.path.join(_LIBDUCKDB_CACHE_BASE, "libduckdb.dylib")
+    if os.path.isfile(old_cached):
+        os.remove(old_cached)
     cached = os.path.join(_LIBDUCKDB_CACHE_DIR, "libduckdb.dylib")
     if os.path.isfile(cached):
         return cached
