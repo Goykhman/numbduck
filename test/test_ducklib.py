@@ -1520,6 +1520,159 @@ def test_is_null_value_false():
     aux_destroy_value(val_p)
 
 
+# --- Container Value Creators/Getters ---
+
+
+def test_create_get_list_value():
+    int_type_p = ducklib.duckdb_create_logical_type(4)  # INTEGER
+    v1 = ducklib.duckdb_create_int32(10)
+    v2 = ducklib.duckdb_create_int32(20)
+    vals = numpy.array([v1, v2], dtype=numpy.intp)
+    lv = ducklib.duckdb_create_list_value(int_type_p, vals.ctypes.data, 2)
+    assert lv != 0
+    assert ducklib.duckdb_get_list_size(lv) == 2
+    c0 = ducklib.duckdb_get_list_child(lv, 0)
+    assert ducklib.duckdb_get_int32(c0) == 10
+    aux_destroy_value(c0)
+    c1 = ducklib.duckdb_get_list_child(lv, 1)
+    assert ducklib.duckdb_get_int32(c1) == 20
+    aux_destroy_value(c1)
+    aux_destroy_value(lv)
+    aux_destroy_value(v1)
+    aux_destroy_value(v2)
+    lt_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+
+
+def test_create_get_list_value_empty():
+    int_type_p = ducklib.duckdb_create_logical_type(4)  # INTEGER
+    vals = numpy.zeros(0, dtype=numpy.intp)
+    lv = ducklib.duckdb_create_list_value(int_type_p, vals.ctypes.data, 0)
+    assert lv != 0
+    assert ducklib.duckdb_get_list_size(lv) == 0
+    aux_destroy_value(lv)
+    lt_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+
+
+def test_create_get_map_value():
+    key_type = ducklib.duckdb_create_logical_type(4)  # INTEGER
+    val_type = ducklib.duckdb_create_logical_type(4)
+    map_type = ducklib.duckdb_create_map_type(key_type, val_type)
+    k1 = ducklib.duckdb_create_int32(1)
+    k2 = ducklib.duckdb_create_int32(2)
+    v1 = ducklib.duckdb_create_int32(100)
+    v2 = ducklib.duckdb_create_int32(200)
+    keys = numpy.array([k1, k2], dtype=numpy.intp)
+    vals = numpy.array([v1, v2], dtype=numpy.intp)
+    mv = ducklib.duckdb_create_map_value(
+        map_type, keys.ctypes.data, vals.ctypes.data, 2)
+    assert mv != 0
+    assert ducklib.duckdb_get_map_size(mv) == 2
+    mk0 = ducklib.duckdb_get_map_key(mv, 0)
+    assert ducklib.duckdb_get_int32(mk0) == 1
+    aux_destroy_value(mk0)
+    mgv0 = ducklib.duckdb_get_map_value(mv, 0)
+    assert ducklib.duckdb_get_int32(mgv0) == 100
+    aux_destroy_value(mgv0)
+    mk1 = ducklib.duckdb_get_map_key(mv, 1)
+    assert ducklib.duckdb_get_int32(mk1) == 2
+    aux_destroy_value(mk1)
+    mgv1 = ducklib.duckdb_get_map_value(mv, 1)
+    assert ducklib.duckdb_get_int32(mgv1) == 200
+    aux_destroy_value(mgv1)
+    aux_destroy_value(mv)
+    aux_destroy_value(k1)
+    aux_destroy_value(k2)
+    aux_destroy_value(v1)
+    aux_destroy_value(v2)
+    lt_buf = numpy.array([map_type], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+    lt_buf[0] = key_type
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+    lt_buf[0] = val_type
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+
+
+def test_create_get_struct_value():
+    t1 = ducklib.duckdb_create_logical_type(4)  # INTEGER
+    t2 = ducklib.duckdb_create_logical_type(4)
+    types_arr = numpy.array([t1, t2], dtype=numpy.intp)
+    n1_p = get_unicode_data_p("a")
+    n2_p = get_unicode_data_p("b")
+    names_arr = numpy.array([n1_p, n2_p], dtype=numpy.intp)
+    struct_type = ducklib.duckdb_create_struct_type(
+        types_arr.ctypes.data, names_arr.ctypes.data, 2)
+    assert struct_type != 0
+    sv1 = ducklib.duckdb_create_int32(42)
+    sv2 = ducklib.duckdb_create_int32(99)
+    svals = numpy.array([sv1, sv2], dtype=numpy.intp)
+    stv = ducklib.duckdb_create_struct_value(struct_type, svals.ctypes.data)
+    assert stv != 0
+    sc0 = ducklib.duckdb_get_struct_child(stv, 0)
+    assert ducklib.duckdb_get_int32(sc0) == 42
+    aux_destroy_value(sc0)
+    sc1 = ducklib.duckdb_get_struct_child(stv, 1)
+    assert ducklib.duckdb_get_int32(sc1) == 99
+    aux_destroy_value(sc1)
+    aux_destroy_value(stv)
+    aux_destroy_value(sv1)
+    aux_destroy_value(sv2)
+    lt_buf = numpy.array([struct_type], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+    lt_buf[0] = t1
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+    lt_buf[0] = t2
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+
+
+def test_create_array_value():
+    int_type = ducklib.duckdb_create_logical_type(4)  # INTEGER
+    v1 = ducklib.duckdb_create_int32(1)
+    v2 = ducklib.duckdb_create_int32(2)
+    v3 = ducklib.duckdb_create_int32(3)
+    vals = numpy.array([v1, v2, v3], dtype=numpy.intp)
+    av = ducklib.duckdb_create_array_value(int_type, vals.ctypes.data, 3)
+    assert av != 0
+    aux_destroy_value(av)
+    aux_destroy_value(v1)
+    aux_destroy_value(v2)
+    aux_destroy_value(v3)
+    lt_buf = numpy.array([int_type], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+
+
+def test_list_value_from_column_logical_type():
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+    query_p = get_unicode_data_p("SELECT [1, 2, 3] AS lst")
+    result = create_duckdb_result()
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    col_type = ducklib.duckdb_column_logical_type(result.ctypes.data, 0)
+    assert col_type != 0
+    child_type = ducklib.duckdb_list_type_child_type(col_type)
+    assert child_type != 0
+    v1 = ducklib.duckdb_create_int32(77)
+    v2 = ducklib.duckdb_create_int32(88)
+    vals = numpy.array([v1, v2], dtype=numpy.intp)
+    lv = ducklib.duckdb_create_list_value(child_type, vals.ctypes.data, 2)
+    assert lv != 0
+    assert ducklib.duckdb_get_list_size(lv) == 2
+    c0 = ducklib.duckdb_get_list_child(lv, 0)
+    assert ducklib.duckdb_get_int32(c0) == 77
+    aux_destroy_value(c0)
+    aux_destroy_value(lv)
+    aux_destroy_value(v1)
+    aux_destroy_value(v2)
+    lt_buf = numpy.array([child_type], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+    lt_buf[0] = col_type
+    ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 # --- Value Type and Destroy ---
 
 
