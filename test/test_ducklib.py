@@ -919,9 +919,8 @@ def test_column_name():
 def test_column_type():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     out_result_p = out_result.ctypes.data
-    # DUCKDB_TYPE_INTEGER = 4
     col_type = ducklib.duckdb_column_type(out_result_p, 0)
-    assert col_type == 4, f"Expected INTEGER (4), got {col_type}"
+    assert col_type == ducklib.DUCKDB_TYPE_INTEGER
     ducklib.duckdb_destroy_result(out_result_p)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -1524,7 +1523,7 @@ def test_is_null_value_false():
 
 
 def test_create_get_list_value():
-    int_type_p = ducklib.duckdb_create_logical_type(4)  # INTEGER
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     v1 = ducklib.duckdb_create_int32(10)
     v2 = ducklib.duckdb_create_int32(20)
     vals = numpy.array([v1, v2], dtype=numpy.intp)
@@ -1545,7 +1544,7 @@ def test_create_get_list_value():
 
 
 def test_create_get_list_value_empty():
-    int_type_p = ducklib.duckdb_create_logical_type(4)  # INTEGER
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     vals = numpy.zeros(0, dtype=numpy.intp)
     lv = ducklib.duckdb_create_list_value(int_type_p, vals.ctypes.data, 0)
     assert lv != 0
@@ -1556,8 +1555,8 @@ def test_create_get_list_value_empty():
 
 
 def test_create_get_map_value():
-    key_type = ducklib.duckdb_create_logical_type(4)  # INTEGER
-    val_type = ducklib.duckdb_create_logical_type(4)
+    key_type = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    val_type = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     map_type = ducklib.duckdb_create_map_type(key_type, val_type)
     k1 = ducklib.duckdb_create_int32(1)
     k2 = ducklib.duckdb_create_int32(2)
@@ -1595,8 +1594,8 @@ def test_create_get_map_value():
 
 
 def test_create_get_struct_value():
-    t1 = ducklib.duckdb_create_logical_type(4)  # INTEGER
-    t2 = ducklib.duckdb_create_logical_type(4)
+    t1 = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    t2 = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     types_arr = numpy.array([t1, t2], dtype=numpy.intp)
     n1_p = get_unicode_data_p("a")
     n2_p = get_unicode_data_p("b")
@@ -1627,7 +1626,7 @@ def test_create_get_struct_value():
 
 
 def test_create_array_value():
-    int_type = ducklib.duckdb_create_logical_type(4)  # INTEGER
+    int_type = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     v1 = ducklib.duckdb_create_int32(1)
     v2 = ducklib.duckdb_create_int32(2)
     v3 = ducklib.duckdb_create_int32(3)
@@ -1662,6 +1661,9 @@ def test_list_value_from_column_logical_type():
     c0 = ducklib.duckdb_get_list_child(lv, 0)
     assert ducklib.duckdb_get_int32(c0) == 77
     aux_destroy_value(c0)
+    c1 = ducklib.duckdb_get_list_child(lv, 1)
+    assert ducklib.duckdb_get_int32(c1) == 88
+    aux_destroy_value(c1)
     aux_destroy_value(lv)
     aux_destroy_value(v1)
     aux_destroy_value(v2)
@@ -1717,31 +1719,28 @@ def test_struct_size_guard():
 
 
 def test_create_logical_type_integer():
-    DUCKDB_TYPE_INTEGER = 4
-    type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     assert type_p != 0
     type_id = ducklib.duckdb_get_type_id(type_p)
-    assert type_id == DUCKDB_TYPE_INTEGER
+    assert type_id == ducklib.DUCKDB_TYPE_INTEGER
     buf = numpy.array([type_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
 
 
 def test_create_logical_type_varchar():
-    DUCKDB_TYPE_VARCHAR = 17
-    type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
+    type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_VARCHAR)
     assert type_p != 0
     type_id = ducklib.duckdb_get_type_id(type_p)
-    assert type_id == DUCKDB_TYPE_VARCHAR
+    assert type_id == ducklib.DUCKDB_TYPE_VARCHAR
     buf = numpy.array([type_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
 
 
 def test_create_decimal_type():
-    DUCKDB_TYPE_DECIMAL = 19
     type_p = ducklib.duckdb_create_decimal_type(10, 2)
     assert type_p != 0
     type_id = ducklib.duckdb_get_type_id(type_p)
-    assert type_id == DUCKDB_TYPE_DECIMAL
+    assert type_id == ducklib.DUCKDB_TYPE_DECIMAL
     assert ducklib.duckdb_decimal_width(type_p) == 10
     assert ducklib.duckdb_decimal_scale(type_p) == 2
     internal_type = ducklib.duckdb_decimal_internal_type(type_p)
@@ -1751,8 +1750,7 @@ def test_create_decimal_type():
 
 
 def test_logical_type_alias():
-    DUCKDB_TYPE_INTEGER = 4
-    type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     assert type_p != 0
     alias_p = ducklib.duckdb_logical_type_get_alias(type_p)
     assert alias_p == 0  # no alias set yet
@@ -1769,69 +1767,59 @@ def test_logical_type_alias():
 
 
 def test_create_list_type():
-    DUCKDB_TYPE_LIST = 24
-    DUCKDB_TYPE_INTEGER = 4
-    child_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    child_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     assert child_p != 0
     list_p = ducklib.duckdb_create_list_type(child_p)
     assert list_p != 0
     type_id = ducklib.duckdb_get_type_id(list_p)
-    assert type_id == DUCKDB_TYPE_LIST
+    assert type_id == ducklib.DUCKDB_TYPE_LIST
     child_back_p = ducklib.duckdb_list_type_child_type(list_p)
     assert child_back_p != 0
     child_type_id = ducklib.duckdb_get_type_id(child_back_p)
-    assert child_type_id == DUCKDB_TYPE_INTEGER
+    assert child_type_id == ducklib.DUCKDB_TYPE_INTEGER
     for p in [child_back_p, list_p, child_p]:
         buf = numpy.array([p], dtype=numpy.intp)
         ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
 
 
 def test_create_array_type():
-    DUCKDB_TYPE_ARRAY = 33
-    DUCKDB_TYPE_INTEGER = 4
-    child_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    child_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     assert child_p != 0
     array_p = ducklib.duckdb_create_array_type(child_p, 5)
     assert array_p != 0
     type_id = ducklib.duckdb_get_type_id(array_p)
-    assert type_id == DUCKDB_TYPE_ARRAY
+    assert type_id == ducklib.DUCKDB_TYPE_ARRAY
     size = ducklib.duckdb_array_type_array_size(array_p)
     assert size == 5
     child_back_p = ducklib.duckdb_array_type_child_type(array_p)
     assert child_back_p != 0
     child_type_id = ducklib.duckdb_get_type_id(child_back_p)
-    assert child_type_id == DUCKDB_TYPE_INTEGER
+    assert child_type_id == ducklib.DUCKDB_TYPE_INTEGER
     for p in [child_back_p, array_p, child_p]:
         buf = numpy.array([p], dtype=numpy.intp)
         ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
 
 
 def test_create_map_type():
-    DUCKDB_TYPE_MAP = 26
-    DUCKDB_TYPE_INTEGER = 4
-    DUCKDB_TYPE_VARCHAR = 17
-    key_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
-    val_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
+    key_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    val_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_VARCHAR)
     assert key_p != 0 and val_p != 0
     map_p = ducklib.duckdb_create_map_type(key_p, val_p)
     assert map_p != 0
     type_id = ducklib.duckdb_get_type_id(map_p)
-    assert type_id == DUCKDB_TYPE_MAP
+    assert type_id == ducklib.DUCKDB_TYPE_MAP
     key_back_p = ducklib.duckdb_map_type_key_type(map_p)
     val_back_p = ducklib.duckdb_map_type_value_type(map_p)
-    assert ducklib.duckdb_get_type_id(key_back_p) == DUCKDB_TYPE_INTEGER
-    assert ducklib.duckdb_get_type_id(val_back_p) == DUCKDB_TYPE_VARCHAR
+    assert ducklib.duckdb_get_type_id(key_back_p) == ducklib.DUCKDB_TYPE_INTEGER
+    assert ducklib.duckdb_get_type_id(val_back_p) == ducklib.DUCKDB_TYPE_VARCHAR
     for p in [val_back_p, key_back_p, map_p, val_p, key_p]:
         buf = numpy.array([p], dtype=numpy.intp)
         ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
 
 
 def test_create_struct_type():
-    DUCKDB_TYPE_STRUCT = 25
-    DUCKDB_TYPE_INTEGER = 4
-    DUCKDB_TYPE_VARCHAR = 17
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
-    varchar_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    varchar_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_VARCHAR)
     types_arr = numpy.array([int_type_p, varchar_type_p], dtype=numpy.intp)
     name1 = ctypes.c_char_p(b"id")
     name2 = ctypes.c_char_p(b"name")
@@ -1842,7 +1830,7 @@ def test_create_struct_type():
     struct_p = ducklib.duckdb_create_struct_type(types_arr.ctypes.data, names_arr.ctypes.data, 2)
     assert struct_p != 0
     type_id = ducklib.duckdb_get_type_id(struct_p)
-    assert type_id == DUCKDB_TYPE_STRUCT
+    assert type_id == ducklib.DUCKDB_TYPE_STRUCT
     count = ducklib.duckdb_struct_type_child_count(struct_p)
     assert count == 2
     child_name_p = ducklib.duckdb_struct_type_child_name(struct_p, 0)
@@ -1851,7 +1839,7 @@ def test_create_struct_type():
     assert child_name == "id"
     ducklib.duckdb_free(child_name_p)
     child_type_p = ducklib.duckdb_struct_type_child_type(struct_p, 0)
-    assert ducklib.duckdb_get_type_id(child_type_p) == DUCKDB_TYPE_INTEGER
+    assert ducklib.duckdb_get_type_id(child_type_p) == ducklib.DUCKDB_TYPE_INTEGER
     child_type_buf = numpy.array([child_type_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(child_type_buf.ctypes.data)
     struct_buf = numpy.array([struct_p], dtype=numpy.intp)
@@ -1863,11 +1851,8 @@ def test_create_struct_type():
 
 
 def test_create_union_type():
-    DUCKDB_TYPE_UNION = 28
-    DUCKDB_TYPE_INTEGER = 4
-    DUCKDB_TYPE_VARCHAR = 17
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
-    varchar_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR)
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    varchar_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_VARCHAR)
     types_arr = numpy.array([int_type_p, varchar_type_p], dtype=numpy.intp)
     name1 = ctypes.c_char_p(b"num")
     name2 = ctypes.c_char_p(b"str")
@@ -1878,7 +1863,7 @@ def test_create_union_type():
     union_p = ducklib.duckdb_create_union_type(types_arr.ctypes.data, names_arr.ctypes.data, 2)
     assert union_p != 0
     type_id = ducklib.duckdb_get_type_id(union_p)
-    assert type_id == DUCKDB_TYPE_UNION
+    assert type_id == ducklib.DUCKDB_TYPE_UNION
     count = ducklib.duckdb_union_type_member_count(union_p)
     assert count == 2
     member_name_p = ducklib.duckdb_union_type_member_name(union_p, 0)
@@ -1887,7 +1872,7 @@ def test_create_union_type():
     assert member_name == "num"
     ducklib.duckdb_free(member_name_p)
     member_type_p = ducklib.duckdb_union_type_member_type(union_p, 0)
-    assert ducklib.duckdb_get_type_id(member_type_p) == DUCKDB_TYPE_INTEGER
+    assert ducklib.duckdb_get_type_id(member_type_p) == ducklib.DUCKDB_TYPE_INTEGER
     member_type_buf = numpy.array([member_type_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(member_type_buf.ctypes.data)
     union_buf = numpy.array([union_p], dtype=numpy.intp)
@@ -1899,7 +1884,6 @@ def test_create_union_type():
 
 
 def test_create_enum_type():
-    DUCKDB_TYPE_ENUM = 23
     name1 = ctypes.c_char_p(b"small")
     name2 = ctypes.c_char_p(b"medium")
     name3 = ctypes.c_char_p(b"large")
@@ -1910,7 +1894,7 @@ def test_create_enum_type():
     enum_p = ducklib.duckdb_create_enum_type(names_arr.ctypes.data, 3)
     assert enum_p != 0
     type_id = ducklib.duckdb_get_type_id(enum_p)
-    assert type_id == DUCKDB_TYPE_ENUM
+    assert type_id == ducklib.DUCKDB_TYPE_ENUM
     dict_size = ducklib.duckdb_enum_dictionary_size(enum_p)
     assert dict_size == 3
     val_p = ducklib.duckdb_enum_dictionary_value(enum_p, 0)
@@ -1959,8 +1943,7 @@ def test_scalar_function_round_trip():
     name_p = get_unicode_data_p("add_one")
     ducklib.duckdb_scalar_function_set_name(func_p, name_p)
 
-    DUCKDB_TYPE_INTEGER = 4
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
     ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
     type_buf = numpy.array([int_type_p], dtype=numpy.intp)
@@ -2018,8 +2001,7 @@ def test_scalar_function_extra_info():
     ducklib.duckdb_scalar_function_set_name(
         func_p, get_unicode_data_p("get_extra"))
 
-    DUCKDB_TYPE_BIGINT = 5
-    bigint_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_BIGINT)
+    bigint_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
     ducklib.duckdb_scalar_function_set_return_type(func_p, bigint_type_p)
     type_buf = numpy.array([bigint_type_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
@@ -2070,8 +2052,7 @@ def test_scalar_function_set_error():
     ducklib.duckdb_scalar_function_set_name(
         func_p, get_unicode_data_p("will_fail"))
 
-    DUCKDB_TYPE_INTEGER = 4
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
     ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
     type_buf = numpy.array([int_type_p], dtype=numpy.intp)
@@ -2132,14 +2113,12 @@ def test_scalar_function_set_overloads():
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
-    DUCKDB_TYPE_INTEGER = 4
-    DUCKDB_TYPE_DOUBLE = 11
 
     # Integer variant
     int_func_p = ducklib.duckdb_create_scalar_function()
     ducklib.duckdb_scalar_function_set_name(
         int_func_p, get_unicode_data_p("double_it"))
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     ducklib.duckdb_scalar_function_add_parameter(int_func_p, int_type_p)
     ducklib.duckdb_scalar_function_set_return_type(
         int_func_p, int_type_p)
@@ -2152,7 +2131,7 @@ def test_scalar_function_set_overloads():
     dbl_func_p = ducklib.duckdb_create_scalar_function()
     ducklib.duckdb_scalar_function_set_name(
         dbl_func_p, get_unicode_data_p("double_it"))
-    dbl_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_DOUBLE)
+    dbl_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_DOUBLE)
     ducklib.duckdb_scalar_function_add_parameter(
         dbl_func_p, dbl_type_p)
     ducklib.duckdb_scalar_function_set_return_type(
@@ -2331,10 +2310,8 @@ def test_aggregate_function_round_trip():
     name_p = get_unicode_data_p("my_sum")
     ducklib.duckdb_aggregate_function_set_name(func_p, name_p)
 
-    DUCKDB_TYPE_INTEGER = 4
-    DUCKDB_TYPE_BIGINT = 5
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
-    bigint_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_BIGINT)
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    bigint_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
     ducklib.duckdb_aggregate_function_add_parameter(func_p, int_type_p)
     ducklib.duckdb_aggregate_function_set_return_type(
         func_p, bigint_type_p)
@@ -2399,9 +2376,8 @@ def test_scalar_function_set_init():
     ducklib.duckdb_scalar_function_set_name(
         func_p, get_unicode_data_p("with_init"))
 
-    DUCKDB_TYPE_INTEGER = 4
     int_type_p = ducklib.duckdb_create_logical_type(
-        DUCKDB_TYPE_INTEGER)
+        ducklib.DUCKDB_TYPE_INTEGER)
     ducklib.duckdb_scalar_function_add_parameter(
         func_p, int_type_p)
     ducklib.duckdb_scalar_function_set_return_type(
@@ -2456,17 +2432,15 @@ def test_aggregate_function_set_overloads():
     assert rc == ducklib.DuckDBSuccess
     ducklib.duckdb_destroy_result(result.ctypes.data)
 
-    DUCKDB_TYPE_INTEGER = 4
-    DUCKDB_TYPE_BIGINT = 5
 
     # Integer input variant (reuses existing agg callbacks)
     int_func_p = ducklib.duckdb_create_aggregate_function()
     ducklib.duckdb_aggregate_function_set_name(
         int_func_p, get_unicode_data_p("my_sum2"))
     int_type_p = ducklib.duckdb_create_logical_type(
-        DUCKDB_TYPE_INTEGER)
+        ducklib.DUCKDB_TYPE_INTEGER)
     bigint_type_p = ducklib.duckdb_create_logical_type(
-        DUCKDB_TYPE_BIGINT)
+        ducklib.DUCKDB_TYPE_BIGINT)
     ducklib.duckdb_aggregate_function_add_parameter(
         int_func_p, int_type_p)
     ducklib.duckdb_aggregate_function_set_return_type(
@@ -2588,14 +2562,13 @@ def test_hybrid_jit_udf_on_python_connection():
         "CREATE TABLE nums AS SELECT range::INTEGER + 1 AS x FROM range(10)")
     conn_ptr = extract_connection_ptr(conn)
 
-    DUCKDB_TYPE_INTEGER = 4
     func_p = ducklib.duckdb_create_scalar_function()
     assert func_p != 0
 
     ducklib.duckdb_scalar_function_set_name(
         func_p, get_unicode_data_p("jit_isqrt"))
 
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
     ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
     type_buf = numpy.array([int_type_p], dtype=numpy.intp)
@@ -2653,14 +2626,13 @@ def test_jit_udf_vs_python_udf():
         "INTEGER",
     )
 
-    DUCKDB_TYPE_INTEGER = 4
     func_p = ducklib.duckdb_create_scalar_function()
     assert func_p != 0
 
     ducklib.duckdb_scalar_function_set_name(
         func_p, get_unicode_data_p("jit_triple"))
 
-    int_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_INTEGER)
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
     ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
     type_buf = numpy.array([int_type_p], dtype=numpy.intp)
@@ -2744,11 +2716,10 @@ def test_udf_benchmark(capsys):
 
     # Register numbduck JIT UDF
     conn_ptr = extract_connection_ptr(conn)
-    DUCKDB_TYPE_BIGINT = 5
     func_p = ducklib.duckdb_create_scalar_function()
     ducklib.duckdb_scalar_function_set_name(
         func_p, get_unicode_data_p("jit_square"))
-    bigint_type_p = ducklib.duckdb_create_logical_type(DUCKDB_TYPE_BIGINT)
+    bigint_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
     ducklib.duckdb_scalar_function_add_parameter(func_p, bigint_type_p)
     ducklib.duckdb_scalar_function_set_return_type(func_p, bigint_type_p)
     type_buf = numpy.array([bigint_type_p], dtype=numpy.intp)
