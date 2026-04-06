@@ -47,6 +47,7 @@ DuckDBSuccess = 0
 DuckDBError = 1
 
 # duckdb_type enum (from duckdb.h)
+DUCKDB_TYPE_INVALID = 0
 DUCKDB_TYPE_BOOLEAN = 1
 DUCKDB_TYPE_TINYINT = 2
 DUCKDB_TYPE_SMALLINT = 3
@@ -73,8 +74,23 @@ DUCKDB_TYPE_ENUM = 23
 DUCKDB_TYPE_LIST = 24
 DUCKDB_TYPE_STRUCT = 25
 DUCKDB_TYPE_MAP = 26
+DUCKDB_TYPE_UUID = 27
 DUCKDB_TYPE_UNION = 28
+DUCKDB_TYPE_BIT = 29
+DUCKDB_TYPE_TIME_TZ = 30
+DUCKDB_TYPE_TIMESTAMP_TZ = 31
+DUCKDB_TYPE_UHUGEINT = 32
 DUCKDB_TYPE_ARRAY = 33
+DUCKDB_TYPE_ANY = 34
+# VARINT (duckdb ≤1.4) and BIGNUM (duckdb ≥1.5) are the same type —
+# same enum value, same struct layout ({byte_ptr, size, is_negative}).
+# Both names are defined for cross-version portability.
+DUCKDB_TYPE_VARINT = 35
+DUCKDB_TYPE_BIGNUM = 35
+DUCKDB_TYPE_SQLNULL = 36
+DUCKDB_TYPE_STRING_LITERAL = 37
+DUCKDB_TYPE_INTEGER_LITERAL = 38
+DUCKDB_TYPE_TIME_NS = 39  # duckdb 1.5+
 
 duckdb_result_ty = UniTuple(intp, 6)
 duckdb_hugeint_ty = Tuple((uint64, int64))
