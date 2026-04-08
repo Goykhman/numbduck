@@ -15,10 +15,12 @@ where it doesn't.
   at 1M rows.
 
 - **[online_scoring.py](online_scoring.py)** — *latency + GIL-free axis.*
-  Per-event feature lookup and scoring inside a single `@njit(nogil=True)`
-  loop. Compared against a pure-Python `conn.execute` loop. Demonstrates
-  measurable parallel scaling under multithreading. *(Numbers TBD until
-  Task 2 lands.)*
+  Per-event feature lookup and dot-product score inside a single
+  `@njit(nogil=True)` loop, with timestamps captured by calling libc
+  `clock_gettime` from inside the JIT loop via numbox `_call_lib_func`.
+  Measured: **~2.2× lower median latency** vs a pure-Python `conn.execute`
+  loop, and **monotonic parallel scaling to ~2.4× on 8 threads** while the
+  Python loop plateaus around 1× under GIL contention.
 
 - **[fraud_score.py](fraud_score.py)** — *branchy logic axis.* Per-row
   business rules with several `if/else` branches. Shows that numbduck also
