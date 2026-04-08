@@ -23,9 +23,12 @@ where it doesn't.
   Python loop plateaus around 1× under GIL contention.
 
 - **[fraud_score.py](fraud_score.py)** — *branchy logic axis.* Per-row
-  business rules with several `if/else` branches. Shows that numbduck also
-  wins in Arrow's wheelhouse, moderately. *(Numbers TBD until Task 3 lands.
-  This example may be dropped if the measured JIT-vs-Arrow gap is < 2×.)*
+  business rules with several `if/else` branches over six columns. Arrow's
+  `pc.if_else` chain beats the per-row Python scalar UDF by ~40× at 10K rows
+  (full credit — Arrow is the right stock-DuckDB tool for branchy work). The
+  JIT chunk callback then beats Arrow by **~20×** at 10K and **~1800×** at 1M
+  rows; the growing gap is partly Arrow's per-chunk Python boundary plus
+  intermediate-array allocation per `pc.*` step.
 
 ## Running
 
