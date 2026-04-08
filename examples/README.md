@@ -30,6 +30,13 @@ where it doesn't.
   rows; the growing gap is partly Arrow's per-chunk Python boundary plus
   intermediate-array allocation per `pc.*` step.
 
+## Requirements
+
+These scripts require `pyarrow` in addition to numbduck's normal dependencies
+(it is used for the Arrow-based baselines in `haversine.py` and `fraud_score.py`
+and is registered via DuckDB's `create_function(..., type="arrow")`). Install it
+with `pip install pyarrow` if it is not already present in your venv.
+
 ## Running
 
 ```bash

@@ -38,6 +38,7 @@ duckdb 1.5.1, numba 0.64.0:
 """
 import os
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -63,7 +64,8 @@ from numbduck.pybridge import extract_connection_ptr  # noqa: E402
 # task notes; the parallel-scaling block at the bottom of this file is the
 # in-script confirmation.
 signatures["clock_gettime"] = int32(int32, intp)
-CLOCK_MONOTONIC = 1
+# Prefer the OS-defined constant; fall back to the Linux value if unavailable.
+CLOCK_MONOTONIC = getattr(time, "CLOCK_MONOTONIC", 1)
 
 
 @cres(int32(int32, intp))
@@ -219,12 +221,13 @@ def run_scaling_block(conn_factory, ids, x):
         c.close()
 
     for T in thread_counts:
-        chunk_size = n // T
-        slices = [
-            (ids[i * chunk_size:(i + 1) * chunk_size],
-             x[i * chunk_size:(i + 1) * chunk_size])
-            for i in range(T)
-        ]
+        base, extra = divmod(n, T)
+        slices = []
+        start = 0
+        for i in range(T):
+            stop = start + base + (1 if i < extra else 0)
+            slices.append((ids[start:stop], x[start:stop]))
+            start = stop
         for variant, fn in [("python", python_worker), ("jit", jit_worker)]:
             t0 = time.perf_counter()
             with ThreadPoolExecutor(max_workers=T) as ex:
@@ -270,19 +273,23 @@ def main():
     print()
 
     # Parallel scaling — use a smaller sample so all four T values fit in the
-    # time budget. Each worker opens its own connection on the same in-memory db.
+    # time budget. Each worker opens its own connection on the same on-disk db.
     SCALE_N = min(N_EVENTS, 2_000)
-    scale_db_path = "/tmp/numbduck_online_scoring.duckdb"
-    if os.path.exists(scale_db_path):
-        os.remove(scale_db_path)
-    scale_db = duckdb.connect(scale_db_path)
-    setup_features(scale_db, N_FEATURES)
-    scale_db.close()
+    scale_fd, scale_db_path = tempfile.mkstemp(suffix=".duckdb", prefix="numbduck_online_scoring_")
+    os.close(scale_fd)
+    os.remove(scale_db_path)  # duckdb.connect wants to create the file itself
+    try:
+        scale_db = duckdb.connect(scale_db_path)
+        setup_features(scale_db, N_FEATURES)
+        scale_db.close()
 
-    def conn_factory():
-        return duckdb.connect(scale_db_path)
+        def conn_factory():
+            return duckdb.connect(scale_db_path)
 
-    scaling = run_scaling_block(conn_factory, ids[:SCALE_N], x[:SCALE_N])
+        scaling = run_scaling_block(conn_factory, ids[:SCALE_N], x[:SCALE_N])
+    finally:
+        if os.path.exists(scale_db_path):
+            os.remove(scale_db_path)
 
     scale_rows = []
     base_py = scaling["python"][1]
@@ -322,8 +329,6 @@ def main():
     )
 
     db.close()
-    if os.path.exists(scale_db_path):
-        os.remove(scale_db_path)
 
 
 if __name__ == "__main__":
