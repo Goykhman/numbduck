@@ -22,20 +22,20 @@ Run:
     python examples/online_scoring.py
     NUMBDUCK_BENCH_BIG=1 python examples/online_scoring.py    # 500K events
 
-Last measured on: 2026-04-08, x86_64 (WSL2, 8 cores), python 3.12.3,
+Last measured on: 2026-04-10, x86_64 (WSL2, 8 cores), python 3.12.3,
 duckdb 1.5.1, numba 0.64.0:
 
   Per-event latency (5,000 events):
-  Variant   Total  Events/s  p50 µs  p95 µs  p99 µs  max µs
-  Python   1.999s     2,501   369.3   599.8   928.3  2404.4
-  JIT      0.902s     5,545   151.8   312.3   526.0  6001.6
+  Variant   Total  Events/s  p50 µs  p95 µs  p99 µs   max µs
+  Python   1.913s     2,614   347.3   582.3   884.0   2290.4
+  JIT      0.914s     5,469   144.3   323.6   582.6  12448.8
 
   Parallel scaling (2,000 events split across T workers):
   T  Python  Py speedup     JIT  JIT speedup
-  1  1.000s       1.00x  0.429s        1.00x
-  2  0.511s       1.96x  0.319s        1.34x
-  4  0.797s       1.25x  0.205s        2.09x
-  8  0.899s       1.11x  0.175s        2.44x
+  1  0.830s       1.00x  0.380s        1.00x
+  2  0.497s       1.67x  0.292s        1.30x
+  4  0.732s       1.13x  0.199s        1.91x
+  8  0.859s       0.97x  0.159s        2.40x
 """
 import os
 import sys

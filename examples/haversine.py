@@ -15,13 +15,13 @@ Run:
     python examples/haversine.py
     NUMBDUCK_BENCH_BIG=1 python examples/haversine.py    # adds 10M-row tier
 
-Last measured on: 2026-04-08, x86_64 (WSL2, 8 cores), python 3.12.3,
+Last measured on: 2026-04-10, x86_64 (WSL2, 8 cores), python 3.12.3,
 duckdb 1.5.1, numba 0.64.0:
 
        Rows  Python   Arrow     JIT  Py/JIT  Arr/JIT
-     10,000  0.582s  0.006s  0.001s    620x       7x
-    100,000     n/a  0.056s  0.005s     n/a      11x
-  1,000,000     n/a  1.295s  0.016s     n/a      82x
+     10,000  0.466s  0.009s  0.001s    400x       8x
+    100,000     n/a  0.070s  0.005s     n/a      14x
+  1,000,000     n/a  1.368s  0.014s     n/a     101x
 
 The Python scalar UDF is only run on the smallest tier — at 100K it would
 take ~10s and at 1M it would take minutes, which violates the example's
@@ -211,10 +211,10 @@ def main():
     print()
     print(
         "  Honesty:\n"
-        "    At 10K rows the JIT chunk callback is ~620x faster than the per-row\n"
-        "    Python scalar UDF and ~7x faster than the PyArrow expression UDF.\n"
-        "    The gap to Arrow widens with N: at 1M rows the JIT runs in ~16ms\n"
-        "    while the Arrow chain takes ~1.3s — a ~80x gap. The win comes from\n"
+        "    At 10K rows the JIT chunk callback is ~400x faster than the per-row\n"
+        "    Python scalar UDF and ~8x faster than the PyArrow expression UDF.\n"
+        "    The gap to Arrow widens with N: at 1M rows the JIT runs in ~14ms\n"
+        "    while the Arrow chain takes ~1.4s — a ~100x gap. The win comes from\n"
         "    no Python crossings per chunk, LLVM-fused math (sin/cos/asin/sqrt\n"
         "    inlined into one tight loop), and no intermediate Arrow arrays for\n"
         "    each pc.* step. Python's per-row interpreter round-trip is so\n"

@@ -21,16 +21,16 @@ Run:
     python examples/fraud_score.py
     NUMBDUCK_BENCH_BIG=1 python examples/fraud_score.py    # 10M-row tier
 
-Last measured on: 2026-04-08, x86_64 (WSL2, 8 cores), python 3.12.3,
+Last measured on: 2026-04-10, x86_64 (WSL2, 8 cores), python 3.12.3,
 duckdb 1.5.1, numba 0.64.0:
 
        Rows    Python      Arrow     JIT  Py/JIT  Arr/JIT
-     10,000  475.42ms    11.56ms  0.59ms    804x    19.6x
-    100,000       n/a    96.81ms  0.74ms     n/a   131.3x
-  1,000,000       n/a  2149.26ms  1.19ms     n/a  1806.6x
+     10,000  463.76ms     7.88ms  0.48ms    956x    16.3x
+    100,000       n/a    65.05ms  0.97ms     n/a    67.0x
+  1,000,000       n/a  2078.35ms  1.18ms     n/a  1755.3x
 
 The Python scalar UDF is only run on the smallest tier (per-row interpreter
-round-trip is too expensive at >10K). The Arrow/JIT gap of ~1800x at 1M rows
+round-trip is too expensive at >10K). The Arrow/JIT gap of ~1750x at 1M rows
 is real (cross-check passes) but is partly an Arrow PyArrow-UDF artifact:
 each chunk crosses the Python boundary and allocates intermediate arrays for
 every pc.if_else step.
@@ -265,10 +265,10 @@ def main():
     print(
         "  Honesty:\n"
         "    Arrow does the right vectorized work and beats the per-row Python\n"
-        "    scalar UDF by ~40x at 10K rows — pyarrow's chained pc.if_else is the\n"
+        "    scalar UDF by ~60x at 10K rows — pyarrow's chained pc.if_else is the\n"
         "    correct stock-DuckDB tool for branchy logic, full credit. The JIT\n"
-        "    chunk callback then beats Arrow by ~20x at 10K, ~130x at 100K, and\n"
-        "    ~1800x at 1M rows. The growing gap is *partly* an artifact: each\n"
+        "    chunk callback then beats Arrow by ~16x at 10K, ~67x at 100K, and\n"
+        "    ~1750x at 1M rows. The growing gap is *partly* an artifact: each\n"
         "    Arrow UDF chunk crosses the Python boundary and allocates a fresh\n"
         "    intermediate array for every pc.if_else step, while the JIT computes\n"
         "    the whole ruleset in registers with no allocations. Even discounting\n"

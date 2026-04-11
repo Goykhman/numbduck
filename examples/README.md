@@ -10,23 +10,23 @@ where it doesn't.
 
 - **[haversine.py](haversine.py)** — *throughput axis.* Per-row great-circle
   distance computation over synthetic customer points. Measured on this
-  machine: the JIT chunk callback is **~620×** faster than the per-row Python
-  scalar UDF (10K rows) and **~80×** faster than the PyArrow expression UDF
+  machine: the JIT chunk callback is **~400×** faster than the per-row Python
+  scalar UDF (10K rows) and **~100×** faster than the PyArrow expression UDF
   at 1M rows.
 
 - **[online_scoring.py](online_scoring.py)** — *latency + GIL-free axis.*
   Per-event feature lookup and dot-product score inside a single
-  `@njit(nogil=True)` loop, with timestamps captured by calling libc
-  `clock_gettime` from inside the JIT loop via numbox `_call_lib_func`.
+  `@njit(nogil=True)` loop, with timestamps captured via a cross-platform
+  monotonic clock bound inside the JIT loop (see `_jit_clock.py`).
   Measured: **~2.2× lower median latency** vs a pure-Python `conn.execute`
   loop, and **monotonic parallel scaling to ~2.4× on 8 threads** while the
   Python loop plateaus around 1× under GIL contention.
 
 - **[fraud_score.py](fraud_score.py)** — *branchy logic axis.* Per-row
   business rules with several `if/else` branches over six columns. Arrow's
-  `pc.if_else` chain beats the per-row Python scalar UDF by ~40× at 10K rows
+  `pc.if_else` chain beats the per-row Python scalar UDF by ~60× at 10K rows
   (full credit — Arrow is the right stock-DuckDB tool for branchy work). The
-  JIT chunk callback then beats Arrow by **~20×** at 10K and **~1800×** at 1M
+  JIT chunk callback then beats Arrow by **~16×** at 10K and **~1750×** at 1M
   rows; the growing gap is partly Arrow's per-chunk Python boundary plus
   intermediate-array allocation per `pc.*` step.
 
