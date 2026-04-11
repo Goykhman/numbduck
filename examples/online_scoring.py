@@ -50,7 +50,7 @@ from numba.core.types import intp
 from numbox.utils.lowlevel import _cast_int_to_void_p, get_unicode_data_p
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import assert_results_match, format_table, print_env, time_median  # noqa: E402
+from _common import assert_results_match, format_table, print_env  # noqa: E402
 from _jit_clock import monotonic_ns  # noqa: E402
 
 from numbduck import ducklib  # noqa: E402

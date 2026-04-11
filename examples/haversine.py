@@ -34,7 +34,6 @@ import os
 import sys
 
 import duckdb
-import numba
 import numpy
 import pyarrow.compute as pc
 from numba import cfunc, njit, carray
