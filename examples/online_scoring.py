@@ -108,13 +108,11 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
     n = len(ids)
     result_buf = numpy.zeros(6, dtype=numpy.int64)
     chunk_buf = numpy.zeros(1, dtype=numpy.int64)
-    ts = numpy.zeros(2, dtype=numpy.int64)
     result_p = intp(result_buf.ctypes.data)
     chunk_pp = intp(chunk_buf.ctypes.data)
-    ts_p = intp(ts.ctypes.data)
 
     for i in range(n):
-        t0 = monotonic_ns(ts_p)
+        t0 = monotonic_ns()
 
         ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(1), ids[i])
         ducklib.duckdb_execute_prepared(stmt_p, result_p)
@@ -145,15 +143,8 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
         ducklib.duckdb_destroy_data_chunk(chunk_pp)
         ducklib.duckdb_destroy_result(result_p)
 
-        t1 = monotonic_ns(ts_p)
+        t1 = monotonic_ns()
         latencies_out[i] = t1 - t0
-
-    # Keep ts alive until after the loop — monotonic_ns receives ts_p (an
-    # intp) not ts (the array), so Numba's NRT can't see the dependency and
-    # may free ts mid-loop, leaving ts_p dangling.  Reading ts[0] here
-    # creates a reference that the NRT honours.
-    # See: https://github.com/numba/numba/issues/5853#issuecomment-893275330
-    ts[0]
 
 
 def score_jit(conn, ids, x):

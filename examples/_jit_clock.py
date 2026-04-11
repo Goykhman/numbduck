@@ -1,98 +1,88 @@
 """Cross-platform monotonic nanosecond clock callable from @njit code.
 
-Exposes a single @cres function::
+Exposes a single function::
 
-    monotonic_ns(scratch_p) -> int64   # nanoseconds since an unspecified epoch
+    monotonic_ns() -> int64   # nanoseconds since an unspecified epoch
 
-where ``scratch_p`` is the address of a caller-owned 16-byte scratch buffer
-(e.g. ``intp(numpy.zeros(2, dtype=numpy.int64).ctypes.data)``). The caller
-allocates the buffer once and passes it on every call so the clock helper
-itself does zero allocations — a prerequisite for using it to measure
-nanosecond-scale latencies inside a hot JIT loop.
+Implemented as a Numba ``@intrinsic`` that emits an LLVM ``alloca`` for
+the platform's time struct, calls the OS clock function into it, and
+returns the result — all on the stack, with zero heap allocation and no
+NRT liveness concerns.
 
 Platform implementations
 ------------------------
 Linux / macOS:
-    Binds libc ``clock_gettime(CLOCK_MONOTONIC, &ts)``. The scratch buffer is
-    read back as a 2-element int64 ``carray`` holding ``tv_sec`` and
-    ``tv_nsec``. Works because ``dlsym(RTLD_DEFAULT)`` — which is what
-    llvmlite's ``address_of_symbol`` uses on POSIX — finds symbols in any
-    globally-loaded shared library, and libc is always globally loaded.
+    Calls libc ``clock_gettime(CLOCK_MONOTONIC, &ts)`` where ``ts`` is a
+    stack-allocated ``struct timespec {int64 tv_sec; int64 tv_nsec}``.
+    ``clock_gettime`` is resolved via ``address_of_symbol`` from
+    RTLD_DEFAULT — libc is always globally loaded.
 
 Windows:
-    Binds ``QueryPerformanceCounter`` and ``QueryPerformanceFrequency`` from
-    ``kernel32.dll``. The frequency is read once at module import via ctypes
-    and baked into the ``monotonic_ns`` body as a compile-time constant.
-    ``kernel32`` is loaded explicitly into LLVM's symbol search via
-    ``ll.load_library_permanently('kernel32.dll')`` so that
-    ``address_of_symbol`` can resolve ``QueryPerformance*``.
-
-The single ``monotonic_ns(scratch_p)`` callable has the same signature on
-every platform; the implementation is selected at module import time based
-on ``platform.system()``.
+    Calls ``QueryPerformanceCounter`` from ``kernel32.dll``.  The
+    performance-counter frequency is read once at module import via
+    ctypes and baked into the IR as a compile-time constant.
+    ``kernel32`` is registered with LLVM's symbol search via
+    ``load_library_permanently``.
 """
 import ctypes
 import platform
 import time
 
 import llvmlite.binding as ll
-import numpy
-from numba import carray
-from numba.core.types import int32, int64, intp
-from numbox.core.bindings.call import _call_lib_func
-from numbox.core.bindings.signatures import signatures
-from numbox.utils.highlevel import cres
-from numbox.utils.lowlevel import _cast_int_to_void_p
+from llvmlite import ir
+from numba.core.cgutils import get_or_insert_function
+from numba.core.types import int64
+from numba.extending import intrinsic
 
 _SYSTEM = platform.system()
 
+_i32 = ir.IntType(32)
+_i64 = ir.IntType(64)
+_i32_0 = ir.Constant(_i32, 0)
+_i32_1 = ir.Constant(_i32, 1)
+_BILLION = ir.Constant(_i64, 1_000_000_000)
+
 
 if _SYSTEM == "Windows":
-    # Make kernel32 visible to llvmlite's global symbol search. It is always
-    # loaded in every Windows process, but load_library_permanently also
-    # registers it with LLVM's internal dynamic-library table so that
-    # address_of_symbol can find QueryPerformance* by name.
     ll.load_library_permanently("kernel32.dll")
 
-    signatures["QueryPerformanceCounter"] = int32(intp)
-
-    @cres(int32(intp))
-    def _qpc(counter_p):
-        return _call_lib_func("QueryPerformanceCounter", (counter_p,))
-
-    # Read the performance-counter frequency (ticks per second) exactly once
-    # at module import via ctypes and bake it into monotonic_ns() as a
-    # compile-time constant. The frequency is invariant for the lifetime of
-    # the OS boot, so this is safe and avoids a per-call library call.
     _freq_buf = ctypes.c_int64(0)
     ctypes.windll.kernel32.QueryPerformanceFrequency(ctypes.byref(_freq_buf))
     _QPC_FREQ = int(_freq_buf.value)
     if _QPC_FREQ <= 0:
-        raise RuntimeError("QueryPerformanceFrequency returned a non-positive value")
-    _QPC_FREQ_CONST = numpy.int64(_QPC_FREQ)
+        raise RuntimeError(
+            "QueryPerformanceFrequency returned a non-positive value")
+    _QPC_FREQ_CONST = ir.Constant(_i64, _QPC_FREQ)
 
-    @cres(int64(intp))
-    def monotonic_ns(scratch_p):
-        _qpc(scratch_p)
-        scratch = carray(_cast_int_to_void_p(scratch_p), (1,), dtype=numpy.int64)
-        ticks = scratch[0]
-        return (ticks * numpy.int64(1_000_000_000)) // _QPC_FREQ_CONST
+    @intrinsic
+    def monotonic_ns(typingctx):
+        """Stack-only monotonic clock via QueryPerformanceCounter."""
+        def codegen(context, builder, signature, arguments):
+            counter_ptr = builder.alloca(_i64)
+            fn_ty = ir.FunctionType(_i32, [_i64.as_pointer()])
+            fn = get_or_insert_function(
+                builder.module, fn_ty, "QueryPerformanceCounter")
+            builder.call(fn, [counter_ptr])
+            ticks = builder.load(counter_ptr)
+            numer = builder.mul(ticks, _BILLION)
+            return builder.sdiv(numer, _QPC_FREQ_CONST)
+        return int64(), codegen
 
 else:
-    # Linux / Darwin: clock_gettime(CLOCK_MONOTONIC, &ts). The scratch buffer
-    # is a struct timespec laid out as { int64 tv_sec; int64 tv_nsec } on all
-    # 64-bit POSIX systems we care about.
-    signatures["clock_gettime"] = int32(int32, intp)
     _CLOCK_MONOTONIC = getattr(time, "CLOCK_MONOTONIC", 1)
+    _CLK_ID = ir.Constant(_i32, _CLOCK_MONOTONIC)
+    _timespec_ty = ir.LiteralStructType([_i64, _i64])
 
-    @cres(int32(int32, intp))
-    def _clock_gettime(clk_id, ts_p):
-        return _call_lib_func("clock_gettime", (clk_id, ts_p))
-
-    _CLOCK_MONOTONIC_CONST = numpy.int32(_CLOCK_MONOTONIC)
-
-    @cres(int64(intp))
-    def monotonic_ns(scratch_p):
-        _clock_gettime(_CLOCK_MONOTONIC_CONST, scratch_p)
-        scratch = carray(_cast_int_to_void_p(scratch_p), (2,), dtype=numpy.int64)
-        return scratch[0] * numpy.int64(1_000_000_000) + scratch[1]
+    @intrinsic
+    def monotonic_ns(typingctx):
+        """Stack-only monotonic clock via clock_gettime."""
+        def codegen(context, builder, signature, arguments):
+            ts_ptr = builder.alloca(_timespec_ty)
+            fn_ty = ir.FunctionType(_i32, [_i32, _timespec_ty.as_pointer()])
+            fn = get_or_insert_function(
+                builder.module, fn_ty, "clock_gettime")
+            builder.call(fn, [_CLK_ID, ts_ptr])
+            sec = builder.load(builder.gep(ts_ptr, [_i32_0, _i32_0]))
+            nsec = builder.load(builder.gep(ts_ptr, [_i32_0, _i32_1]))
+            return builder.add(builder.mul(sec, _BILLION), nsec)
+        return int64(), codegen
