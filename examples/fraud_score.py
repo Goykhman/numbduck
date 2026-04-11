@@ -54,6 +54,8 @@ from numbduck.pybridge import extract_connection_ptr  # noqa: E402
 ROW_COUNTS = [10_000, 100_000, 1_000_000]
 if os.environ.get("NUMBDUCK_BENCH_BIG") == "1":
     ROW_COUNTS.append(10_000_000)
+if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
+    ROW_COUNTS = [1_000]
 PY_MAX_N = 10_000
 
 

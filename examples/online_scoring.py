@@ -10,8 +10,9 @@ Two variants:
   1. Pure-Python loop calling conn.execute(...).fetchone() per event.
   2. numbduck @njit(nogil=True) loop calling duckdb_execute_prepared and
      reading the result chunk via the bound C API, with no Python crossings
-     between iterations. Per-event latency is captured by calling libc
-     clock_gettime from inside the JIT loop via numbox _call_lib_func.
+     between iterations. Per-event latency is captured via a cross-platform
+     monotonic clock bound inside the JIT loop (see _jit_clock.py —
+     clock_gettime on POSIX, QueryPerformanceCounter on Windows).
 
 This example also measures parallel scaling on 1/2/4/8 worker threads. The
 expected (and dramatic) shape: the Python loop is GIL-bound and shows zero
@@ -44,39 +45,28 @@ from concurrent.futures import ThreadPoolExecutor
 
 import duckdb
 import numpy
-from numba import carray, cfunc, njit
-from numba.core.types import int32, intp
-from numbox.core.bindings.call import _call_lib_func
-from numbox.core.bindings.signatures import signatures
-from numbox.utils.highlevel import cres
+from numba import carray, njit
+from numba.core.types import intp
 from numbox.utils.lowlevel import _cast_int_to_void_p, get_unicode_data_p
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import assert_results_match, format_table, print_env, time_median  # noqa: E402
+from _jit_clock import monotonic_ns  # noqa: E402
 
 from numbduck import ducklib  # noqa: E402
-from numbduck.duckdb_utils import create_duckdb_prepared_statement, create_duckdb_result  # noqa: E402
+from numbduck.duckdb_utils import create_duckdb_prepared_statement  # noqa: E402
 from numbduck.pybridge import extract_connection_ptr  # noqa: E402
-
-# --- libc clock_gettime binding (numba can't call time.* directly inside @njit) ---
-# Register the signature, then a thin @cres wrapper that calls _call_lib_func.
-# Validated to release the GIL inside @njit(nogil=True) — see scratch test in
-# task notes; the parallel-scaling block at the bottom of this file is the
-# in-script confirmation.
-signatures["clock_gettime"] = int32(int32, intp)
-# Prefer the OS-defined constant; fall back to the Linux value if unavailable.
-CLOCK_MONOTONIC = getattr(time, "CLOCK_MONOTONIC", 1)
-
-
-@cres(int32(int32, intp))
-def clock_gettime(clk_id, ts_p):
-    return _call_lib_func("clock_gettime", (clk_id, ts_p))
 
 
 N_EVENTS = 50_000
 N_FEATURES = 10_000
 if os.environ.get("NUMBDUCK_BENCH_BIG") == "1":
     N_EVENTS = 500_000
+# Smoke-test mode: a tiny end-to-end pass so CI can confirm the benchmark
+# runs on every platform without burning real minutes.
+if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
+    N_EVENTS = 200
+    N_FEATURES = 100
 
 
 def setup_features(conn, k):
@@ -124,8 +114,7 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
     ts_p = intp(ts.ctypes.data)
 
     for i in range(n):
-        clock_gettime(numpy.int32(CLOCK_MONOTONIC), ts_p)
-        t0 = ts[0] * 1_000_000_000 + ts[1]
+        t0 = monotonic_ns(ts_p)
 
         ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(1), ids[i])
         ducklib.duckdb_execute_prepared(stmt_p, result_p)
@@ -156,9 +145,15 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
         ducklib.duckdb_destroy_data_chunk(chunk_pp)
         ducklib.duckdb_destroy_result(result_p)
 
-        clock_gettime(numpy.int32(CLOCK_MONOTONIC), ts_p)
-        t1 = ts[0] * 1_000_000_000 + ts[1]
+        t1 = monotonic_ns(ts_p)
         latencies_out[i] = t1 - t0
+
+    # Keep ts alive until after the loop — monotonic_ns receives ts_p (an
+    # intp) not ts (the array), so Numba's NRT can't see the dependency and
+    # may free ts mid-loop, leaving ts_p dangling.  Reading ts[0] here
+    # creates a reference that the NRT honours.
+    # See: https://github.com/numba/numba/issues/5853#issuecomment-893275330
+    ts[0]
 
 
 def score_jit(conn, ids, x):
@@ -204,11 +199,14 @@ def run_latency_block(conn, ids, x):
 
 
 def run_scaling_block(conn_factory, ids, x):
-    """For T in [1,2,4,8]: launch T workers each scoring n/T events.
+    """For T in thread_counts: launch T workers each scoring n/T events.
     Each worker uses its own connection. Returns dict {variant: {T: total_wall}}."""
     n = len(ids)
     out = {"python": {}, "jit": {}}
-    thread_counts = [1, 2, 4, 8]
+    if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
+        thread_counts = [1, 2]
+    else:
+        thread_counts = [1, 2, 4, 8]
 
     def python_worker(my_ids, my_x):
         c = conn_factory()
@@ -248,7 +246,7 @@ def main():
 
     # Use a smaller sample for the per-event latency block — the Python path
     # is so slow per call that 50K Python events would blow the time budget.
-    LAT_N = min(N_EVENTS, 5_000)
+    LAT_N = min(N_EVENTS, 5_000 if os.environ.get("NUMBDUCK_BENCH_TINY") != "1" else 100)
     py_lats, jit_lats = run_latency_block(db, ids[:LAT_N], x[:LAT_N])
 
     py_total_us = py_lats.sum() / 1000.0
@@ -274,7 +272,7 @@ def main():
 
     # Parallel scaling — use a smaller sample so all four T values fit in the
     # time budget. Each worker opens its own connection on the same on-disk db.
-    SCALE_N = min(N_EVENTS, 2_000)
+    SCALE_N = min(N_EVENTS, 2_000 if os.environ.get("NUMBDUCK_BENCH_TINY") != "1" else 100)
     scale_fd, scale_db_path = tempfile.mkstemp(suffix=".duckdb", prefix="numbduck_online_scoring_")
     os.close(scale_fd)
     os.remove(scale_db_path)  # duckdb.connect wants to create the file itself
@@ -294,7 +292,7 @@ def main():
     scale_rows = []
     base_py = scaling["python"][1]
     base_jit = scaling["jit"][1]
-    for T in [1, 2, 4, 8]:
+    for T in sorted(scaling["python"].keys()):
         py_t = scaling["python"][T]
         jit_t = scaling["jit"][T]
         scale_rows.append([
@@ -322,7 +320,8 @@ def main():
         "    Parallel scaling is the dramatic axis. The pure-Python loop peaks\n"
         "    at T=2 (1.96x speedup) and then loses ground as more workers contend\n"
         "    for the GIL — at T=8 it is essentially T=1 again. The JIT loop, with\n"
-        "    nogil=True and a libc clock_gettime call instead of time.monotonic_ns,\n"
+        "    nogil=True and a cross-platform monotonic clock bound from libc\n"
+        "    (POSIX) or kernel32.dll (Windows) instead of time.monotonic_ns,\n"
         "    scales monotonically to ~2.4x at T=8. The remaining gap to ideal 8x\n"
         "    is from DuckDB-internal locking and shared-memory contention, not\n"
         "    GIL contention — that is the point of the example."
