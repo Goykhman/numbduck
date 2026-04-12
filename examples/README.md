@@ -2,7 +2,7 @@
 
 Runnable narrative-style scripts that compare numbduck against the closest
 stock-DuckDB-Python equivalents. Each script generates its own data, runs
-all variants under timing, and prints honest results — including the cases
+all variants under timing, and prints the results — including the cases
 where numbduck wins by a lot, where it wins moderately, and (eventually)
 where it doesn't.
 

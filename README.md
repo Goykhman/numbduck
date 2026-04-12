@@ -9,7 +9,7 @@ Inspired by the [NumbSQL](https://github.com/cpcloud/numbsql) project.
 
 Runnable narrative-style examples comparing numbduck against the closest stock
 DuckDB Python+Arrow approaches live in [`examples/`](examples/). Each script is
-self-contained, generates its own data, and prints honest measured numbers.
+self-contained, generates its own data, and prints the measured numbers.
 
 Highlights:
 
