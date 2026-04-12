@@ -301,7 +301,7 @@ def main():
     ))
     print()
     print(
-        "  Honesty:\n"
+        "  Discussion:\n"
         "    Per-event latency: the JIT loop runs at ~5.5K events/sec versus\n"
         "    ~2.5K events/sec for the pure-Python loop — about 2.2x lower median\n"
         "    latency (152µs vs 369µs at p50). The win is modest because every\n"

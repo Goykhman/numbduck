@@ -24,7 +24,7 @@ where it doesn't.
 
 - **[fraud_score.py](fraud_score.py)** — *branchy logic axis.* Per-row
   business rules with several `if/else` branches over six columns. Arrow's
-  `pc.if_else` chain beats the per-row Python scalar UDF by ~60× at 10K rows
+  `pc.if_else` chain beats the per-row Python scalar UDF by **~60×** at 10K rows
   (full credit — Arrow is the right stock-DuckDB tool for branchy work). The
   JIT chunk callback then beats Arrow by **~16×** at 10K and **~1750×** at 1M
   rows; the growing gap is partly Arrow's per-chunk Python boundary plus

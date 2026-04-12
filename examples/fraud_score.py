@@ -263,7 +263,7 @@ def main():
     )
     print()
     print(
-        "  Honesty:\n"
+        "  Discussion:\n"
         "    Arrow does the right vectorized work and beats the per-row Python\n"
         "    scalar UDF by ~60x at 10K rows — pyarrow's chained pc.if_else is the\n"
         "    correct stock-DuckDB tool for branchy logic, full credit. The JIT\n"

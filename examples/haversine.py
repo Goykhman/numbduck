@@ -209,7 +209,7 @@ def main():
     ))
     print()
     print(
-        "  Honesty:\n"
+        "  Discussion:\n"
         "    At 10K rows the JIT chunk callback is ~400x faster than the per-row\n"
         "    Python scalar UDF and ~8x faster than the PyArrow expression UDF.\n"
         "    The gap to Arrow widens with N: at 1M rows the JIT runs in ~14ms\n"
