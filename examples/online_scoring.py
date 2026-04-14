@@ -11,7 +11,7 @@ Two variants:
   2. numbduck @njit(nogil=True) loop calling duckdb_execute_prepared and
      reading the result chunk via the bound C API, with no Python crossings
      between iterations. Per-event latency is captured via a cross-platform
-     monotonic clock bound inside the JIT loop (see _jit_clock.py —
+     monotonic clock bound inside the JIT loop (numbox.utils.clock.monotonic_ns —
      clock_gettime on POSIX, QueryPerformanceCounter on Windows).
 
 This example also measures parallel scaling on 1/2/4/8 worker threads. The

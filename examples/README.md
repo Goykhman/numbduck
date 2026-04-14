@@ -17,7 +17,7 @@ where it doesn't.
 - **[online_scoring.py](online_scoring.py)** — *latency + GIL-free axis.*
   Per-event feature lookup and dot-product score inside a single
   [`@njit(nogil=True)`](https://numba.readthedocs.io/en/stable/user/jit.html#nogil) loop, with timestamps captured via a cross-platform
-  monotonic clock bound inside the JIT loop ([`numbox.utils.clock.monotonic_ns`](https://github.com/Goykhman/numbox/blob/main/numbox/utils/clock.py)).
+  monotonic clock bound inside the JIT loop ([`numbox.utils.clock.monotonic_ns`](https://github.com/Goykhman/numbox/blob/0.5.8/numbox/utils/clock.py)).
   Measured: **~2.2× lower median latency** vs a pure-Python [`conn.execute`](https://duckdb.org/docs/stable/clients/python/dbapi.html)
   loop, and **monotonic parallel scaling to ~2.4× on 8 threads** while the
   Python loop plateaus around 1× under GIL contention.
