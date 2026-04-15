@@ -2,7 +2,7 @@
 
 Runnable narrative-style scripts that compare numbduck against the closest
 stock-DuckDB-Python equivalents. Each script generates its own data, runs
-all variants under timing, and prints honest results — including the cases
+all variants under timing, and prints the results — including the cases
 where numbduck wins by a lot, where it wins moderately, and (eventually)
 where it doesn't.
 
@@ -11,30 +11,30 @@ where it doesn't.
 - **[haversine.py](haversine.py)** — *throughput axis.* Per-row great-circle
   distance computation over synthetic customer points. Measured on this
   machine: the JIT chunk callback is **~400×** faster than the per-row Python
-  scalar UDF (10K rows) and **~100×** faster than the PyArrow expression UDF
+  scalar UDF (10K rows) and **~100×** faster than the [PyArrow expression UDF](https://duckdb.org/docs/stable/clients/python/function.html)
   at 1M rows.
 
 - **[online_scoring.py](online_scoring.py)** — *latency + GIL-free axis.*
   Per-event feature lookup and dot-product score inside a single
-  `@njit(nogil=True)` loop, with timestamps captured via a cross-platform
-  monotonic clock bound inside the JIT loop (see `_jit_clock.py`).
-  Measured: **~2.2× lower median latency** vs a pure-Python `conn.execute`
+  [`@njit(nogil=True)`](https://numba.readthedocs.io/en/stable/user/jit.html#nogil) loop, with timestamps captured via a cross-platform
+  monotonic clock bound inside the JIT loop ([`numbox.utils.clock.monotonic_ns`](https://github.com/Goykhman/numbox/blob/0.5.8/numbox/utils/clock.py)).
+  Measured: **~2.2× lower median latency** vs a pure-Python [`conn.execute`](https://duckdb.org/docs/stable/clients/python/dbapi.html)
   loop, and **monotonic parallel scaling to ~2.4× on 8 threads** while the
   Python loop plateaus around 1× under GIL contention.
 
 - **[fraud_score.py](fraud_score.py)** — *branchy logic axis.* Per-row
   business rules with several `if/else` branches over six columns. Arrow's
-  `pc.if_else` chain beats the per-row Python scalar UDF by **~60×** at 10K rows
+  [`pc.if_else`](https://arrow.apache.org/docs/python/generated/pyarrow.compute.if_else.html) chain beats the per-row Python scalar UDF by **~60×** at 10K rows
   (full credit — Arrow is the right stock-DuckDB tool for branchy work). The
   JIT chunk callback then beats Arrow by **~16×** at 10K and **~1750×** at 1M
   rows; the growing gap is partly Arrow's per-chunk Python boundary plus
-  intermediate-array allocation per `pc.*` step.
+  intermediate-array allocation per [`pc.*`](https://arrow.apache.org/docs/python/api/compute.html) step.
 
 ## Requirements
 
-These scripts require `pyarrow` in addition to numbduck's normal dependencies
-(it is used for the Arrow-based baselines in `haversine.py` and `fraud_score.py`
-and is registered via DuckDB's `create_function(..., type="arrow")`). Install it
+These scripts require [`pyarrow`](https://arrow.apache.org/docs/python/install.html) in addition to numbduck's normal dependencies
+(it is used for the Arrow-based baselines in [`haversine.py`](haversine.py) and [`fraud_score.py`](fraud_score.py)
+and is registered via DuckDB's [`create_function(..., type="arrow")`](https://duckdb.org/docs/stable/clients/python/function.html)). Install it
 with `pip install pyarrow` if it is not already present in your venv.
 
 ## Running
