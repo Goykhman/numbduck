@@ -79,8 +79,7 @@ Cross-project preferences live in the user's MEMORY.md. Only numbduck-specific w
 
 ## Project Status
 
-- **numbox monotonic_ns proposal**: Goykhman/numbox#7 — proposed adding JIT-callable `monotonic_ns` intrinsic to numbox. Goykhman interested, discussion ongoing about validation methodology.
-- **DuckDB Python issue**: duckdb/duckdb-python#404 — requesting C API symbols be exported from the Python wheel. Filed 2026-03-26, awaiting response.
+- **DuckDB Python issue**: duckdb/duckdb-python#404 — requesting C API symbols be exported from the Python wheel. Filed 2026-03-26; maintainer @evertlammerts responded 2026-04-12 committing to land the fix before 1.5.3. Still open.
 - **macOS C API stripping is intentional**: [duckdb-python PR #81](https://github.com/duckdb/duckdb-python/pull/81) deliberately exports only `PyInit__duckdb` + `duckdb_adbc_init` via [CMakeLists.txt L83-L110](https://github.com/duckdb/duckdb-python/blob/main/CMakeLists.txt#L83-L110). macOS `-exported_symbol` enforces it; Linux `--export-dynamic-symbol` is additive so C API survives by accident.
 
 **Key patterns for @cfunc + @njit UDF callbacks:**
