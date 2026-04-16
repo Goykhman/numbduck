@@ -2957,3 +2957,72 @@ def test_structref_meminfo_bridge_refcount_ladder():
 
     # Step 3: release the slot's reference. refcount → 0, dtor runs.
     _do_release(p)
+
+
+@njit
+def welford_update(s, x):
+    s.count += 1
+    delta = x - s.mean
+    s.mean += delta / s.count
+    delta2 = x - s.mean
+    s.m2 += delta * delta2
+
+
+@njit
+def welford_combine(src, tgt):
+    """Merge src into tgt in place. Chan et al. pairwise formula."""
+    if src.count == 0:
+        return
+    if tgt.count == 0:
+        tgt.mean = src.mean
+        tgt.count = src.count
+        tgt.m2 = src.m2
+        return
+    new_count = src.count + tgt.count
+    delta = src.mean - tgt.mean
+    new_mean = tgt.mean + delta * src.count / new_count
+    new_m2 = (tgt.m2 + src.m2
+              + delta * delta * tgt.count * src.count / new_count)
+    tgt.mean = new_mean
+    tgt.count = new_count
+    tgt.m2 = new_m2
+
+
+@njit
+def welford_finalize(s):
+    if s.count < 2:
+        return math.nan
+    return math.sqrt(s.m2 / (s.count - 1))
+
+
+def test_welford_numba_only():
+    """Verify Welford ops match numpy.std(ddof=1) without DuckDB."""
+
+    @njit
+    def _compute_serial(xs):
+        s = WelfordState(0.0, 0, 0.0)
+        for x in xs:
+            welford_update(s, x)
+        return welford_finalize(s)
+
+    @njit
+    def _compute_combined(xs_a, xs_b):
+        sa = WelfordState(0.0, 0, 0.0)
+        sb = WelfordState(0.0, 0, 0.0)
+        for x in xs_a:
+            welford_update(sa, x)
+        for x in xs_b:
+            welford_update(sb, x)
+        welford_combine(sa, sb)
+        return welford_finalize(sb)
+
+    xs = numpy.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+    expected = float(numpy.std(xs, ddof=1))
+
+    serial = _compute_serial(xs)
+    assert abs(serial - expected) < 1e-10, (
+        f"serial: got {serial}, expected {expected}")
+
+    combined = _compute_combined(xs[:3], xs[3:])
+    assert abs(combined - expected) < 1e-10, (
+        f"combined: got {combined}, expected {expected}")
