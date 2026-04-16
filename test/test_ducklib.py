@@ -1,10 +1,14 @@
 import ctypes
+import math
 
 import duckdb
 import numpy
 import pytest
 from numba import njit, cfunc, carray
 from numba import types as nb_types
+from numba.core import cgutils
+from numba.experimental import structref
+from numba.extending import intrinsic
 from numbox.utils.lowlevel import get_unicode_data_p
 
 from numba.core.types import intp
@@ -2783,3 +2787,173 @@ def test_udf_benchmark(capsys):
             print(f"    {N:>10,d}  {t_python:>9.4f}s  {arrow_str:>10s}"
                   f"  {t_jit:>9.4f}s  {t_python / t_jit:>7.0f}x"
                   f"  {arr_ratio:>8s}")
+
+
+# ---- structref <-> raw MemInfo pointer bridge intrinsics ----
+#
+# DuckDB's aggregate state slot is a single void* (internal_ptr) owned by
+# the engine. These helpers let an NRT-managed structref round-trip through
+# that slot without breaking reference counts.
+#
+# Reference counting contract:
+#   export_meminfo(s):   +1 incref; returned intp owns one reference.
+#   borrow_structref():  +1 incref on entry; local decref on scope exit
+#                        balances it. Net zero for the external owner.
+#   release_meminfo(p):  -1 decref; triggers dtor at refcount 0.
+
+_MI_TY = nb_types.MemInfoPointer(nb_types.voidptr)
+
+
+@intrinsic
+def _export_meminfo(typingctx, struct_ty):
+    sig = nb_types.intp(struct_ty)
+
+    def codegen(context, builder, signature, args):
+        struct_val = args[0]
+        _, meminfo_p = context.nrt.get_meminfos(
+            builder, struct_ty, struct_val)[0]
+        context.nrt.incref(builder, _MI_TY, meminfo_p)
+        return builder.ptrtoint(meminfo_p, cgutils.intp_t)
+    return sig, codegen
+
+
+@njit
+def export_meminfo(s):
+    return _export_meminfo(s)
+
+
+@intrinsic
+def _borrow_structref(typingctx, struct_type_ref, p_ty):
+    inst_type = struct_type_ref.instance_type
+    sig = inst_type(struct_type_ref, p_ty)
+
+    def codegen(context, builder, signature, args):
+        p_val = args[1]
+        mi_ll_ty = context.get_value_type(_MI_TY)
+        meminfo = builder.inttoptr(p_val, mi_ll_ty)
+        context.nrt.incref(builder, _MI_TY, meminfo)
+        st = cgutils.create_struct_proxy(inst_type)(context, builder)
+        st.meminfo = meminfo
+        return st._getvalue()
+    return sig, codegen
+
+
+@njit
+def borrow_structref(struct_type, p):
+    return _borrow_structref(struct_type, p)
+
+
+@intrinsic
+def _release_meminfo(typingctx, p_ty):
+    sig = nb_types.void(p_ty)
+
+    def codegen(context, builder, signature, args):
+        mi_ll_ty = context.get_value_type(_MI_TY)
+        meminfo = builder.inttoptr(args[0], mi_ll_ty)
+        context.nrt.decref(builder, _MI_TY, meminfo)
+    return sig, codegen
+
+
+@njit
+def release_meminfo(p):
+    _release_meminfo(p)
+
+
+# ---- Welford state structref ----
+
+@structref.register
+class WelfordStateType(nb_types.StructRef):
+    def preprocess_fields(self, fields):
+        return tuple((n, nb_types.unliteral(t)) for n, t in fields)
+
+
+class WelfordState(structref.StructRefProxy):
+    def __new__(cls, mean, count, m2):
+        return structref.StructRefProxy.__new__(cls, mean, count, m2)
+
+    @property
+    def mean(self):
+        return _welford_get_mean(self)
+
+    @property
+    def count(self):
+        return _welford_get_count(self)
+
+    @property
+    def m2(self):
+        return _welford_get_m2(self)
+
+
+@njit
+def _welford_get_mean(s):
+    return s.mean
+
+
+@njit
+def _welford_get_count(s):
+    return s.count
+
+
+@njit
+def _welford_get_m2(s):
+    return s.m2
+
+
+structref.define_proxy(
+    WelfordState, WelfordStateType, ["mean", "count", "m2"])
+
+welford_type = WelfordStateType(
+    [("mean", nb_types.float64),
+     ("count", nb_types.int64),
+     ("m2", nb_types.float64)])
+
+
+def _read_refcount(meminfo_intp):
+    """Read NRT MemInfo refcount from Python via ctypes.
+
+    MemInfo.refct is the first field (size_t) — stable since numba 0.50.
+    See numba/core/runtime/nrt.cpp.
+    """
+    return ctypes.c_int64.from_address(meminfo_intp).value
+
+
+def test_structref_meminfo_bridge_refcount_ladder():
+    """Prove export/borrow/release maintain refcount invariants step by step.
+
+    Each njit function is its own scope so numba's decref fires on return,
+    giving us clean refcount readings from Python between calls.
+    """
+
+    @njit
+    def _allocate_and_export():
+        s = WelfordState(1.5, 2, 3.25)
+        p = export_meminfo(s)
+        return p
+
+    @njit
+    def _borrow_and_read(p):
+        s = borrow_structref(welford_type, p)
+        return s.mean, s.count, s.m2
+
+    @njit
+    def _do_release(p):
+        release_meminfo(p)
+
+    # Step 1: allocate + export. After return, local `s` is decreffed.
+    # Only the export-owned reference survives.
+    p = _allocate_and_export()
+    assert p != 0, "export_meminfo returned null"
+    rc = _read_refcount(p)
+    assert rc == 1, f"expected refcount 1 after export+local-drop, got {rc}"
+
+    # Step 2: borrow. During borrow, refcount == 2 (slot + borrow).
+    # After return, borrow's decref fires, back to 1.
+    mean, count, m2 = _borrow_and_read(p)
+    assert mean == 1.5, f"mean={mean}"
+    assert count == 2, f"count={count}"
+    assert m2 == 3.25, f"m2={m2}"
+    rc = _read_refcount(p)
+    assert rc == 1, f"expected refcount 1 after borrow-drop, got {rc}"
+
+    # Step 3: release the slot's reference. refcount → 0, dtor runs.
+    _do_release(p)
