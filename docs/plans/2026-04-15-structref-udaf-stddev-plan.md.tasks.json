@@ -4,21 +4,21 @@
     {
       "id": 0,
       "subject": "Task 1: Bridge intrinsics + refcount ladder test",
-      "status": "pending",
+      "status": "completed",
       "model": "opus",
       "description": "**Goal:** Implement four bridge intrinsics (export_meminfo, borrow_structref, release_meminfo, refcount_of_meminfo_intp) and a refcount ladder test. Research-heavy — numba internals, llvmlite codegen.\n\n**Files:** `test/test_ducklib.py`\n\n**Verify:** `rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; venv/bin/pytest test/test_ducklib.py::test_structref_meminfo_bridge_refcount_ladder -v`\n\n**Acceptance:** refcount ladder 1→2→1→2→1→0 asserted at each step; test passes.\n\n```json:metadata\n{\"files\": [\"test/test_ducklib.py\"], \"verifyCommand\": \"rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; venv/bin/pytest test/test_ducklib.py::test_structref_meminfo_bridge_refcount_ladder -v\", \"model\": \"opus\"}\n```"
     },
     {
       "id": 1,
       "subject": "Task 2: Welford algorithm + pure-numba stddev test",
-      "status": "pending",
+      "status": "completed",
       "model": "sonnet",
       "description": "**Goal:** Implement welford_update/combine/finalize as @njit; verify against numpy.std(ddof=1) without DuckDB.\n\n**Files:** `test/test_ducklib.py`\n\n**Verify:** `venv/bin/pytest test/test_ducklib.py::test_welford_numba_only -v`\n\n**Acceptance:** serial and split-then-combine both match numpy to 1e-10.\n\n```json:metadata\n{\"files\": [\"test/test_ducklib.py\"], \"verifyCommand\": \"venv/bin/pytest test/test_ducklib.py::test_welford_numba_only -v\", \"model\": \"sonnet\"}\n```"
     },
     {
       "id": 2,
       "subject": "Task 3: Nested-heap dtor chain test",
-      "status": "pending",
+      "status": "in_progress",
       "model": "sonnet",
       "blockedBy": [0],
       "description": "**Goal:** Verify release_meminfo cascades dtor into a nested typed.List field using NRT alloc stats.\n\n**Files:** `test/test_ducklib.py`\n\n**Verify:** `rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; NUMBA_NRT_STATS=1 venv/bin/pytest test/test_ducklib.py::test_structref_meminfo_bridge_nested_heap -v`\n\n**Acceptance:** 100 alloc+release cycles show alloc==free counts matching warmup × 100.\n\n```json:metadata\n{\"files\": [\"test/test_ducklib.py\"], \"verifyCommand\": \"rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; NUMBA_NRT_STATS=1 venv/bin/pytest test/test_ducklib.py::test_structref_meminfo_bridge_nested_heap -v\", \"model\": \"sonnet\"}\n```"
@@ -32,5 +32,5 @@
       "description": "**Goal:** Register welford_stddev(DOUBLE)→DOUBLE with DuckDB, run SELECT, verify result matches numpy, and assert post-close alloc/free balance.\n\n**Files:** `test/test_ducklib.py`\n\n**Verify:** `rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; NUMBA_NRT_STATS=1 venv/bin/pytest test/test_ducklib.py::test_aggregate_function_structref_stddev -v`\n\n**Acceptance:** query result within 1e-10 of numpy.std(ddof=1); alloc_delta == free_delta after connection close.\n\n```json:metadata\n{\"files\": [\"test/test_ducklib.py\"], \"verifyCommand\": \"rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; NUMBA_NRT_STATS=1 venv/bin/pytest test/test_ducklib.py::test_aggregate_function_structref_stddev -v\", \"model\": \"sonnet\"}\n```"
     }
   ],
-  "lastUpdated": "2026-04-15"
+  "lastUpdated": "2026-04-16"
 }
