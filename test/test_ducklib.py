@@ -3025,6 +3025,110 @@ def welford_finalize(s):
     return math.sqrt(s.m2 / (s.count - 1))
 
 
+# ---- Welford stddev UDAF callbacks for DuckDB ----
+
+@njit
+def _welford_state_size_impl(info):
+    return numpy.uint64(8)
+
+
+@cfunc(nb_types.uint64(nb_types.intp))
+def _welford_state_size_cb(info):
+    return _welford_state_size_impl(info)
+
+
+@njit
+def _welford_init_impl(info, state):
+    s = WelfordState(0.0, 0, 0.0)
+    p = export_meminfo(s)
+    slot = carray(_cast_int_to_void_p(state), (1,), dtype=numpy.intp)
+    slot[0] = p
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp))
+def _welford_init_cb(info, state):
+    _welford_init_impl(info, state)
+
+
+@njit
+def _welford_update_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        s = borrow_structref(welford_type, slot[0])
+        welford_update(s, in_vals[i])
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _welford_update_cb(info, chunk, states):
+    _welford_update_impl(info, chunk, states)
+
+
+@njit
+def _welford_combine_impl(info, source, target, count):
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_slots = carray(
+        _cast_int_to_void_p(target), (count,), dtype=numpy.intp)
+    for i in range(count):
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[i]), (1,), dtype=numpy.intp)
+        tgt_slot = carray(
+            _cast_int_to_void_p(tgt_slots[i]), (1,), dtype=numpy.intp)
+        src = borrow_structref(welford_type, src_slot[0])
+        tgt = borrow_structref(welford_type, tgt_slot[0])
+        welford_combine(src, tgt)
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                     nb_types.intp, nb_types.uint64))
+def _welford_combine_cb(info, source, target, count):
+    _welford_combine_impl(info, source, target, count)
+
+
+@njit
+def _welford_finalize_impl(info, source, result, count, offset):
+    out_data = ducklib.duckdb_vector_get_data(result)
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _cast_int_to_void_p(out_data), (offset + count,),
+        dtype=numpy.float64)
+    for i in range(count):
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[i]), (1,), dtype=numpy.intp)
+        s = borrow_structref(welford_type, src_slot[0])
+        out_vals[offset + i] = welford_finalize(s)
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp,
+                     nb_types.uint64, nb_types.uint64))
+def _welford_finalize_cb(info, source, result, count, offset):
+    _welford_finalize_impl(info, source, result, count, offset)
+
+
+@njit
+def _welford_destroy_impl(states, count):
+    state_slots = carray(
+        _cast_int_to_void_p(states), (count,), dtype=numpy.intp)
+    for i in range(count):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        release_meminfo(slot[0])
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.uint64))
+def _welford_destroy_cb(states, count):
+    _welford_destroy_impl(states, count)
+
+
 def test_welford_numba_only():
     """Verify Welford ops match numpy.std(ddof=1) without DuckDB."""
 
@@ -3102,3 +3206,78 @@ def test_structref_meminfo_bridge_nested_heap():
         f"alloc count: got {alloc_delta}, expected {N * warmup_alloc}")
     assert free_delta == N * warmup_free, (
         f"free count: got {free_delta}, expected {N * warmup_free}")
+
+
+def test_aggregate_function_structref_stddev():
+    """End-to-end: structref-backed Welford stddev UDAF in DuckDB."""
+    from numba.core.runtime.nrt import rtsys
+
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t_stddev AS SELECT * FROM "
+        "(VALUES (1.0),(2.0),(3.0),(4.0),(5.0),(6.0),(7.0)) AS t(v)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_aggregate_function()
+    assert func_p != 0
+
+    name_p = get_unicode_data_p("welford_stddev")
+    ducklib.duckdb_aggregate_function_set_name(func_p, name_p)
+
+    dbl_type_p = ducklib.duckdb_create_logical_type(
+        ducklib.DUCKDB_TYPE_DOUBLE)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, dbl_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, dbl_type_p)
+    tp_buf = numpy.array([dbl_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(tp_buf.ctypes.data)
+
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p,
+        _welford_state_size_cb.address,
+        _welford_init_cb.address,
+        _welford_update_cb.address,
+        _welford_combine_cb.address,
+        _welford_finalize_cb.address,
+    )
+    ducklib.duckdb_aggregate_function_set_destructor(
+        func_p, _welford_destroy_cb.address)
+
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(func_buf.ctypes.data)
+
+    stats_before = rtsys.get_allocation_stats()
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT welford_stddev(v) FROM t_stddev")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_double * 1).from_address(data_p)[0]
+
+    xs = numpy.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+    expected = float(numpy.std(xs, ddof=1))
+    assert abs(val - expected) < 1e-10, (
+        f"got {val}, expected {expected}")
+
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    aux_close_db(duckdb_database, duckdb_connection)
+
+    stats_after = rtsys.get_allocation_stats()
+    alloc_delta = stats_after.alloc - stats_before.alloc
+    free_delta = stats_after.free - stats_before.free
+    assert alloc_delta == free_delta, (
+        f"leak: alloc={alloc_delta}, free={free_delta}")
