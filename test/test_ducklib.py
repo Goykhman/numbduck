@@ -3164,6 +3164,8 @@ def test_welford_numba_only():
 
 def test_structref_meminfo_bridge_nested_heap():
     """Prove release_meminfo cascades dtor into heap-owning fields."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
     from numba.core.runtime.nrt import rtsys
     from numba.typed import List
 
@@ -3210,6 +3212,8 @@ def test_structref_meminfo_bridge_nested_heap():
 
 def test_aggregate_function_structref_stddev():
     """End-to-end: structref-backed Welford stddev UDAF in DuckDB."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
     from numba.core.runtime.nrt import rtsys
 
     duckdb_database, duckdb_connection = aux_connect_db()
