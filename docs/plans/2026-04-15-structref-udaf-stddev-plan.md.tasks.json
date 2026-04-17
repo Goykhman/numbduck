@@ -18,7 +18,7 @@
     {
       "id": 2,
       "subject": "Task 3: Nested-heap dtor chain test",
-      "status": "in_progress",
+      "status": "completed",
       "model": "sonnet",
       "blockedBy": [0],
       "description": "**Goal:** Verify release_meminfo cascades dtor into a nested typed.List field using NRT alloc stats.\n\n**Files:** `test/test_ducklib.py`\n\n**Verify:** `rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; NUMBA_NRT_STATS=1 venv/bin/pytest test/test_ducklib.py::test_structref_meminfo_bridge_nested_heap -v`\n\n**Acceptance:** 100 alloc+release cycles show alloc==free counts matching warmup × 100.\n\n```json:metadata\n{\"files\": [\"test/test_ducklib.py\"], \"verifyCommand\": \"rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; NUMBA_NRT_STATS=1 venv/bin/pytest test/test_ducklib.py::test_structref_meminfo_bridge_nested_heap -v\", \"model\": \"sonnet\"}\n```"
@@ -26,7 +26,7 @@
     {
       "id": 3,
       "subject": "Task 4: DuckDB stddev UDAF integration test",
-      "status": "pending",
+      "status": "completed",
       "model": "sonnet",
       "blockedBy": [0, 1],
       "description": "**Goal:** Register welford_stddev(DOUBLE)→DOUBLE with DuckDB, run SELECT, verify result matches numpy, and assert post-close alloc/free balance.\n\n**Files:** `test/test_ducklib.py`\n\n**Verify:** `rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; NUMBA_NRT_STATS=1 venv/bin/pytest test/test_ducklib.py::test_aggregate_function_structref_stddev -v`\n\n**Acceptance:** query result within 1e-10 of numpy.std(ddof=1); alloc_delta == free_delta after connection close.\n\n```json:metadata\n{\"files\": [\"test/test_ducklib.py\"], \"verifyCommand\": \"rm -rf ~/.cache/numba && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; NUMBA_NRT_STATS=1 venv/bin/pytest test/test_ducklib.py::test_aggregate_function_structref_stddev -v\", \"model\": \"sonnet\"}\n```"
