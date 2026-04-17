@@ -9,6 +9,7 @@ from numba import types as nb_types
 from numba.core import cgutils
 from numba.experimental import structref
 from numba.extending import intrinsic
+from llvmlite import ir as llir
 from numbox.utils.lowlevel import get_unicode_data_p
 
 from numba.core.types import intp
@@ -2845,12 +2846,22 @@ def borrow_structref(struct_type, p):
 
 @intrinsic
 def _release_meminfo(typingctx, p_ty):
+    """Decref MemInfo at intp via NRT_MemInfo_release (C runtime).
+
+    Uses the C runtime function directly instead of the LLVM-generated
+    NRT_decref because numba's refcount pruning pass can remove the
+    LLVM-generated decref when it appears paired with an incref on the
+    same pointer in the same basic block.
+    """
     sig = nb_types.void(p_ty)
 
     def codegen(context, builder, signature, args):
-        mi_ll_ty = context.get_value_type(_MI_TY)
-        meminfo = builder.inttoptr(args[0], mi_ll_ty)
-        context.nrt.decref(builder, _MI_TY, meminfo)
+        ptr_ty = llir.IntType(8).as_pointer()
+        fnty = llir.FunctionType(llir.VoidType(), [ptr_ty])
+        fn = cgutils.get_or_insert_function(
+            builder.module, fnty, "NRT_MemInfo_release")
+        meminfo = builder.inttoptr(args[0], ptr_ty)
+        builder.call(fn, [meminfo])
     return sig, codegen
 
 
@@ -2915,6 +2926,25 @@ def _read_refcount(meminfo_intp):
     See numba/core/runtime/nrt.cpp.
     """
     return ctypes.c_int64.from_address(meminfo_intp).value
+
+
+# ---- Heap-owning structref (for nested-dtor test) ----
+
+@structref.register
+class _HeapStateType(nb_types.StructRef):
+    def preprocess_fields(self, fields):
+        return tuple((n, nb_types.unliteral(t)) for n, t in fields)
+
+
+class _HeapState(structref.StructRefProxy):
+    def __new__(cls, values):
+        return structref.StructRefProxy.__new__(cls, values)
+
+
+structref.define_proxy(_HeapState, _HeapStateType, ["values"])
+
+_heap_state_type = _HeapStateType(
+    [("values", nb_types.ListType(nb_types.float64))])
 
 
 def test_structref_meminfo_bridge_refcount_ladder():
@@ -3026,3 +3056,49 @@ def test_welford_numba_only():
     combined = _compute_combined(xs[:3], xs[3:])
     assert abs(combined - expected) < 1e-10, (
         f"combined: got {combined}, expected {expected}")
+
+
+def test_structref_meminfo_bridge_nested_heap():
+    """Prove release_meminfo cascades dtor into heap-owning fields."""
+    from numba.core.runtime.nrt import rtsys
+    from numba.typed import List
+
+    @njit
+    def _alloc_and_export():
+        lst = List.empty_list(nb_types.float64)
+        for i in range(10):
+            lst.append(float(i))
+        s = _HeapState(lst)
+        return export_meminfo(s)
+
+    @njit
+    def _release(p):
+        release_meminfo(p)
+
+    # Warmup: single cycle to measure per-cycle alloc delta
+    stats_before_warmup = rtsys.get_allocation_stats()
+    p = _alloc_and_export()
+    _release(p)
+    stats_after_warmup = rtsys.get_allocation_stats()
+
+    warmup_alloc = stats_after_warmup.alloc - stats_before_warmup.alloc
+    warmup_free = stats_after_warmup.free - stats_before_warmup.free
+    assert warmup_alloc > 0, (
+        f"warmup must allocate; got alloc delta {warmup_alloc}")
+    assert warmup_alloc == warmup_free, (
+        f"warmup leak: alloc={warmup_alloc}, free={warmup_free}")
+
+    # 100 cycles: exact multiple of warmup
+    N = 100
+    stats_before = rtsys.get_allocation_stats()
+    for _ in range(N):
+        p = _alloc_and_export()
+        _release(p)
+    stats_after = rtsys.get_allocation_stats()
+
+    alloc_delta = stats_after.alloc - stats_before.alloc
+    free_delta = stats_after.free - stats_before.free
+    assert alloc_delta == N * warmup_alloc, (
+        f"alloc count: got {alloc_delta}, expected {N * warmup_alloc}")
+    assert free_delta == N * warmup_free, (
+        f"free count: got {free_delta}, expected {N * warmup_free}")
