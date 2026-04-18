@@ -2792,6 +2792,10 @@ def test_udf_benchmark(capsys):
 
 # ---- structref <-> raw MemInfo pointer bridge intrinsics ----
 #
+# See test_ducklib.md for a full explanation of the DuckDB aggregate
+# lifecycle, the removerefctpass interaction, and why release_meminfo
+# uses NRT_MemInfo_release while the others don't.
+#
 # DuckDB's aggregate state slot is a single void* (internal_ptr) owned by
 # the engine. These helpers let an NRT-managed structref round-trip through
 # that slot without breaking reference counts.
