@@ -3,19 +3,38 @@ import operator
 import numpy
 from numba import njit, types as nb_types
 from numba.experimental import structref
+from numba.experimental.structref import StructRefProxy, define_boxing, new
 from numba.extending import overload
-from numbox.utils.highlevel import make_structref
 
 
+@structref.register
 class VectorType(nb_types.StructRef):
-    # Abstract base for all Vector[T] structrefs. Must NOT be registered with
-    # structref.register — only the dynamic concrete subclasses are.
-    # `preprocess_fields` defends against literal-type callers; resolved-type
-    # callers are unaffected. Placement on the base (inherited by concrete
-    # subclasses) is intentional — moving the override into the concrete
-    # subclass directly works the same.
+    # Single module-level class, parameterized per elem_type via field-tuple
+    # instances (same pattern as numbox WorkTypeClass / AnyTypeClass). Dynamic
+    # subclasses lack stable identity across processes and break numba's disk
+    # cache of any code that references the type.
     def preprocess_fields(self, fields):
         return tuple((n, nb_types.unliteral(t)) for n, t in fields)
+
+
+class Vector(StructRefProxy):
+    def __new__(cls, *args, **kwargs):
+        raise NotImplementedError(
+            "Use the factory returned by make_vector(elem_type)"
+        )
+
+    @property
+    @njit(cache=True)
+    def size(self):
+        return self.size
+
+    @property
+    @njit(cache=True)
+    def buf(self):
+        return self.buf
+
+
+define_boxing(VectorType, Vector)
 
 
 _vector_cache = {}
@@ -26,17 +45,11 @@ def make_vector(elem_type):
 
     - ``create``: an ``@njit`` factory taking a single ``capacity`` argument.
       Dtype is locked by the type — callers cannot pass a mismatched buffer.
-    - ``type_instance``: the concrete ``VectorType`` instance with resolved
-      field types. Use as a field type in other structrefs and as the first
-      arg to ``borrow_structref``.
+    - ``type_instance``: the ``VectorType`` instance with resolved field
+      types. Use as a field type in other structrefs and as the first arg
+      to ``borrow_structref``.
 
     Results are memoized in ``_vector_cache`` keyed by ``elem_type.key``.
-
-    Single-shot per element type: once registered with numba, the concrete
-    ``Vector_{name}_Type`` class cannot be re-created. Popping the cache and
-    re-running ``make_vector(t)`` registers a second class with the same name
-    and produces "No conversion from X to X" type-identity errors at compile
-    time. Tests must not flush the cache.
 
     The numpy dtype is derived from ``str(elem_type)`` at build time. Works
     for standard scalar numba types (float64, int64, etc.). Exotic types
@@ -52,35 +65,20 @@ def make_vector(elem_type):
     if key in _vector_cache:
         return _vector_cache[key]
 
-    type_cls = type(
-        f"Vector_{elem_type.name}_Type",
-        (VectorType,),
-        {},
-    )
-    structref.register(type_cls)
-
-    fields = {
-        "buf": nb_types.Array(elem_type, 1, 'C'),
-        "size": nb_types.int64,
-    }
-
-    proxy_cls = make_structref(
-        f"Vector_{elem_type.name}",
-        fields,
-        type_cls,
-    )
+    type_inst = VectorType([
+        ("buf", nb_types.Array(elem_type, 1, 'C')),
+        ("size", nb_types.int64),
+    ])
 
     np_dtype = numpy.dtype(str(elem_type))
 
     @njit
     def create(capacity):
         assert capacity >= 1
-        return proxy_cls(numpy.empty(capacity, dtype=np_dtype), 0)
-
-    type_inst = type_cls([
-        ("buf", nb_types.Array(elem_type, 1, 'C')),
-        ("size", nb_types.int64),
-    ])
+        v = new(type_inst)
+        v.buf = numpy.empty(capacity, dtype=np_dtype)
+        v.size = 0
+        return v
 
     result = (create, type_inst)
     _vector_cache[key] = result

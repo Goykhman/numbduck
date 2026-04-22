@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+import textwrap
+
 import numpy
 from numba import njit, types as nb_types
 
@@ -254,3 +259,28 @@ def test_zero_capacity_rejected():
 
     with pytest.raises(AssertionError):
         go()
+
+
+def test_cache_survives_across_processes(tmp_path):
+    # numbox's make_structref emits @njit(cache=True) proxy accessors. If the
+    # StructRef type class for a vector is created per-process (e.g. via
+    # type(...) inside a function body), run 2 loads cached code that expects
+    # the run-1 class object and fails with "No conversion from X to X".
+    probe = textwrap.dedent("""
+        from numba import types as nb_types
+        from numbduck.vector import make_vector
+        create, _ = make_vector(nb_types.float64)
+        v = create(8)
+        print(v.size)
+    """)
+    env = {**os.environ, "NUMBA_CACHE_DIR": str(tmp_path)}
+
+    r1 = subprocess.run(
+        [sys.executable, "-c", probe], env=env, capture_output=True, text=True,
+    )
+    assert r1.returncode == 0, f"run1 (cold) failed:\n{r1.stderr}"
+
+    r2 = subprocess.run(
+        [sys.executable, "-c", probe], env=env, capture_output=True, text=True,
+    )
+    assert r2.returncode == 0, f"run2 (warm) failed:\n{r2.stderr}"
