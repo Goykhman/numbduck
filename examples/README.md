@@ -30,6 +30,15 @@ where it doesn't.
   rows; the growing gap is partly Arrow's per-chunk Python boundary plus
   intermediate-array allocation per [`pc.*`](https://arrow.apache.org/docs/python/api/compute.html) step.
 
+- **[irr.py](irr.py)** — *aggregate (UDAF) tutorial.* How to build a DuckDB
+  aggregate function from scratch: define state as a numba structref (via
+  numbox's [`make_structref`](https://github.com/Goykhman/numbox/blob/main/numbox/utils/highlevel.py)),
+  write the six aggregate lifecycle callbacks, register with the C API, and
+  verify against a known answer. Computes the Internal Rate of Return via
+  bisection over accumulated `(cashflow, period)` pairs. Unlike the other
+  scripts above, this one has no stock-DuckDB comparison — it's a worked
+  example of the UDAF pattern.
+
 ## Requirements
 
 These scripts require [`pyarrow`](https://arrow.apache.org/docs/python/install.html) in addition to numbduck's normal dependencies
