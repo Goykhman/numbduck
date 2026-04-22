@@ -1,11 +1,17 @@
 import ctypes
+import math
 
 import duckdb
 import numpy
 import pytest
 from numba import njit, cfunc, carray
 from numba import types as nb_types
+from numba.core import cgutils
+from numba.experimental import structref
+from numba.extending import intrinsic
+from llvmlite import ir as llir
 from numbox.utils.lowlevel import get_unicode_data_p
+from numbox.utils.meminfo import structref_meminfo
 
 from numba.core.types import intp
 
@@ -2783,3 +2789,828 @@ def test_udf_benchmark(capsys):
             print(f"    {N:>10,d}  {t_python:>9.4f}s  {arrow_str:>10s}"
                   f"  {t_jit:>9.4f}s  {t_python / t_jit:>7.0f}x"
                   f"  {arr_ratio:>8s}")
+
+
+# ---- structref <-> raw MemInfo pointer bridge intrinsics ----
+#
+# See test_ducklib.md for a full explanation of the DuckDB aggregate
+# lifecycle, the removerefctpass interaction, and why release_meminfo
+# uses NRT_MemInfo_release while the others don't.
+#
+# The state slot is an 8-byte stretch of memory owned by DuckDB. The
+# initializer writes a MemInfo pointer into it. MemInfo is NRT's handle
+# for memory allocated to store a data structure (structref, array, etc.).
+# NRT manages that memory via a reference count. The initializer bumps
+# the refcount by one so NRT won't free the memory when the callback
+# returns and its local variables go out of scope.
+#
+# Reference counting contract:
+#   export_meminfo(s):   +1 incref; returned intp keeps the allocation alive.
+#   borrow_structref():  +1 incref on entry; local decref on scope exit
+#                        balances it. Net zero for the external owner.
+#   release_meminfo(p):  -1 decref; triggers dtor at refcount 0.
+
+# Numba type for MemInfo pointer, used in incref/decref codegen calls.
+_MI_TY = nb_types.MemInfoPointer(nb_types.voidptr)
+
+
+@intrinsic
+def _incref_meminfo(typingctx, p_ty):
+    sig = nb_types.void(p_ty)
+
+    def codegen(context, builder, signature, args):
+        mi_ll_ty = context.get_value_type(_MI_TY)
+        meminfo = builder.inttoptr(args[0], mi_ll_ty)
+        context.nrt.incref(builder, _MI_TY, meminfo)
+    return sig, codegen
+
+
+@njit
+def export_meminfo(s):
+    meminfo_p, _ = structref_meminfo(s)
+    _incref_meminfo(meminfo_p)
+    return meminfo_p
+
+
+@intrinsic
+def _deref_structref_raw_ptr(typingctx, struct_type_ref, p_ty):
+    inst_type = struct_type_ref.instance_type
+    sig = inst_type(struct_type_ref, p_ty)
+
+    def codegen(context, builder, signature, args):
+        p_val = args[1]
+        mi_ll_ty = context.get_value_type(_MI_TY)
+        meminfo = builder.inttoptr(p_val, mi_ll_ty)
+        st = cgutils.create_struct_proxy(inst_type)(context, builder)
+        st.meminfo = meminfo
+        return st._getvalue()
+    return sig, codegen
+
+
+@njit
+def borrow_structref(struct_type, p):
+    _incref_meminfo(p)
+    return _deref_structref_raw_ptr(struct_type, p)
+
+
+@intrinsic
+def _release_meminfo(typingctx, p_ty):
+    """Decref MemInfo at intp via NRT_MemInfo_release (C runtime).
+
+    Can't use context.nrt.decref() here — removerefctpass strips
+    NRT_decref when the function signature has no NRT-tracked types.
+    NRT_MemInfo_release also makes _legalize() bail out, protecting
+    the whole function from the rewrite.
+    """
+    sig = nb_types.void(p_ty)
+
+    def codegen(context, builder, signature, args):
+        ptr_ty = llir.IntType(8).as_pointer()
+        fnty = llir.FunctionType(llir.VoidType(), [ptr_ty])
+        fn = cgutils.get_or_insert_function(
+            builder.module, fnty, "NRT_MemInfo_release")
+        meminfo = builder.inttoptr(args[0], ptr_ty)
+        builder.call(fn, [meminfo])
+    return sig, codegen
+
+
+@njit
+def release_meminfo(p):
+    _release_meminfo(p)
+
+
+# WARNING: This intrinsic does not work as intended. It was written to
+# observe intermediate refcount states (e.g. refcount==2 while both a
+# local structref and an exported MemInfo pointer are live in the same
+# @njit scope). The idea was that reading refcount from JIT code would
+# let the test assert the full 1→2→1→2→1→0 ladder at each step.
+#
+# It fails because of removerefctpass (numba/core/lowering.py L207-210).
+# That pass checks whether the function's args and return type involve
+# NRT-tracked types. If they don't — and our bridge functions return
+# plain intp, not structrefs — it strips ALL NRT_incref/NRT_decref calls
+# from the function. So by the time this intrinsic reads the refcount,
+# the incref from export_meminfo has already been removed by the pass.
+# The refcount reads 1 (initial allocation), not 2.
+#
+# The test still works because the stripping is symmetric: the export's
+# incref AND the local variable's scope-exit decref are both removed,
+# so the net refcount change is zero and the object survives correctly.
+# But the intermediate refcount==2 state never actually exists at runtime.
+#
+# Python-side _read_refcount() between separate @njit calls is the only
+# way to verify post-scope-exit refcounts, which is what the ladder test
+# does. This intrinsic is preserved as a cautionary example.
+# @intrinsic
+# def _refcount_of_meminfo(typingctx, p_ty):
+#     """Read MemInfo refcount from JIT code. MemInfo.refct is the first field."""
+#     sig = nb_types.intp(p_ty)
+#
+#     def codegen(context, builder, signature, args):
+#         ptr_ty = llir.IntType(8).as_pointer()
+#         meminfo = builder.inttoptr(args[0], ptr_ty)
+#         rc_ptr = builder.bitcast(meminfo, cgutils.intp_t.as_pointer())
+#         return builder.load(rc_ptr)
+#     return sig, codegen
+#
+#
+# @njit
+# def refcount_of_meminfo(p):
+#     return _refcount_of_meminfo(p)
+
+
+# ---- Welford state structref ----
+
+@structref.register
+class WelfordStateType(nb_types.StructRef):
+    def preprocess_fields(self, fields):
+        return tuple((n, nb_types.unliteral(t)) for n, t in fields)
+
+
+class WelfordState(structref.StructRefProxy):
+    def __new__(cls, mean, count, m2):
+        return structref.StructRefProxy.__new__(cls, mean, count, m2)
+
+    @property
+    def mean(self):
+        return _welford_get_mean(self)
+
+    @property
+    def count(self):
+        return _welford_get_count(self)
+
+    @property
+    def m2(self):
+        return _welford_get_m2(self)
+
+
+@njit
+def _welford_get_mean(s):
+    return s.mean
+
+
+@njit
+def _welford_get_count(s):
+    return s.count
+
+
+@njit
+def _welford_get_m2(s):
+    return s.m2
+
+
+structref.define_proxy(
+    WelfordState, WelfordStateType, ["mean", "count", "m2"])
+
+welford_type = WelfordStateType(
+    [("mean", nb_types.float64),
+     ("count", nb_types.int64),
+     ("m2", nb_types.float64)])
+
+
+def _read_refcount(meminfo_intp):
+    """Read NRT MemInfo refcount from Python via ctypes.
+
+    MemInfo.refct is the first field (size_t) — stable since numba 0.50.
+    See numba/core/runtime/nrt.cpp.
+    """
+    return int(ctypes.c_size_t.from_address(meminfo_intp).value)
+
+
+# ---- Heap-owning structref (for nested-dtor test) ----
+
+@structref.register
+class _HeapStateType(nb_types.StructRef):
+    def preprocess_fields(self, fields):
+        return tuple((n, nb_types.unliteral(t)) for n, t in fields)
+
+
+class _HeapState(structref.StructRefProxy):
+    def __new__(cls, values):
+        return structref.StructRefProxy.__new__(cls, values)
+
+
+structref.define_proxy(_HeapState, _HeapStateType, ["values"])
+
+_heap_state_type = _HeapStateType(
+    [("values", nb_types.ListType(nb_types.float64))])
+
+
+def test_structref_meminfo_bridge_refcount_ladder():
+    """Prove export/borrow/release maintain refcount invariants step by step.
+
+    Each njit function is its own scope so numba's decref fires on return,
+    giving us clean refcount readings from Python between calls.
+    """
+
+    @njit
+    def _allocate_and_export():
+        s = WelfordState(1.5, 2, 3.25)
+        p = export_meminfo(s)
+        return p
+
+    @njit
+    def _borrow_and_read(p):
+        s = borrow_structref(welford_type, p)
+        return s.mean, s.count, s.m2
+
+    @njit
+    def _do_release(p):
+        release_meminfo(p)
+
+    # See refcount_of_meminfo above for why in-scope refcount==2 checks
+    # don't work. We verify via Python-side _read_refcount between calls.
+
+    # Step 1: allocate + export. After return, refcount == 1.
+    p = _allocate_and_export()
+    assert p != 0, "export_meminfo returned null"
+    rc = _read_refcount(p)
+    assert rc == 1, f"expected refcount 1 after export+local-drop, got {rc}"
+
+    # Step 2: borrow + read. After return, refcount still 1.
+    mean, count, m2 = _borrow_and_read(p)
+    assert mean == 1.5, f"mean={mean}"
+    assert count == 2, f"count={count}"
+    assert m2 == 3.25, f"m2={m2}"
+    rc = _read_refcount(p)
+    assert rc == 1, f"expected refcount 1 after borrow-drop, got {rc}"
+
+    # Step 3: release the slot's reference. refcount → 0, dtor runs.
+    _do_release(p)
+
+
+def test_array_meminfo_bridge_refcount_ladder():
+    """Array bridge using inline incref + carray access.
+
+    Unlike structrefs, arrays allocate via NRT_MemInfo_alloc in the same
+    function body. This disables removerefctpass, so both the manual incref
+    AND the scope-exit decref survive. Net: +1 -1 = 0 on top of the initial
+    refcount of 1 from allocation. The memory stays alive.
+
+    The incref MUST be done via the @intrinsic _incref_meminfo (which inlines)
+    rather than the @njit export_meminfo wrapper (separate compilation unit
+    where removerefctpass WOULD strip it).
+    """
+
+    @njit
+    def _allocate_and_export():
+        arr = numpy.zeros(5, dtype=numpy.float64)
+        for i in range(5):
+            arr[i] = float(i * 10)
+        meminfo_p, data_p = structref_meminfo(arr)
+        _incref_meminfo(meminfo_p)
+        return meminfo_p, data_p
+
+    @njit
+    def _read_via_carray(data_p):
+        view = carray(_cast_int_to_void_p(data_p), (5,), dtype=numpy.float64)
+        return view[0], view[2], view[4]
+
+    @njit
+    def _do_release(p):
+        release_meminfo(p)
+
+    meminfo_p, data_p = _allocate_and_export()
+    assert meminfo_p != 0, "meminfo_p is null"
+    rc = _read_refcount(meminfo_p)
+    assert rc == 1, f"expected refcount 1 after export+local-drop, got {rc}"
+
+    v0, v2, v4 = _read_via_carray(data_p)
+    assert v0 == 0.0, f"v0={v0}"
+    assert v2 == 20.0, f"v2={v2}"
+    assert v4 == 40.0, f"v4={v4}"
+    rc = _read_refcount(meminfo_p)
+    assert rc == 1, f"expected refcount 1 after carray read, got {rc}"
+
+    _do_release(meminfo_p)
+
+
+# ---- Array-backed variance UDAF callbacks for DuckDB ----
+#
+# Demonstrates the array bridge pattern: state is a numpy array instead
+# of a structref. state_size=16 stores two intp values: meminfo_p (for
+# lifecycle) and data_p (for carray access). The incref is done via the
+# @intrinsic _incref_meminfo directly in the allocating function so it
+# inlines — removerefctpass is already disabled there because numpy.zeros
+# generates NRT_MemInfo_alloc*.
+#
+# State layout: float64 array of 3 elements [sum, sum_sq, count].
+
+_ARR_STATE_SLOTS = 2  # meminfo_p, data_p
+_ARR_STATE_ELEMS = 3  # sum, sum_sq, count
+_ARR_IDX_SUM = 0
+_ARR_IDX_SUM_SQ = 1
+_ARR_IDX_COUNT = 2
+
+
+@njit
+def _arr_state_size_impl(info):
+    return numpy.uint64(16)
+
+
+@cfunc(nb_types.uint64(nb_types.intp))
+def _arr_state_size_cb(info):
+    return _arr_state_size_impl(info)
+
+
+@njit
+def _arr_init_impl(info, state):
+    arr = numpy.zeros(_ARR_STATE_ELEMS, dtype=numpy.float64)
+    meminfo_p, data_p = structref_meminfo(arr)
+    _incref_meminfo(meminfo_p)
+    slot = carray(
+        _cast_int_to_void_p(state), (_ARR_STATE_SLOTS,), dtype=numpy.intp)
+    slot[0] = meminfo_p
+    slot[1] = data_p
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp))
+def _arr_init_cb(info, state):
+    _arr_init_impl(info, state)
+
+
+@njit
+def _arr_update_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]),
+            (_ARR_STATE_SLOTS,), dtype=numpy.intp)
+        s = carray(
+            _cast_int_to_void_p(slot[1]),
+            (_ARR_STATE_ELEMS,), dtype=numpy.float64)
+        s[_ARR_IDX_SUM] += in_vals[i]
+        s[_ARR_IDX_SUM_SQ] += in_vals[i] * in_vals[i]
+        s[_ARR_IDX_COUNT] += 1.0
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _arr_update_cb(info, chunk, states):
+    _arr_update_impl(info, chunk, states)
+
+
+@njit
+def _arr_combine_impl(info, source, target, count):
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_slots = carray(
+        _cast_int_to_void_p(target), (count,), dtype=numpy.intp)
+    for i in range(count):
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[i]),
+            (_ARR_STATE_SLOTS,), dtype=numpy.intp)
+        tgt_slot = carray(
+            _cast_int_to_void_p(tgt_slots[i]),
+            (_ARR_STATE_SLOTS,), dtype=numpy.intp)
+        src = carray(
+            _cast_int_to_void_p(src_slot[1]),
+            (_ARR_STATE_ELEMS,), dtype=numpy.float64)
+        tgt = carray(
+            _cast_int_to_void_p(tgt_slot[1]),
+            (_ARR_STATE_ELEMS,), dtype=numpy.float64)
+        tgt[_ARR_IDX_SUM] += src[_ARR_IDX_SUM]
+        tgt[_ARR_IDX_SUM_SQ] += src[_ARR_IDX_SUM_SQ]
+        tgt[_ARR_IDX_COUNT] += src[_ARR_IDX_COUNT]
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                     nb_types.intp, nb_types.uint64))
+def _arr_combine_cb(info, source, target, count):
+    _arr_combine_impl(info, source, target, count)
+
+
+@njit
+def _arr_finalize_impl(info, source, result, count, offset):
+    out_data = ducklib.duckdb_vector_get_data(result)
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _cast_int_to_void_p(out_data), (offset + count,),
+        dtype=numpy.float64)
+    for i in range(count):
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[i]),
+            (_ARR_STATE_SLOTS,), dtype=numpy.intp)
+        s = carray(
+            _cast_int_to_void_p(src_slot[1]),
+            (_ARR_STATE_ELEMS,), dtype=numpy.float64)
+        n = s[_ARR_IDX_COUNT]
+        if n < 2.0:
+            out_vals[offset + i] = math.nan
+        else:
+            mean = s[_ARR_IDX_SUM] / n
+            var = (s[_ARR_IDX_SUM_SQ] / n) - mean * mean
+            out_vals[offset + i] = var
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp,
+                     nb_types.uint64, nb_types.uint64))
+def _arr_finalize_cb(info, source, result, count, offset):
+    _arr_finalize_impl(info, source, result, count, offset)
+
+
+@njit
+def _arr_destroy_impl(states, count):
+    state_slots = carray(
+        _cast_int_to_void_p(states), (count,), dtype=numpy.intp)
+    for i in range(count):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]),
+            (_ARR_STATE_SLOTS,), dtype=numpy.intp)
+        release_meminfo(slot[0])
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.uint64))
+def _arr_destroy_cb(states, count):
+    _arr_destroy_impl(states, count)
+
+
+@njit
+def welford_update(s, x):
+    s.count += 1
+    delta = x - s.mean
+    s.mean += delta / s.count
+    delta2 = x - s.mean
+    s.m2 += delta * delta2
+
+
+@njit
+def welford_combine(src, tgt):
+    """Merge src into tgt in place. Chan et al. pairwise formula."""
+    if src.count == 0:
+        return
+    if tgt.count == 0:
+        tgt.mean = src.mean
+        tgt.count = src.count
+        tgt.m2 = src.m2
+        return
+    new_count = src.count + tgt.count
+    delta = src.mean - tgt.mean
+    new_mean = tgt.mean + delta * src.count / new_count
+    new_m2 = (tgt.m2 + src.m2
+              + delta * delta * tgt.count * src.count / new_count)
+    tgt.mean = new_mean
+    tgt.count = new_count
+    tgt.m2 = new_m2
+
+
+@njit
+def welford_finalize(s):
+    if s.count < 2:
+        return math.nan
+    return math.sqrt(s.m2 / (s.count - 1))
+
+
+# ---- Welford stddev UDAF callbacks for DuckDB ----
+
+@njit
+def _welford_state_size_impl(info):
+    return numpy.uint64(8)
+
+
+@cfunc(nb_types.uint64(nb_types.intp))
+def _welford_state_size_cb(info):
+    return _welford_state_size_impl(info)
+
+
+@njit
+def _welford_init_impl(info, state):
+    s = WelfordState(0.0, 0, 0.0)
+    p = export_meminfo(s)
+    slot = carray(_cast_int_to_void_p(state), (1,), dtype=numpy.intp)
+    slot[0] = p
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp))
+def _welford_init_cb(info, state):
+    _welford_init_impl(info, state)
+
+
+# NOTE: skips NULL validity checks — test data has no NULLs.
+# Production use must call duckdb_vector_get_validity() and check bits.
+@njit
+def _welford_update_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        s = borrow_structref(welford_type, slot[0])
+        welford_update(s, in_vals[i])
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _welford_update_cb(info, chunk, states):
+    _welford_update_impl(info, chunk, states)
+
+
+@njit
+def _welford_combine_impl(info, source, target, count):
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_slots = carray(
+        _cast_int_to_void_p(target), (count,), dtype=numpy.intp)
+    for i in range(count):
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[i]), (1,), dtype=numpy.intp)
+        tgt_slot = carray(
+            _cast_int_to_void_p(tgt_slots[i]), (1,), dtype=numpy.intp)
+        src = borrow_structref(welford_type, src_slot[0])
+        tgt = borrow_structref(welford_type, tgt_slot[0])
+        welford_combine(src, tgt)
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                     nb_types.intp, nb_types.uint64))
+def _welford_combine_cb(info, source, target, count):
+    _welford_combine_impl(info, source, target, count)
+
+
+@njit
+def _welford_finalize_impl(info, source, result, count, offset):
+    out_data = ducklib.duckdb_vector_get_data(result)
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _cast_int_to_void_p(out_data), (offset + count,),
+        dtype=numpy.float64)
+    for i in range(count):
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[i]), (1,), dtype=numpy.intp)
+        s = borrow_structref(welford_type, src_slot[0])
+        out_vals[offset + i] = welford_finalize(s)
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp,
+                     nb_types.uint64, nb_types.uint64))
+def _welford_finalize_cb(info, source, result, count, offset):
+    _welford_finalize_impl(info, source, result, count, offset)
+
+
+@njit
+def _welford_destroy_impl(states, count):
+    state_slots = carray(
+        _cast_int_to_void_p(states), (count,), dtype=numpy.intp)
+    for i in range(count):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        release_meminfo(slot[0])
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.uint64))
+def _welford_destroy_cb(states, count):
+    _welford_destroy_impl(states, count)
+
+
+def test_welford_numba_only():
+    """Verify Welford ops match numpy.std(ddof=1) without DuckDB."""
+
+    @njit
+    def _compute_serial(xs):
+        s = WelfordState(0.0, 0, 0.0)
+        for x in xs:
+            welford_update(s, x)
+        return welford_finalize(s)
+
+    @njit
+    def _compute_combined(xs_a, xs_b):
+        sa = WelfordState(0.0, 0, 0.0)
+        sb = WelfordState(0.0, 0, 0.0)
+        for x in xs_a:
+            welford_update(sa, x)
+        for x in xs_b:
+            welford_update(sb, x)
+        welford_combine(sa, sb)
+        return welford_finalize(sb)
+
+    xs = numpy.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+    expected = float(numpy.std(xs, ddof=1))
+
+    serial = _compute_serial(xs)
+    assert abs(serial - expected) < 1e-10, (
+        f"serial: got {serial}, expected {expected}")
+
+    combined = _compute_combined(xs[:3], xs[3:])
+    assert abs(combined - expected) < 1e-10, (
+        f"combined: got {combined}, expected {expected}")
+
+    single = _compute_serial(numpy.array([42.0]))
+    assert math.isnan(single), f"expected NaN for count<2, got {single}"
+
+
+def test_structref_meminfo_bridge_nested_heap():
+    """Prove release_meminfo cascades dtor into heap-owning fields."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
+    from numba.core.runtime.nrt import rtsys
+    from numba.typed import List
+
+    @njit
+    def _alloc_and_export():
+        lst = List.empty_list(nb_types.float64)
+        for i in range(10):
+            lst.append(float(i))
+        s = _HeapState(lst)
+        return export_meminfo(s)
+
+    @njit
+    def _release(p):
+        release_meminfo(p)
+
+    # Warmup: single cycle to measure per-cycle alloc delta
+    stats_before_warmup = rtsys.get_allocation_stats()
+    p = _alloc_and_export()
+    _release(p)
+    stats_after_warmup = rtsys.get_allocation_stats()
+
+    warmup_alloc = stats_after_warmup.alloc - stats_before_warmup.alloc
+    warmup_free = stats_after_warmup.free - stats_before_warmup.free
+    assert warmup_alloc > 0, (
+        f"warmup must allocate; got alloc delta {warmup_alloc}")
+    assert warmup_alloc == warmup_free, (
+        f"warmup leak: alloc={warmup_alloc}, free={warmup_free}")
+
+    # 100 cycles: exact multiple of warmup
+    N = 100
+    stats_before = rtsys.get_allocation_stats()
+    for _ in range(N):
+        p = _alloc_and_export()
+        _release(p)
+    stats_after = rtsys.get_allocation_stats()
+
+    alloc_delta = stats_after.alloc - stats_before.alloc
+    free_delta = stats_after.free - stats_before.free
+    assert alloc_delta == N * warmup_alloc, (
+        f"alloc count: got {alloc_delta}, expected {N * warmup_alloc}")
+    assert free_delta == N * warmup_free, (
+        f"free count: got {free_delta}, expected {N * warmup_free}")
+
+
+def test_aggregate_function_structref_stddev():
+    """End-to-end: structref-backed Welford stddev UDAF in DuckDB."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
+    from numba.core.runtime.nrt import rtsys
+
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t_stddev AS SELECT * FROM "
+        "(VALUES (1.0),(2.0),(3.0),(4.0),(5.0),(6.0),(7.0)) AS t(v)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_aggregate_function()
+    assert func_p != 0
+
+    name_p = get_unicode_data_p("welford_stddev")
+    ducklib.duckdb_aggregate_function_set_name(func_p, name_p)
+
+    dbl_type_p = ducklib.duckdb_create_logical_type(
+        ducklib.DUCKDB_TYPE_DOUBLE)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, dbl_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, dbl_type_p)
+    tp_buf = numpy.array([dbl_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(tp_buf.ctypes.data)
+
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p,
+        _welford_state_size_cb.address,
+        _welford_init_cb.address,
+        _welford_update_cb.address,
+        _welford_combine_cb.address,
+        _welford_finalize_cb.address,
+    )
+    ducklib.duckdb_aggregate_function_set_destructor(
+        func_p, _welford_destroy_cb.address)
+
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(func_buf.ctypes.data)
+
+    stats_before = rtsys.get_allocation_stats()
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT welford_stddev(v) FROM t_stddev")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_double * 1).from_address(data_p)[0]
+
+    xs = numpy.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+    expected = float(numpy.std(xs, ddof=1))
+    assert abs(val - expected) < 1e-10, (
+        f"got {val}, expected {expected}")
+
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    aux_close_db(duckdb_database, duckdb_connection)
+
+    stats_after = rtsys.get_allocation_stats()
+    alloc_delta = stats_after.alloc - stats_before.alloc
+    free_delta = stats_after.free - stats_before.free
+    assert alloc_delta == free_delta, (
+        f"leak: alloc={alloc_delta}, free={free_delta}")
+
+
+def test_aggregate_function_array_variance():
+    """End-to-end: array-backed population variance UDAF in DuckDB.
+
+    Mirrors test_aggregate_function_structref_stddev but uses a numpy array
+    for state instead of a structref. state_size=16 stores meminfo_p + data_p.
+    Demonstrates the inline incref + carray access pattern.
+    """
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
+    from numba.core.runtime.nrt import rtsys
+
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t_var AS SELECT * FROM "
+        "(VALUES (1.0),(2.0),(3.0),(4.0),(5.0),(6.0),(7.0)) AS t(v)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_aggregate_function()
+    assert func_p != 0
+
+    name_p = get_unicode_data_p("arr_variance")
+    ducklib.duckdb_aggregate_function_set_name(func_p, name_p)
+
+    dbl_type_p = ducklib.duckdb_create_logical_type(
+        ducklib.DUCKDB_TYPE_DOUBLE)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, dbl_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, dbl_type_p)
+    tp_buf = numpy.array([dbl_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(tp_buf.ctypes.data)
+
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p,
+        _arr_state_size_cb.address,
+        _arr_init_cb.address,
+        _arr_update_cb.address,
+        _arr_combine_cb.address,
+        _arr_finalize_cb.address,
+    )
+    ducklib.duckdb_aggregate_function_set_destructor(
+        func_p, _arr_destroy_cb.address)
+
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(func_buf.ctypes.data)
+
+    stats_before = rtsys.get_allocation_stats()
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT arr_variance(v) FROM t_var")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    val = (ctypes.c_double * 1).from_address(data_p)[0]
+
+    xs = numpy.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+    expected = float(numpy.var(xs))
+    assert abs(val - expected) < 1e-10, (
+        f"got {val}, expected {expected}")
+
+    chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    aux_close_db(duckdb_database, duckdb_connection)
+
+    stats_after = rtsys.get_allocation_stats()
+    alloc_delta = stats_after.alloc - stats_before.alloc
+    free_delta = stats_after.free - stats_before.free
+    assert alloc_delta == free_delta, (
+        f"leak: alloc={alloc_delta}, free={free_delta}")
