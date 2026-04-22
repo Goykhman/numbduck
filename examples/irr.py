@@ -14,6 +14,12 @@ SQL usage:
 
 NULL handling: rows where any of the four input columns is NULL are
 skipped. If all rows are skipped, the result is NaN.
+
+Input contract: ``investment`` and ``target_npv`` are treated as
+per-group constants. The aggregate captures the value from the first
+non-NULL row of each group (update) or partial state (combine) and
+ignores subsequent values; callers are expected to pass the same
+investment / target_npv for every row of a given GROUP BY key.
 """
 import math
 import sys
@@ -197,6 +203,8 @@ def _irr_update_impl(info, chunk, states):
     vec_npv = ducklib.duckdb_data_chunk_get_vector(chunk, 3)
     cf_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_cf)), (n,), dtype=numpy.float64)
     pd_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_pd)), (n,), dtype=numpy.float64)
+    inv_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_inv)), (n,), dtype=numpy.float64)
+    npv_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_npv)), (n,), dtype=numpy.float64)
     val_cf = numpy.intp(ducklib.duckdb_vector_get_validity(vec_cf))
     val_pd = numpy.intp(ducklib.duckdb_vector_get_validity(vec_pd))
     val_inv = numpy.intp(ducklib.duckdb_vector_get_validity(vec_inv))
@@ -217,8 +225,6 @@ def _irr_update_impl(info, chunk, states):
         vector_push(s.cashflows, cf_data[iu])
         vector_push(s.periods, pd_data[iu])
         if s.initialized == 0:
-            inv_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_inv)), (n,), dtype=numpy.float64)
-            npv_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_npv)), (n,), dtype=numpy.float64)
             s.investment = inv_data[iu]
             s.target_npv = npv_data[iu]
             s.initialized = 1
@@ -265,17 +271,6 @@ def _irr_finalize_impl(info, source, result, count, offset):
         if n == 0:
             out_vals[numpy.uint64(offset + iu)] = math.nan
             continue
-        for j in range(1, n):
-            ju = numpy.uint64(j)
-            key_cf = s.cashflows[ju]
-            key_pd = s.periods[ju]
-            k = ju
-            while k > 0 and s.periods[numpy.uint64(k - 1)] > key_pd:
-                s.cashflows[k] = s.cashflows[numpy.uint64(k - 1)]
-                s.periods[k] = s.periods[numpy.uint64(k - 1)]
-                k = numpy.uint64(k - 1)
-            s.cashflows[k] = key_cf
-            s.periods[k] = key_pd
         out_vals[numpy.uint64(offset + iu)] = irr_bisect(s.cashflows, s.periods, n, s.investment, s.target_npv)
 
 
