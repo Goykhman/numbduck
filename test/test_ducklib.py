@@ -2833,7 +2833,7 @@ def export_meminfo(s):
 
 
 @intrinsic
-def _borrow_structref(typingctx, struct_type_ref, p_ty):
+def _deref_structref_raw_ptr(typingctx, struct_type_ref, p_ty):
     inst_type = struct_type_ref.instance_type
     sig = inst_type(struct_type_ref, p_ty)
 
@@ -2841,7 +2841,6 @@ def _borrow_structref(typingctx, struct_type_ref, p_ty):
         p_val = args[1]
         mi_ll_ty = context.get_value_type(_MI_TY)
         meminfo = builder.inttoptr(p_val, mi_ll_ty)
-        context.nrt.incref(builder, _MI_TY, meminfo)
         st = cgutils.create_struct_proxy(inst_type)(context, builder)
         st.meminfo = meminfo
         return st._getvalue()
@@ -2850,7 +2849,8 @@ def _borrow_structref(typingctx, struct_type_ref, p_ty):
 
 @njit
 def borrow_structref(struct_type, p):
-    return _borrow_structref(struct_type, p)
+    _incref_meminfo(p)
+    return _deref_structref_raw_ptr(struct_type, p)
 
 
 @intrinsic
