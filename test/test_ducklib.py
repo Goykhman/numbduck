@@ -22,7 +22,7 @@ from numbduck.duckdb_utils import (
     create_duckdb_result
 )
 from numbox.utils.lowlevel import _cast_int_to_void_p
-from numbduck.jit_utils import array_data_p
+from numbox.utils.lowlevel import array_data_p
 
 
 def aux_open_database(db_name_p_):
