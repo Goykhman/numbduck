@@ -7,7 +7,6 @@ from numbox.core.bindings.signatures import signatures
 from numba.core.cgutils import get_or_insert_function
 from numbox.utils.highlevel import cres, cres_if_available
 
-import platform
 import sys
 
 from numbduck.utils import load_duckdb
@@ -16,7 +15,6 @@ from numbduck.utils import load_duckdb
 duckdb_lib = load_duckdb()
 
 _is_win = sys.platform == 'win32'
-_is_sysv_x86_64 = platform.machine() == 'x86_64'
 
 
 duckdb_state_ty = int32
