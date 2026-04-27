@@ -2,10 +2,10 @@ from llvmlite import ir
 from llvmlite.ir import IRBuilder, FunctionType
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
 from numba.extending import intrinsic
-from numbox.core.bindings.call import _call_lib_func
+from numbox.core.bindings.call import _call_lib_func, _call_lib_func_byval, _emit_byval_call
 from numbox.core.bindings.signatures import signatures
 from numba.core.cgutils import get_or_insert_function
-from numbox.utils.highlevel import cres as _cres
+from numbox.utils.highlevel import cres, cres_if_available
 
 import platform
 import sys
@@ -17,28 +17,6 @@ duckdb_lib = load_duckdb()
 
 _is_win = sys.platform == 'win32'
 _is_sysv_x86_64 = platform.machine() == 'x86_64'
-
-
-def _has_symbol(name):
-    return hasattr(duckdb_lib, name)
-
-
-def _unavailable(name):
-    def stub(*args, **kwargs):
-        raise NotImplementedError(f"{name} is not available in this duckdb version")
-    stub.__name__ = name
-    return stub
-
-
-def cres(sig, if_available=False, **kwargs):
-    if not if_available:
-        return _cres(sig, **kwargs)
-
-    def decorator(func):
-        if _has_symbol(func.__name__):
-            return _cres(sig, **kwargs)(func)
-        return _unavailable(func.__name__)
-    return decorator
 
 
 duckdb_state_ty = int32
@@ -105,14 +83,6 @@ _i64 = ir.IntType(64)
 _i32 = ir.IntType(32)
 
 
-def _resolve_sig(func_name):
-    """Look up a function's signature in the signatures dict."""
-    func_sig = signatures.get(func_name, None)
-    if func_sig is None:
-        raise ValueError(f"Undefined signature for {func_name}")
-    return func_sig
-
-
 def _build_packed_interval(builder, interval_tup):
     """Pack (months:i32, days:i32, micros:i64) into {i64, i64}.
 
@@ -134,38 +104,6 @@ def _build_packed_interval(builder, interval_tup):
     val = builder.insert_value(val, packed, 0)
     val = builder.insert_value(val, micros, 1)
     return val
-
-
-def _emit_byval_call(builder, context, arg, arg_ll_ty, ret_type, func_name):
-    """Emit IR to pass a struct by pointer: alloca, store, call via pointer."""
-    stack_p = builder.alloca(arg_ll_ty)
-    builder.store(arg, stack_p)
-    func_ty_ll = FunctionType(ret_type, [arg_ll_ty.as_pointer()])
-    func_p = get_or_insert_function(builder.module, func_ty_ll, func_name)
-    return builder.call(func_p, [stack_p])
-
-
-@intrinsic(prefer_literal=True)
-def _call_lib_func_byval(typingctx, func_name_ty, arg_ty):
-    """Like _call_lib_func, but allocates the arg on the stack
-    and passes a pointer to that stack slot.
-
-    Used for C functions whose parameter is a pointer to a struct
-    (e.g. ``duckdb_result *``), when the caller has the struct as
-    a value.
-    """
-    func_name = func_name_ty.literal_value
-    func_sig = _resolve_sig(func_name)
-
-    def codegen(context, builder, signature, arguments):
-        _, arg = arguments
-        arg_ll_ty = context.get_value_type(arg_ty)
-        ret_type = context.get_value_type(signature.return_type)
-        return _emit_byval_call(
-            builder, context, arg, arg_ll_ty, ret_type, func_name)
-
-    sig = func_sig.return_type(func_name_ty, arg_ty)
-    return sig, codegen
 
 
 signatures["duckdb_array_type_array_size"] = uint64(intp)
@@ -757,7 +695,7 @@ def _duckdb_create_interval(typingctx, interval_tup_ty):
         ret_type = context.get_value_type(signature.return_type)
         if _is_win:
             return _emit_byval_call(
-                builder, context, val, interval_struct, ret_type,
+                builder, val, interval_struct, ret_type,
                 "duckdb_create_interval")
         func_ty_ll = FunctionType(ret_type, [interval_struct])
         func_p = get_or_insert_function(
@@ -832,7 +770,7 @@ def duckdb_create_uuid(val):
     return _call_lib_func("duckdb_create_uuid", (val,))
 
 
-@cres(signatures.get("duckdb_create_varint"), if_available=True)
+@cres_if_available(duckdb_lib, signatures.get("duckdb_create_varint"))
 def duckdb_create_varint(val):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_create_varint """
     return _call_lib_func("duckdb_create_varint", (val,))
@@ -1228,7 +1166,7 @@ def _duckdb_get_varint(typingctx, val_p_ty):
     return duckdb_varint_ty(intp), codegen
 
 
-@cres(duckdb_varint_ty(intp), if_available=True)
+@cres_if_available(duckdb_lib, duckdb_varint_ty(intp))
 def duckdb_get_varint(val_p):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
     return _duckdb_get_varint(val_p)
@@ -1462,7 +1400,7 @@ def duckdb_scalar_function_set_special_handling(scalar_function_p):
     return _call_lib_func("duckdb_scalar_function_set_special_handling", (scalar_function_p,))
 
 
-@cres(signatures.get("duckdb_scalar_function_set_init"), if_available=True)
+@cres_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_init"))
 def duckdb_scalar_function_set_init(scalar_function_p, init_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_init """
     return _call_lib_func("duckdb_scalar_function_set_init", (scalar_function_p, init_p))
