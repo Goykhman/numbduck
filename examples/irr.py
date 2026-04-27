@@ -38,7 +38,7 @@ from numbox.utils.meminfo import structref_meminfo
 
 from numbduck import ducklib
 from numbduck.pybridge import extract_connection_ptr
-from numbduck.vector import make_vector, vector_push, vector_extend
+from numbox.core.vector.vector import make_vector, vector_push, vector_extend
 
 Float64Vector, float64_vec_type = make_vector(nb_types.float64)
 
