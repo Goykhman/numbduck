@@ -2,10 +2,10 @@ import duckdb
 import os
 import platform
 import re
-from ctypes import CDLL
 from inspect import getfile
 from numba.experimental.structref import register
 from numba.core.types import StructRef
+from numbox.core.bindings.utils import load_lib_path
 
 
 @register
@@ -110,26 +110,15 @@ def find_duckdb_shared_lib():
     )
 
 
-def _load_cdll(path):
-    platform_ = platform.system()
-    if platform_ in ("Darwin", "Linux"):
-        from ctypes import RTLD_GLOBAL
-        return CDLL(path, mode=RTLD_GLOBAL)
-    elif platform_ == "Windows":
-        return CDLL(path, winmode=0)
-    else:
-        raise RuntimeError(f"Platform {platform_} is not supported, yet.")
-
-
 def load_duckdb():
     lib_path = find_duckdb_shared_lib()
-    lib = _load_cdll(lib_path)
+    lib = load_lib_path(lib_path)
     if _has_capi_symbols(lib):
         return lib
     # Python wheel missing C API symbols (macOS with duckdb >= 1.4.1)
     standalone = _find_standalone_libduckdb()
     if standalone:
-        lib = _load_cdll(standalone)
+        lib = load_lib_path(standalone)
         if _has_capi_symbols(lib):
             return lib
     if platform.system() != "Darwin":
@@ -138,4 +127,4 @@ def load_duckdb():
             "Set NUMBDUCK_LIBDUCKDB=/path/to/libduckdb.so"
         )
     downloaded = _download_libduckdb()
-    return _load_cdll(downloaded)
+    return load_lib_path(downloaded)

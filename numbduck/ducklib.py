@@ -2,12 +2,11 @@ from llvmlite import ir
 from llvmlite.ir import IRBuilder, FunctionType
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
 from numba.extending import intrinsic
-from numbox.core.bindings.call import _call_lib_func
+from numbox.core.bindings.call import _call_lib_func, _call_lib_func_byval, _emit_byval_call
 from numbox.core.bindings.signatures import signatures
 from numba.core.cgutils import get_or_insert_function
-from numbox.utils.highlevel import cres as _cres
+from numbox.utils.highlevel import cres, cres_if_available
 
-import platform
 import sys
 
 from numbduck.utils import load_duckdb
@@ -16,29 +15,6 @@ from numbduck.utils import load_duckdb
 duckdb_lib = load_duckdb()
 
 _is_win = sys.platform == 'win32'
-_is_sysv_x86_64 = platform.machine() == 'x86_64'
-
-
-def _has_symbol(name):
-    return hasattr(duckdb_lib, name)
-
-
-def _unavailable(name):
-    def stub(*args, **kwargs):
-        raise NotImplementedError(f"{name} is not available in this duckdb version")
-    stub.__name__ = name
-    return stub
-
-
-def cres(sig, if_available=False, **kwargs):
-    if not if_available:
-        return _cres(sig, **kwargs)
-
-    def decorator(func):
-        if _has_symbol(func.__name__):
-            return _cres(sig, **kwargs)(func)
-        return _unavailable(func.__name__)
-    return decorator
 
 
 duckdb_state_ty = int32
@@ -105,14 +81,6 @@ _i64 = ir.IntType(64)
 _i32 = ir.IntType(32)
 
 
-def _resolve_sig(func_name):
-    """Look up a function's signature in the signatures dict."""
-    func_sig = signatures.get(func_name, None)
-    if func_sig is None:
-        raise ValueError(f"Undefined signature for {func_name}")
-    return func_sig
-
-
 def _build_packed_interval(builder, interval_tup):
     """Pack (months:i32, days:i32, micros:i64) into {i64, i64}.
 
@@ -136,120 +104,12 @@ def _build_packed_interval(builder, interval_tup):
     return val
 
 
-def _emit_byval_call(builder, context, arg, arg_ll_ty, ret_type, func_name):
-    """Emit IR to pass a struct by pointer: alloca, store, call via pointer."""
-    stack_p = builder.alloca(arg_ll_ty)
-    builder.store(arg, stack_p)
-    func_ty_ll = FunctionType(ret_type, [arg_ll_ty.as_pointer()])
-    func_p = get_or_insert_function(builder.module, func_ty_ll, func_name)
-    return builder.call(func_p, [stack_p])
-
-
-@intrinsic(prefer_literal=True)
-def _call_lib_func_byval(typingctx, func_name_ty, arg_ty):
-    """Like _call_lib_func, but allocates the arg on the stack
-    and passes a pointer to that stack slot.
-
-    Used for C functions whose parameter is a pointer to a struct
-    (e.g. ``duckdb_result *``), when the caller has the struct as
-    a value.
-    """
-    func_name = func_name_ty.literal_value
-    func_sig = _resolve_sig(func_name)
-
-    def codegen(context, builder, signature, arguments):
-        _, arg = arguments
-        arg_ll_ty = context.get_value_type(arg_ty)
-        ret_type = context.get_value_type(signature.return_type)
-        return _emit_byval_call(
-            builder, context, arg, arg_ll_ty, ret_type, func_name)
-
-    sig = func_sig.return_type(func_name_ty, arg_ty)
-    return sig, codegen
-
-
-@intrinsic(prefer_literal=True)
-def _call_lib_func_struct_in(typingctx, func_name_ty, arg_ty):
-    """Like _call_lib_func, but the arg is a small struct.
-
-    Struct must be ≤16 bytes for System V x86-64 by-value passing.
-    On Windows: passes via stack pointer (degrades to byval).
-    On other platforms: passes the struct directly by value.
-
-    LLVM's JIT treats ABI lowering as a frontend responsibility — it
-    won't insert the right calling convention for struct args/returns.
-    See: https://github.com/numba/llvmlite/issues/300#issuecomment-327235846
-         https://github.com/llvm/llvm-project/issues/85417
-    """
-    func_name = func_name_ty.literal_value
-    func_sig = _resolve_sig(func_name)
-    struct_bytes = sum(t.bitwidth for t in arg_ty) / 8
-    assert struct_bytes <= 16, (
-        f"struct too large for by-value passing ({struct_bytes} bytes > 16)"
-    )
-
-    def codegen(context, builder, signature, arguments):
-        _, arg = arguments
-        arg_ll_ty = context.get_value_type(arg_ty)
-        ret_type = context.get_value_type(signature.return_type)
-        if _is_win:
-            return _emit_byval_call(
-                builder, context, arg, arg_ll_ty, ret_type, func_name)
-        func_ty_ll = FunctionType(ret_type, [arg_ll_ty])
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, func_name)
-        return builder.call(func_p, [arg])
-
-    sig = func_sig.return_type(func_name_ty, arg_ty)
-    return sig, codegen
-
-
-@intrinsic(prefer_literal=True)
-def _call_lib_func_struct_out(typingctx, func_name_ty, arg_ty):
-    """Like _call_lib_func, but the return value is a struct.
-
-    Return struct must be ≤16 bytes for System V x86-64 by-value return.
-    On Windows: uses sret (hidden first pointer arg, void return).
-    On other platforms: returns the struct directly by value.
-
-    See _call_lib_func_struct_in docstring for ABI references.
-    """
-    func_name = func_name_ty.literal_value
-    func_sig = _resolve_sig(func_name)
-    ret_ty = func_sig.return_type
-    struct_bytes = sum(t.bitwidth for t in ret_ty) / 8
-    assert struct_bytes <= 16, (
-        f"return struct too large for by-value return ({struct_bytes} bytes > 16)"
-    )
-
-    def codegen(context, builder, signature, arguments):
-        _, arg = arguments
-        ret_ll_ty = context.get_value_type(signature.return_type)
-        if _is_win:
-            sret_p = builder.alloca(ret_ll_ty)
-            func_ty_ll = FunctionType(
-                ir.VoidType(),
-                [ret_ll_ty.as_pointer(), arg.type]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, func_name)
-            func_p.args[0].add_attribute('sret')
-            builder.call(func_p, [sret_p, arg])
-            return builder.load(sret_p)
-        func_ty_ll = FunctionType(ret_ll_ty, [arg.type])
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, func_name)
-        return builder.call(func_p, [arg])
-
-    sig = func_sig.return_type(func_name_ty, arg_ty)
-    return sig, codegen
-
-
 signatures["duckdb_array_type_array_size"] = uint64(intp)
 signatures["duckdb_array_type_child_type"] = intp(intp)
 signatures["duckdb_bind_blob"] = duckdb_state_ty(intp, uint64, intp, uint64)
 signatures["duckdb_bind_boolean"] = duckdb_state_ty(intp, uint64, int8)
 signatures["duckdb_bind_date"] = duckdb_state_ty(intp, uint64, int32)
+signatures["duckdb_bind_decimal"] = duckdb_state_ty(intp, uint64, duckdb_decimal_ty)
 signatures["duckdb_bind_double"] = duckdb_state_ty(intp, uint64, float64)
 signatures["duckdb_bind_float"] = duckdb_state_ty(intp, uint64, float32)
 signatures["duckdb_bind_int8"] = duckdb_state_ty(intp, uint64, int8)
@@ -288,6 +148,7 @@ signatures["duckdb_connect"] = duckdb_state_ty(intp, intp)
 signatures["duckdb_create_array_type"] = intp(intp, uint64)
 signatures["duckdb_create_array_value"] = intp(intp, intp, uint64)
 signatures["duckdb_create_bool"] = intp(int8)
+signatures["duckdb_create_decimal"] = intp(duckdb_decimal_ty)
 signatures["duckdb_create_decimal_type"] = intp(uint8, uint8)
 signatures["duckdb_create_double"] = intp(float64)
 signatures["duckdb_create_enum_type"] = intp(intp, uint64)
@@ -314,6 +175,7 @@ signatures["duckdb_create_uint64"] = intp(uint64)
 signatures["duckdb_create_union_type"] = intp(intp, intp, uint64)
 signatures["duckdb_create_union_value"] = intp(intp, uint64, intp)
 signatures["duckdb_create_uuid"] = intp(duckdb_uhugeint_ty)
+signatures["duckdb_create_varint"] = intp(duckdb_varint_ty)
 signatures["duckdb_create_varchar"] = intp(intp)
 signatures["duckdb_create_varchar_length"] = intp(intp, uint64)
 signatures["duckdb_data_chunk_get_column_count"] = intp(intp)
@@ -790,7 +652,7 @@ def duckdb_connect(duckdb_database_p, duckdb_connection_pp):
 @cres(signatures.get("duckdb_create_bit"))
 def duckdb_create_bit(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_bit """
-    return _call_lib_func_struct_in("duckdb_create_bit", val)
+    return _call_lib_func("duckdb_create_bit", (val,))
 
 
 @cres(signatures.get("duckdb_create_blob"))
@@ -805,45 +667,16 @@ def duckdb_create_date(val):
     return _call_lib_func("duckdb_create_date", (val,))
 
 
-@intrinsic
-def _duckdb_create_decimal(typingctx, decimal_tup_ty):
-    """Custom intrinsic for duckdb_create_decimal.
-
-    duckdb_decimal is 24 bytes ({uint8, uint8, uint64, int64}) — too large
-    for register passing on any platform. Always passed by pointer.
-    On SysV x86-64, byval + optnone are needed to prevent LLVM from
-    optimizing away the stack copy before the callee reads it.
-    See: https://github.com/numba/llvmlite/issues/300#issuecomment-327235846
-    """
-    def codegen(context, builder, signature, arguments):
-        decimal_tup = arguments[0]
-        decimal_tup_ll_ty = decimal_tup.type
-        stack_p = builder.alloca(decimal_tup_ll_ty)
-        builder.store(decimal_tup, stack_p)
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [decimal_tup_ll_ty.as_pointer()]
-        )
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, "duckdb_create_decimal")
-        if _is_sysv_x86_64:
-            func_p.args[0].add_attribute('byval')
-            builder.function.attributes.add('optnone')
-            builder.function.attributes.add('noinline')
-        return builder.call(func_p, [stack_p])
-    return intp(duckdb_decimal_ty), codegen
-
-
-@cres(intp(duckdb_decimal_ty))
+@cres(signatures.get("duckdb_create_decimal"))
 def duckdb_create_decimal(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_decimal """
-    return _duckdb_create_decimal(val)
+    return _call_lib_func("duckdb_create_decimal", (val,))
 
 
 @cres(signatures.get("duckdb_create_hugeint"))
 def duckdb_create_hugeint(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_hugeint """
-    return _call_lib_func_struct_in("duckdb_create_hugeint", val)
+    return _call_lib_func("duckdb_create_hugeint", (val,))
 
 
 @intrinsic
@@ -860,7 +693,7 @@ def _duckdb_create_interval(typingctx, interval_tup_ty):
         ret_type = context.get_value_type(signature.return_type)
         if _is_win:
             return _emit_byval_call(
-                builder, context, val, interval_struct, ret_type,
+                builder, val, interval_struct, ret_type,
                 "duckdb_create_interval")
         func_ty_ll = FunctionType(ret_type, [interval_struct])
         func_p = get_or_insert_function(
@@ -926,45 +759,19 @@ def duckdb_create_timestamp_tz(val):
 @cres(signatures.get("duckdb_create_uhugeint"))
 def duckdb_create_uhugeint(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_uhugeint """
-    return _call_lib_func_struct_in("duckdb_create_uhugeint", val)
+    return _call_lib_func("duckdb_create_uhugeint", (val,))
 
 
 @cres(signatures.get("duckdb_create_uuid"))
 def duckdb_create_uuid(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_uuid """
-    return _call_lib_func_struct_in("duckdb_create_uuid", val)
+    return _call_lib_func("duckdb_create_uuid", (val,))
 
 
-@intrinsic
-def _duckdb_create_varint(typingctx, varint_tup_ty):
-    """Custom intrinsic for duckdb_create_varint.
-
-    duckdb_varint is 24 bytes ({intp, uint64, int8}) — same >16-byte
-    case as decimal. See _duckdb_create_decimal docstring for details.
-    """
-    def codegen(context, builder, signature, arguments):
-        varint_tup = arguments[0]
-        varint_ll_ty = context.get_value_type(duckdb_varint_ty)
-        stack_p = builder.alloca(varint_ll_ty)
-        builder.store(varint_tup, stack_p)
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [varint_ll_ty.as_pointer()]
-        )
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, "duckdb_create_varint")
-        if _is_sysv_x86_64:
-            func_p.args[0].add_attribute('byval')
-            builder.function.attributes.add('optnone')
-            builder.function.attributes.add('noinline')
-        return builder.call(func_p, [stack_p])
-    return intp(duckdb_varint_ty), codegen
-
-
-@cres(intp(duckdb_varint_ty), if_available=True)
+@cres_if_available(duckdb_lib, signatures.get("duckdb_create_varint"))
 def duckdb_create_varint(val):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_create_varint """
-    return _duckdb_create_varint(val)
+    return _call_lib_func("duckdb_create_varint", (val,))
 
 
 @cres(signatures.get("duckdb_data_chunk_get_vector"))
@@ -1193,13 +1000,13 @@ def duckdb_free(ptr):
 @cres(signatures.get("duckdb_get_bit"))
 def duckdb_get_bit(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_bit """
-    return _call_lib_func_struct_out("duckdb_get_bit", val_p)
+    return _call_lib_func("duckdb_get_bit", (val_p,))
 
 
 @cres(signatures.get("duckdb_get_blob"))
 def duckdb_get_blob(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_blob """
-    return _call_lib_func_struct_out("duckdb_get_blob", val_p)
+    return _call_lib_func("duckdb_get_blob", (val_p,))
 
 
 @cres(signatures.get("duckdb_get_date"))
@@ -1235,7 +1042,7 @@ def duckdb_get_decimal(val_p):
 @cres(signatures.get("duckdb_get_hugeint"))
 def duckdb_get_hugeint(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_hugeint """
-    return _call_lib_func_struct_out("duckdb_get_hugeint", val_p)
+    return _call_lib_func("duckdb_get_hugeint", (val_p,))
 
 
 @intrinsic
@@ -1330,13 +1137,13 @@ def duckdb_get_type_id(type_p):
 @cres(signatures.get("duckdb_get_uhugeint"))
 def duckdb_get_uhugeint(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_uhugeint """
-    return _call_lib_func_struct_out("duckdb_get_uhugeint", val_p)
+    return _call_lib_func("duckdb_get_uhugeint", (val_p,))
 
 
 @cres(signatures.get("duckdb_get_uuid"))
 def duckdb_get_uuid(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_uuid """
-    return _call_lib_func_struct_out("duckdb_get_uuid", val_p)
+    return _call_lib_func("duckdb_get_uuid", (val_p,))
 
 
 @intrinsic
@@ -1357,7 +1164,7 @@ def _duckdb_get_varint(typingctx, val_p_ty):
     return duckdb_varint_ty(intp), codegen
 
 
-@cres(duckdb_varint_ty(intp), if_available=True)
+@cres_if_available(duckdb_lib, duckdb_varint_ty(intp))
 def duckdb_get_varint(val_p):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
     return _duckdb_get_varint(val_p)
@@ -1591,7 +1398,7 @@ def duckdb_scalar_function_set_special_handling(scalar_function_p):
     return _call_lib_func("duckdb_scalar_function_set_special_handling", (scalar_function_p,))
 
 
-@cres(signatures.get("duckdb_scalar_function_set_init"), if_available=True)
+@cres_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_init"))
 def duckdb_scalar_function_set_init(scalar_function_p, init_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_init """
     return _call_lib_func("duckdb_scalar_function_set_init", (scalar_function_p, init_p))
@@ -1827,46 +1634,7 @@ def duckdb_bind_interval(prepared_statement_p, param_idx, val):
     return _duckdb_bind_interval(prepared_statement_p, param_idx, val)
 
 
-@intrinsic
-def _duckdb_bind_decimal(typingctx, prepared_statement_p_ty, param_idx_ty, decimal_tup_ty):
-    """Custom intrinsic for duckdb_bind_decimal.
-
-    duckdb_decimal is 24 bytes — always passed by pointer. On SysV x86-64,
-    byval + optnone prevent LLVM from optimizing away the stack copy.
-    See: https://github.com/numba/llvmlite/issues/300#issuecomment-327235846
-    """
-    def codegen(context, builder: IRBuilder, signature, arguments):
-        prepared_statement_p, param_idx, decimal_tup = arguments
-        # C struct: { uint8 width, uint8 scale, pad[6], {uint64 lower, int64 upper} }
-        # 24 bytes total. Numba's {i8, i8, i64, i64} has the same layout
-        # because LLVM aligns the i64 fields to 8-byte boundaries.
-        decimal_tup_ty = decimal_tup.type
-        decimal_stack_p = builder.alloca(decimal_tup_ty)
-        builder.store(decimal_tup, decimal_stack_p)
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [prepared_statement_p.type, param_idx.type,
-             decimal_tup_ty.as_pointer()]
-        )
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, "duckdb_bind_decimal")
-        if _is_sysv_x86_64:
-            # On x86-64 SysV, byval tells LLVM to copy the struct to the
-            # stack for the callee. optnone prevents the optimizer from
-            # eliminating the store to the alloca.
-            # TODO(llvmlite): replace optnone with volatile stores when
-            # llvmlite exposes builder.store(..., volatile=True).
-            func_p.args[2].add_attribute('byval')
-            builder.function.attributes.add('optnone')
-            builder.function.attributes.add('noinline')
-        # On arm64 and Windows x64, the C ABI passes >16/>8-byte structs
-        # by pointer, so a plain pointer parameter matches the ABI.
-        return builder.call(
-            func_p, [prepared_statement_p, param_idx, decimal_stack_p])
-    return duckdb_state_ty(intp, uint64, duckdb_decimal_ty), codegen
-
-
-@cres(duckdb_state_ty(intp, uint64, duckdb_decimal_ty))
+@cres(signatures.get("duckdb_bind_decimal"))
 def duckdb_bind_decimal(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_decimal """
-    return _duckdb_bind_decimal(prepared_statement_p, param_idx, val)
+    return _call_lib_func("duckdb_bind_decimal", (prepared_statement_p, param_idx, val))
