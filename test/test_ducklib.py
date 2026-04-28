@@ -22,7 +22,7 @@ from numbduck.duckdb_utils import (
     create_duckdb_result
 )
 from numbox.utils.lowlevel import _cast_int_to_void_p
-from numbduck.jit_utils import array_data_p
+from numbox.utils.lowlevel import array_data_p
 
 
 def aux_open_database(db_name_p_):
@@ -1339,7 +1339,7 @@ def test_create_get_uuid():
 
 
 @pytest.mark.skipif(
-    not (ducklib._has_symbol('duckdb_create_varint') and ducklib._has_symbol('duckdb_get_varint')),
+    not (hasattr(ducklib.duckdb_lib, 'duckdb_create_varint') and hasattr(ducklib.duckdb_lib, 'duckdb_get_varint')),
     reason="duckdb_create_varint or duckdb_get_varint not available in this duckdb version",
 )
 def test_create_get_varint():
@@ -2370,7 +2370,7 @@ def _init_cb(info):
 
 
 @pytest.mark.skipif(
-    not ducklib._has_symbol('duckdb_scalar_function_set_init'),
+    not hasattr(ducklib.duckdb_lib, 'duckdb_scalar_function_set_init'),
     reason="duckdb_scalar_function_set_init not available",
 )
 def test_scalar_function_set_init():
