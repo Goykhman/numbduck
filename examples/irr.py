@@ -20,114 +20,46 @@ per-group constants. The aggregate captures the value from the first
 non-NULL row of each group (update) or partial state (combine) and
 ignores subsequent values; callers are expected to pass the same
 investment / target_npv for every row of a given GROUP BY key.
+
+Run via ``python examples/run_irr.py``. This module must be imported
+(not executed as ``__main__``) so ``IRRStateType`` has a stable
+``__module__`` across processes; otherwise numba's warm cache fails
+type inference with ``No conversion from numba.IRRStateType(...) to
+numba.IRRStateType(...)``.
 """
 import math
 import sys
+
+if __name__ == "__main__":
+    sys.stderr.write(
+        "examples/irr.py is the importable example module; run examples/run_irr.py instead.\n"
+        "Running irr.py as __main__ gives IRRStateType a fresh class identity each process,\n"
+        "which fails type inference on a warm numba cache.\n"
+    )
+    sys.exit(1)
 
 import duckdb
 import numpy
 from numba import cfunc, carray, njit
 from numba import types as nb_types
-from numba.core import cgutils
 from numba.experimental import structref
-from numba.extending import intrinsic
-import llvmlite.ir as llir
+from numbox.core.vector.vector import make_vector, vector_push, vector_extend
 from numbox.utils.highlevel import make_structref
 from numbox.utils.lowlevel import _cast_int_to_void_p, get_unicode_data_p
-from numbox.utils.meminfo import structref_meminfo
+from numbox.utils.meminfo import borrow_structref, export_meminfo, release_meminfo
 
 from numbduck import ducklib
 from numbduck.pybridge import extract_connection_ptr
-from numbox.core.vector.vector import make_vector, vector_push, vector_extend
+
 
 Float64Vector, float64_vec_type = make_vector(nb_types.float64)
-
-
-# ---- structref <-> raw MemInfo pointer bridge intrinsics ----
-#
-# Full lifecycle explanation, removerefctpass interaction, and rationale
-# for using NRT_MemInfo_release (instead of context.nrt.decref) live in
-# test/test_ducklib.md. Reference impl: test/test_ducklib.py.
-#
-# Reference counting contract:
-#   export_meminfo(s):   +1 incref; returned intp keeps the allocation alive.
-#   borrow_structref():  +1 incref on entry; local decref on scope exit
-#                        balances it. Net zero for the external owner.
-#   release_meminfo(p):  -1 decref; triggers dtor at refcount 0.
-
-_MI_TY = nb_types.MemInfoPointer(nb_types.voidptr)
-
-
-@intrinsic
-def _incref_meminfo(typingctx, p_ty):
-    sig = nb_types.void(p_ty)
-
-    def codegen(context, builder, signature, args):
-        mi_ll_ty = context.get_value_type(_MI_TY)
-        meminfo = builder.inttoptr(args[0], mi_ll_ty)
-        context.nrt.incref(builder, _MI_TY, meminfo)
-    return sig, codegen
-
-
-@njit
-def export_meminfo(s):
-    meminfo_p, _ = structref_meminfo(s)
-    _incref_meminfo(meminfo_p)
-    return meminfo_p
-
-
-@intrinsic
-def _deref_structref_raw_ptr(typingctx, struct_type_ref, p_ty):
-    inst_type = struct_type_ref.instance_type
-    sig = inst_type(struct_type_ref, p_ty)
-
-    def codegen(context, builder, signature, args):
-        p_val = args[1]
-        mi_ll_ty = context.get_value_type(_MI_TY)
-        meminfo = builder.inttoptr(p_val, mi_ll_ty)
-        st = cgutils.create_struct_proxy(inst_type)(context, builder)
-        st.meminfo = meminfo
-        return st._getvalue()
-    return sig, codegen
-
-
-@njit
-def borrow_structref(struct_type, p):
-    _incref_meminfo(p)
-    return _deref_structref_raw_ptr(struct_type, p)
-
-
-@intrinsic
-def _release_meminfo(typingctx, p_ty):
-    """Decref MemInfo at intp via NRT_MemInfo_release (C runtime).
-
-    Can't use context.nrt.decref() here — removerefctpass strips
-    NRT_decref when the function signature has no NRT-tracked types.
-    NRT_MemInfo_release also makes _legalize() bail out, protecting
-    the whole function from the rewrite.
-    """
-    sig = nb_types.void(p_ty)
-
-    def codegen(context, builder, signature, args):
-        ptr_ty = llir.IntType(8).as_pointer()
-        fnty = llir.FunctionType(llir.VoidType(), [ptr_ty])
-        fn = cgutils.get_or_insert_function(builder.module, fnty, "NRT_MemInfo_release")
-        meminfo = builder.inttoptr(args[0], ptr_ty)
-        builder.call(fn, [meminfo])
-    return sig, codegen
-
-
-@njit
-def release_meminfo(p):
-    _release_meminfo(p)
 
 
 # ---- IRR state structref ----
 
 @structref.register
 class IRRStateType(nb_types.StructRef):
-    def preprocess_fields(self, fields):
-        return tuple((n, nb_types.unliteral(t)) for n, t in fields)
+    pass
 
 
 _irr_state_fields = [
@@ -445,7 +377,3 @@ def main():
         sys.exit(1)
 
     print("\nAll checks passed.")
-
-
-if __name__ == "__main__":
-    main()
