@@ -17,9 +17,9 @@ requires-python = ">=3.10"
 license = {file = "LICENSE"}
 keywords = ["duckdb", "numba", "numpy"]
 authors = [
-  {name = "Mikhail Goykhman"}
+  {name = "NumbDuck GitHub Repository Contributors"}
 ]
-readme = 'README.md'
+readme = "README.md"
 
 [tool.pytest.ini_options]
 markers = [
