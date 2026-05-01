@@ -1,10 +1,6 @@
-from llvmlite import ir
-from llvmlite.ir import IRBuilder, FunctionType
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
-from numba.extending import intrinsic
-from numbox.core.bindings.call import _call_lib_func, _call_lib_func_byval, _emit_byval_call
+from numbox.core.bindings.call import _call_lib_func, _call_lib_func_byval
 from numbox.core.bindings.signatures import signatures
-from numba.core.cgutils import get_or_insert_function
 from numbox.utils.highlevel import cres, cres_if_available
 
 import sys
@@ -77,32 +73,6 @@ duckdb_blob_ty = Tuple((intp, uint64))
 duckdb_bit_ty = Tuple((intp, uint64))
 duckdb_varint_ty = Tuple((intp, uint64, int8))
 
-_i64 = ir.IntType(64)
-_i32 = ir.IntType(32)
-
-
-def _build_packed_interval(builder, interval_tup):
-    """Pack (months:i32, days:i32, micros:i64) into {i64, i64}.
-
-    C struct: { int32 months, int32 days, int64 micros } = 16 bytes.
-    Pack two i32 fields into one i64 to match the C struct layout.
-    Using {i32, i32, i64} directly fails — LLVM's SysV x86-64 ABI
-    lowering drops the second i32 field when coercing to registers.
-    See: https://github.com/numba/llvmlite/issues/300#issuecomment-327235846
-    """
-    interval_struct = ir.LiteralStructType([_i64, _i64])
-    months = builder.extract_value(interval_tup, 0)
-    days = builder.extract_value(interval_tup, 1)
-    micros = builder.extract_value(interval_tup, 2)
-    months_zext = builder.zext(months, _i64)
-    days_zext = builder.zext(days, _i64)
-    days_shifted = builder.shl(days_zext, ir.Constant(_i64, 32))
-    packed = builder.or_(months_zext, days_shifted)
-    val = ir.Constant(interval_struct, ir.Undefined)
-    val = builder.insert_value(val, packed, 0)
-    val = builder.insert_value(val, micros, 1)
-    return val
-
 
 signatures["duckdb_array_type_array_size"] = uint64(intp)
 signatures["duckdb_array_type_child_type"] = intp(intp)
@@ -112,15 +82,18 @@ signatures["duckdb_bind_date"] = duckdb_state_ty(intp, uint64, int32)
 signatures["duckdb_bind_decimal"] = duckdb_state_ty(intp, uint64, duckdb_decimal_ty)
 signatures["duckdb_bind_double"] = duckdb_state_ty(intp, uint64, float64)
 signatures["duckdb_bind_float"] = duckdb_state_ty(intp, uint64, float32)
+signatures["duckdb_bind_hugeint"] = duckdb_state_ty(intp, uint64, duckdb_hugeint_ty)
 signatures["duckdb_bind_int8"] = duckdb_state_ty(intp, uint64, int8)
 signatures["duckdb_bind_int16"] = duckdb_state_ty(intp, uint64, int16)
 signatures["duckdb_bind_int32"] = duckdb_state_ty(intp, uint64, int32)
 signatures["duckdb_bind_int64"] = duckdb_state_ty(intp, uint64, int64)
+signatures["duckdb_bind_interval"] = duckdb_state_ty(intp, uint64, duckdb_interval_ty)
 signatures["duckdb_bind_null"] = duckdb_state_ty(intp, uint64)
 signatures["duckdb_bind_parameter_index"] = duckdb_state_ty(intp, intp, intp)
 signatures["duckdb_bind_time"] = duckdb_state_ty(intp, uint64, int64)
 signatures["duckdb_bind_timestamp"] = duckdb_state_ty(intp, uint64, int64)
 signatures["duckdb_bind_timestamp_tz"] = duckdb_state_ty(intp, uint64, int64)
+signatures["duckdb_bind_uhugeint"] = duckdb_state_ty(intp, uint64, duckdb_uhugeint_ty)
 signatures["duckdb_bind_uint8"] = duckdb_state_ty(intp, uint64, uint8)
 signatures["duckdb_bind_uint16"] = duckdb_state_ty(intp, uint64, uint16)
 signatures["duckdb_bind_uint32"] = duckdb_state_ty(intp, uint64, uint32)
@@ -136,6 +109,7 @@ signatures["duckdb_column_type"] = int32(intp, uint64)
 signatures["duckdb_create_bit"] = intp(duckdb_bit_ty)
 signatures["duckdb_create_blob"] = intp(intp, uint64)
 signatures["duckdb_create_date"] = intp(int32)
+signatures["duckdb_create_interval"] = intp(duckdb_interval_ty)
 signatures["duckdb_create_time"] = intp(int64)
 signatures["duckdb_create_time_tz"] = uint64(int64, int32)
 signatures["duckdb_create_time_tz_value"] = intp(uint64)
@@ -199,6 +173,7 @@ signatures["duckdb_free"] = void(intp)
 signatures["duckdb_get_bit"] = duckdb_bit_ty(intp)
 signatures["duckdb_get_blob"] = duckdb_blob_ty(intp)
 signatures["duckdb_get_bool"] = int8(intp)
+signatures["duckdb_get_decimal"] = duckdb_decimal_ty(intp)
 signatures["duckdb_get_date"] = int32(intp)
 signatures["duckdb_get_double"] = float64(intp)
 signatures["duckdb_get_enum_value"] = uint64(intp)
@@ -208,6 +183,7 @@ signatures["duckdb_get_int8"] = int8(intp)
 signatures["duckdb_get_int16"] = int16(intp)
 signatures["duckdb_get_int32"] = int32(intp)
 signatures["duckdb_get_int64"] = int64(intp)
+signatures["duckdb_get_interval"] = duckdb_interval_ty(intp)
 signatures["duckdb_get_list_child"] = intp(intp, uint64)
 signatures["duckdb_get_list_size"] = uint64(intp)
 signatures["duckdb_get_map_key"] = intp(intp, uint64)
@@ -230,6 +206,7 @@ signatures["duckdb_get_uint64"] = uint64(intp)
 signatures["duckdb_get_uuid"] = duckdb_uhugeint_ty(intp)
 signatures["duckdb_get_value_type"] = intp(intp)
 signatures["duckdb_get_varchar"] = intp(intp)
+signatures["duckdb_get_varint"] = duckdb_varint_ty(intp)
 signatures["duckdb_is_null_value"] = int8(intp)
 signatures["duckdb_list_type_child_type"] = intp(intp)
 signatures["duckdb_logical_type_get_alias"] = intp(intp)
@@ -679,33 +656,10 @@ def duckdb_create_hugeint(val):
     return _call_lib_func("duckdb_create_hugeint", (val,))
 
 
-@intrinsic
-def _duckdb_create_interval(typingctx, interval_tup_ty):
-    """Custom intrinsic for duckdb_create_interval.
-
-    Uses _build_packed_interval to repack the 3-field interval into {i64, i64}.
-    On Windows: passes by pointer (byval). On SysV x86-64: passes by value
-    (≤16 bytes fits in two registers).
-    """
-    def codegen(context, builder, signature, arguments):
-        val = _build_packed_interval(builder, arguments[0])
-        interval_struct = val.type
-        ret_type = context.get_value_type(signature.return_type)
-        if _is_win:
-            return _emit_byval_call(
-                builder, val, interval_struct, ret_type,
-                "duckdb_create_interval")
-        func_ty_ll = FunctionType(ret_type, [interval_struct])
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, "duckdb_create_interval")
-        return builder.call(func_p, [val])
-    return intp(duckdb_interval_ty), codegen
-
-
-@cres(intp(duckdb_interval_ty))
+@cres(signatures.get("duckdb_create_interval"))
 def duckdb_create_interval(val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_interval """
-    return _duckdb_create_interval(val)
+    return _call_lib_func("duckdb_create_interval", (val,))
 
 
 @cres(signatures.get("duckdb_create_time"))
@@ -1015,28 +969,10 @@ def duckdb_get_date(val_p):
     return _call_lib_func("duckdb_get_date", (val_p,))
 
 
-@intrinsic
-def _duckdb_get_decimal(typingctx, val_p_ty):
-    def codegen(context, builder, signature, arguments):
-        val_p = arguments[0]
-        decimal_ll_ty = context.get_value_type(duckdb_decimal_ty)
-        sret_p = builder.alloca(decimal_ll_ty)
-        func_ty_ll = FunctionType(
-            ir.VoidType(),
-            [decimal_ll_ty.as_pointer(), val_p.type]
-        )
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, "duckdb_get_decimal")
-        func_p.args[0].add_attribute('sret')
-        builder.call(func_p, [sret_p, val_p])
-        return builder.load(sret_p)
-    return duckdb_decimal_ty(intp), codegen
-
-
-@cres(duckdb_decimal_ty(intp))
+@cres(signatures.get("duckdb_get_decimal"))
 def duckdb_get_decimal(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_decimal """
-    return _duckdb_get_decimal(val_p)
+    return _call_lib_func("duckdb_get_decimal", (val_p,))
 
 
 @cres(signatures.get("duckdb_get_hugeint"))
@@ -1045,45 +981,10 @@ def duckdb_get_hugeint(val_p):
     return _call_lib_func("duckdb_get_hugeint", (val_p,))
 
 
-@intrinsic
-def _duckdb_get_interval(typingctx, val_p_ty):
-    def codegen(context, builder, signature, arguments):
-        val_p = arguments[0]
-        interval_ll_ty = context.get_value_type(duckdb_interval_ty)
-        packed_struct = ir.LiteralStructType([_i64, _i64])
-        if _is_win:
-            sret_p = builder.alloca(packed_struct)
-            func_ty_ll = FunctionType(
-                ir.VoidType(),
-                [packed_struct.as_pointer(), val_p.type]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, "duckdb_get_interval")
-            func_p.args[0].add_attribute('sret')
-            builder.call(func_p, [sret_p, val_p])
-            packed_val = builder.load(sret_p)
-        else:
-            func_ty_ll = FunctionType(packed_struct, [val_p.type])
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, "duckdb_get_interval")
-            packed_val = builder.call(func_p, [val_p])
-        packed_lo = builder.extract_value(packed_val, 0)
-        micros = builder.extract_value(packed_val, 1)
-        months = builder.trunc(packed_lo, _i32)
-        days_shifted = builder.lshr(packed_lo, ir.Constant(_i64, 32))
-        days = builder.trunc(days_shifted, _i32)
-        result = ir.Constant(interval_ll_ty, ir.Undefined)
-        result = builder.insert_value(result, months, 0)
-        result = builder.insert_value(result, days, 1)
-        result = builder.insert_value(result, micros, 2)
-        return result
-    return duckdb_interval_ty(intp), codegen
-
-
-@cres(duckdb_interval_ty(intp))
+@cres(signatures.get("duckdb_get_interval"))
 def duckdb_get_interval(val_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_interval """
-    return _duckdb_get_interval(val_p)
+    return _call_lib_func("duckdb_get_interval", (val_p,))
 
 
 @cres(signatures.get("duckdb_get_time"))
@@ -1146,28 +1047,10 @@ def duckdb_get_uuid(val_p):
     return _call_lib_func("duckdb_get_uuid", (val_p,))
 
 
-@intrinsic
-def _duckdb_get_varint(typingctx, val_p_ty):
-    def codegen(context, builder, signature, arguments):
-        val_p = arguments[0]
-        varint_ll_ty = context.get_value_type(duckdb_varint_ty)
-        sret_p = builder.alloca(varint_ll_ty)
-        func_ty_ll = FunctionType(
-            ir.VoidType(),
-            [varint_ll_ty.as_pointer(), val_p.type]
-        )
-        func_p = get_or_insert_function(
-            builder.module, func_ty_ll, "duckdb_get_varint")
-        func_p.args[0].add_attribute('sret')
-        builder.call(func_p, [sret_p, val_p])
-        return builder.load(sret_p)
-    return duckdb_varint_ty(intp), codegen
-
-
-@cres_if_available(duckdb_lib, duckdb_varint_ty(intp))
+@cres_if_available(duckdb_lib, signatures.get("duckdb_get_varint"))
 def duckdb_get_varint(val_p):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
-    return _duckdb_get_varint(val_p)
+    return _call_lib_func("duckdb_get_varint", (val_p,))
 
 
 @cres(signatures.get("duckdb_list_type_child_type"))
@@ -1524,114 +1407,22 @@ def duckdb_scalar_function_set_error(info_p, error_p):
     return _call_lib_func("duckdb_scalar_function_set_error", (info_p, error_p))
 
 
-
-@intrinsic
-def _duckdb_bind_hugeint(typingctx, prepared_statement_p_ty, param_idx_ty, hugeint_tup_ty):
-    def codegen(context, builder: IRBuilder, signature, arguments):
-        prepared_statement_p, param_idx, hugeint_tup = arguments
-        # Numba lowers Tuple((uint64, int64)) to LLVM {i64, i64}, which
-        # matches the C struct layout directly — no repacking needed
-        # (unlike interval, which has mixed-width i32/i64 fields).
-        hugeint_ll_ty = context.get_value_type(duckdb_hugeint_ty)
-        if _is_win:
-            # Windows x64: structs >8 bytes passed by pointer
-            stack_p = builder.alloca(hugeint_ll_ty)
-            builder.store(hugeint_tup, stack_p)
-            func_ty_ll = FunctionType(
-                context.get_value_type(signature.return_type),
-                [prepared_statement_p.type, param_idx.type,
-                 hugeint_ll_ty.as_pointer()]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, "duckdb_bind_hugeint")
-            return builder.call(
-                func_p, [prepared_statement_p, param_idx, stack_p])
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [prepared_statement_p.type, param_idx.type, hugeint_ll_ty]
-        )
-        func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_hugeint")
-        return builder.call(func_p, [prepared_statement_p, param_idx, hugeint_tup])
-    return duckdb_state_ty(intp, uint64, duckdb_hugeint_ty), codegen
-
-
-@cres(duckdb_state_ty(intp, uint64, duckdb_hugeint_ty))
+@cres(signatures.get("duckdb_bind_hugeint"))
 def duckdb_bind_hugeint(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_hugeint """
-    return _duckdb_bind_hugeint(prepared_statement_p, param_idx, val)
+    return _call_lib_func("duckdb_bind_hugeint", (prepared_statement_p, param_idx, val))
 
 
-@intrinsic
-def _duckdb_bind_uhugeint(typingctx, prepared_statement_p_ty, param_idx_ty, uhugeint_tup_ty):
-    def codegen(context, builder: IRBuilder, signature, arguments):
-        prepared_statement_p, param_idx, uhugeint_tup = arguments
-        # Numba lowers UniTuple(uint64, 2) to LLVM {i64, i64}, which
-        # matches the C struct layout directly — no repacking needed.
-        uhugeint_ll_ty = context.get_value_type(duckdb_uhugeint_ty)
-        if _is_win:
-            # Windows x64: structs >8 bytes passed by pointer
-            stack_p = builder.alloca(uhugeint_ll_ty)
-            builder.store(uhugeint_tup, stack_p)
-            func_ty_ll = FunctionType(
-                context.get_value_type(signature.return_type),
-                [prepared_statement_p.type, param_idx.type,
-                 uhugeint_ll_ty.as_pointer()]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, "duckdb_bind_uhugeint")
-            return builder.call(
-                func_p, [prepared_statement_p, param_idx, stack_p])
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [prepared_statement_p.type, param_idx.type, uhugeint_ll_ty]
-        )
-        func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_uhugeint")
-        return builder.call(func_p, [prepared_statement_p, param_idx, uhugeint_tup])
-    return duckdb_state_ty(intp, uint64, duckdb_uhugeint_ty), codegen
-
-
-@cres(duckdb_state_ty(intp, uint64, duckdb_uhugeint_ty))
+@cres(signatures.get("duckdb_bind_uhugeint"))
 def duckdb_bind_uhugeint(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_uhugeint """
-    return _duckdb_bind_uhugeint(prepared_statement_p, param_idx, val)
+    return _call_lib_func("duckdb_bind_uhugeint", (prepared_statement_p, param_idx, val))
 
 
-@intrinsic
-def _duckdb_bind_interval(typingctx, prepared_statement_p_ty, param_idx_ty, interval_tup_ty):
-    """Custom intrinsic for duckdb_bind_interval.
-
-    Same interval packing as _duckdb_create_interval.
-    See _build_packed_interval docstring for details.
-    """
-    def codegen(context, builder: IRBuilder, signature, arguments):
-        prepared_statement_p, param_idx, interval_tup = arguments
-        val = _build_packed_interval(builder, interval_tup)
-        interval_struct = val.type
-        if _is_win:
-            stack_p = builder.alloca(interval_struct)
-            builder.store(val, stack_p)
-            func_ty_ll = FunctionType(
-                context.get_value_type(signature.return_type),
-                [prepared_statement_p.type, param_idx.type,
-                 interval_struct.as_pointer()]
-            )
-            func_p = get_or_insert_function(
-                builder.module, func_ty_ll, "duckdb_bind_interval")
-            return builder.call(
-                func_p, [prepared_statement_p, param_idx, stack_p])
-        func_ty_ll = FunctionType(
-            context.get_value_type(signature.return_type),
-            [prepared_statement_p.type, param_idx.type, interval_struct]
-        )
-        func_p = get_or_insert_function(builder.module, func_ty_ll, "duckdb_bind_interval")
-        return builder.call(func_p, [prepared_statement_p, param_idx, val])
-    return duckdb_state_ty(intp, uint64, duckdb_interval_ty), codegen
-
-
-@cres(duckdb_state_ty(intp, uint64, duckdb_interval_ty))
+@cres(signatures.get("duckdb_bind_interval"))
 def duckdb_bind_interval(prepared_statement_p, param_idx, val):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_interval """
-    return _duckdb_bind_interval(prepared_statement_p, param_idx, val)
+    return _call_lib_func("duckdb_bind_interval", (prepared_statement_p, param_idx, val))
 
 
 @cres(signatures.get("duckdb_bind_decimal"))
