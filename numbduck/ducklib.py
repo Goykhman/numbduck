@@ -3,8 +3,7 @@ import sys
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
 from numbox.core.bindings.call import _call_lib_func, _call_lib_func_byval
 from numbox.core.bindings.signatures import signatures
-from numbox.core.proxy.proxy import proxy
-from numbox.utils.highlevel import cres_if_available
+from numbox.core.proxy.proxy import proxy, proxy_if_available
 
 from numbduck.configurations import jit_options
 from numbduck.utils import load_duckdb
@@ -724,7 +723,7 @@ def duckdb_create_uuid(val):
     return _call_lib_func("duckdb_create_uuid", (val,))
 
 
-@cres_if_available(duckdb_lib, signatures.get("duckdb_create_varint"))
+@proxy_if_available(duckdb_lib, signatures.get("duckdb_create_varint"), jit_options=jit_options)
 def duckdb_create_varint(val):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_create_varint """
     return _call_lib_func("duckdb_create_varint", (val,))
@@ -1049,7 +1048,7 @@ def duckdb_get_uuid(val_p):
     return _call_lib_func("duckdb_get_uuid", (val_p,))
 
 
-@cres_if_available(duckdb_lib, signatures.get("duckdb_get_varint"))
+@proxy_if_available(duckdb_lib, signatures.get("duckdb_get_varint"), jit_options=jit_options)
 def duckdb_get_varint(val_p):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
     return _call_lib_func("duckdb_get_varint", (val_p,))
@@ -1283,7 +1282,7 @@ def duckdb_scalar_function_set_special_handling(scalar_function_p):
     return _call_lib_func("duckdb_scalar_function_set_special_handling", (scalar_function_p,))
 
 
-@cres_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_init"))
+@proxy_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_init"), jit_options=jit_options)
 def duckdb_scalar_function_set_init(scalar_function_p, init_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_init """
     return _call_lib_func("duckdb_scalar_function_set_init", (scalar_function_p, init_p))
