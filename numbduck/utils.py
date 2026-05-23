@@ -115,7 +115,7 @@ def load_duckdb():
     lib = load_lib_path(lib_path)
     if _has_capi_symbols(lib):
         return lib
-    # Python wheel missing C API symbols (macOS with duckdb >= 1.4.1)
+    # Python wheel missing C API symbols (macOS with 1.5.2 >= duckdb >= 1.4.1)
     standalone = _find_standalone_libduckdb()
     if standalone:
         lib = load_lib_path(standalone)
