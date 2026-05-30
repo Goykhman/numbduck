@@ -6,12 +6,12 @@ import numpy
 import pytest
 from numba import njit, cfunc, carray
 from numba import types as nb_types
-from numba.core import cgutils
 from numba.experimental import structref
-from numba.extending import intrinsic
-from llvmlite import ir as llir
 from numbox.utils.lowlevel import get_unicode_data_p
-from numbox.utils.meminfo import structref_meminfo
+from numbox.utils.meminfo import (
+    borrow_structref, export_meminfo, _incref_meminfo,
+    release_meminfo, structref_meminfo
+)
 
 from numba.core.types import intp
 
@@ -2809,74 +2809,6 @@ def test_udf_benchmark(capsys):
 #   borrow_structref():  +1 incref on entry; local decref on scope exit
 #                        balances it. Net zero for the external owner.
 #   release_meminfo(p):  -1 decref; triggers dtor at refcount 0.
-
-# Numba type for MemInfo pointer, used in incref/decref codegen calls.
-_MI_TY = nb_types.MemInfoPointer(nb_types.voidptr)
-
-
-@intrinsic
-def _incref_meminfo(typingctx, p_ty):
-    sig = nb_types.void(p_ty)
-
-    def codegen(context, builder, signature, args):
-        mi_ll_ty = context.get_value_type(_MI_TY)
-        meminfo = builder.inttoptr(args[0], mi_ll_ty)
-        context.nrt.incref(builder, _MI_TY, meminfo)
-    return sig, codegen
-
-
-@njit
-def export_meminfo(s):
-    meminfo_p, _ = structref_meminfo(s)
-    _incref_meminfo(meminfo_p)
-    return meminfo_p
-
-
-@intrinsic
-def _deref_structref_raw_ptr(typingctx, struct_type_ref, p_ty):
-    inst_type = struct_type_ref.instance_type
-    sig = inst_type(struct_type_ref, p_ty)
-
-    def codegen(context, builder, signature, args):
-        p_val = args[1]
-        mi_ll_ty = context.get_value_type(_MI_TY)
-        meminfo = builder.inttoptr(p_val, mi_ll_ty)
-        st = cgutils.create_struct_proxy(inst_type)(context, builder)
-        st.meminfo = meminfo
-        return st._getvalue()
-    return sig, codegen
-
-
-@njit
-def borrow_structref(struct_type, p):
-    _incref_meminfo(p)
-    return _deref_structref_raw_ptr(struct_type, p)
-
-
-@intrinsic
-def _release_meminfo(typingctx, p_ty):
-    """Decref MemInfo at intp via NRT_MemInfo_release (C runtime).
-
-    Can't use context.nrt.decref() here — removerefctpass strips
-    NRT_decref when the function signature has no NRT-tracked types.
-    NRT_MemInfo_release also makes _legalize() bail out, protecting
-    the whole function from the rewrite.
-    """
-    sig = nb_types.void(p_ty)
-
-    def codegen(context, builder, signature, args):
-        ptr_ty = llir.IntType(8).as_pointer()
-        fnty = llir.FunctionType(llir.VoidType(), [ptr_ty])
-        fn = cgutils.get_or_insert_function(
-            builder.module, fnty, "NRT_MemInfo_release")
-        meminfo = builder.inttoptr(args[0], ptr_ty)
-        builder.call(fn, [meminfo])
-    return sig, codegen
-
-
-@njit
-def release_meminfo(p):
-    _release_meminfo(p)
 
 
 # WARNING: This intrinsic does not work as intended. It was written to
