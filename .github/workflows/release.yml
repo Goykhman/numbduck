@@ -12,23 +12,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.12"
 
       - name: Determine version
         id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          if [ "${{ github.ref_type }}" == "tag" ]; then
-            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+          if [ "$REF_TYPE" == "tag" ]; then
+            echo "VERSION=$REF_NAME" >> "$GITHUB_ENV"
           else
-            BUILD_VERSION="0.0.${{ github.run_number }}"
-            echo "VERSION=${BUILD_VERSION}" >> $GITHUB_ENV
+            BUILD_VERSION="0.0.$RUN_NUMBER"
+            echo "VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
           fi
       - name: Write version to __init__.py
-        run: echo "__version__ = '${{ env.VERSION }}'" > numbduck/__init__.py
+        run: |
+          python -c "import os; open('numbduck/__init__.py', 'w').write('__version__ = ' + repr(os.environ['VERSION']) + '\n')"
 
       - name: Build release distributions
         run: |
@@ -37,7 +42,7 @@ jobs:
           python -m build --wheel
 
       - name: Upload distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: release-dists
           path: dist/
@@ -57,10 +62,10 @@ jobs:
 
     steps:
       - name: Retrieve release distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: release-dists
           path: dist/
 
       - name: Publish release distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
