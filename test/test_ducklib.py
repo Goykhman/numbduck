@@ -76,6 +76,11 @@ LOGICAL_TYPE_FAMILY = _HandleFamily(
     {"duckdb_create_logical_type": _acquired_by_return},
     ("duckdb_destroy_logical_type",),
 )
+SCALAR_FUNCTION_FAMILY = _HandleFamily(
+    "scalar_function",
+    {"duckdb_create_scalar_function": _acquired_by_return},
+    ("duckdb_destroy_scalar_function",),
+)
 
 
 class handle_balance:
@@ -402,6 +407,48 @@ def test_handle_balance_detects_missing_destroy():
     aux_destroy_value(leaked_p)
 
 
+def test_handle_balance_scalar_function_family():
+    """Create and destroy scalar-function handles in a long loop under the
+    balance harness, so a leaked (never-destroyed) function handle surfaces as
+    an acquire/release imbalance."""
+    with handle_balance(SCALAR_FUNCTION_FAMILY):
+        for _ in range(50):
+            fn_p = ducklib.duckdb_create_scalar_function()
+            assert fn_p != 0
+            fn_buf = numpy.zeros(1, dtype=numpy.intp)
+            fn_buf[0] = fn_p
+            ducklib.duckdb_destroy_scalar_function(fn_buf.ctypes.data)
+            assert fn_buf[0] == 0
+
+
+def test_destroy_zeroes_handle_slots():
+    """duckdb_destroy_* nulls the caller's handle slot for the value,
+    logical-type, and scalar/aggregate-function families, exactly as it does
+    for the database/connection/prepared/data-chunk handles. This is the only
+    direct proof that destroy actually ran for these largest handle families."""
+    buf = numpy.zeros(1, dtype=numpy.intp)
+
+    buf[0] = ducklib.duckdb_create_int64(7)
+    assert buf[0] != 0
+    ducklib.duckdb_destroy_value(buf.ctypes.data)
+    assert buf[0] == 0, "duckdb_destroy_value did not null the handle slot"
+
+    buf[0] = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    assert buf[0] != 0
+    ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+    assert buf[0] == 0, "duckdb_destroy_logical_type did not null the slot"
+
+    buf[0] = ducklib.duckdb_create_scalar_function()
+    assert buf[0] != 0
+    ducklib.duckdb_destroy_scalar_function(buf.ctypes.data)
+    assert buf[0] == 0, "duckdb_destroy_scalar_function did not null the slot"
+
+    buf[0] = ducklib.duckdb_create_aggregate_function()
+    assert buf[0] != 0
+    ducklib.duckdb_destroy_aggregate_function(buf.ctypes.data)
+    assert buf[0] == 0, "duckdb_destroy_aggregate_function did not null the slot"
+
+
 # --- Prepared Statements ---
 
 def aux_prepare(connection_p, sql):
@@ -437,6 +484,20 @@ def aux_read_inline_string(data_p):
     str_len = ctypes.c_uint32.from_address(data_p).value
     raw = (ctypes.c_char * str_len).from_address(data_p + 4)
     return raw[:].decode()
+
+
+def aux_read_string_t(data_p):
+    """Read a DuckDB string_t vector entry as raw bytes, handling both layouts:
+    inline (length <= 12, chars at data_p + 4) and out-of-line (length > 12,
+    4-byte prefix at data_p + 4 and an 8-byte data pointer at data_p + 8).
+    https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365 """
+    length = ctypes.c_uint32.from_address(data_p).value
+    if length <= 12:
+        raw = (ctypes.c_char * length).from_address(data_p + 4)
+    else:
+        out_p = ctypes.c_uint64.from_address(data_p + 8).value
+        raw = (ctypes.c_char * length).from_address(out_p)
+    return raw[:]
 
 
 def aux_destroy_prepared(stmt):
@@ -952,6 +1013,51 @@ def test_bind_blob():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+def test_bind_varchar_long_out_of_line():
+    """A > 12-character VARCHAR uses the out-of-line string_t layout (4-byte
+    length, 4-byte prefix, 8-byte data pointer) rather than inlined chars. The
+    other string tests only ever exercise the <= 12-byte inline layout."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::VARCHAR;")
+    assert rc == ducklib.DuckDBSuccess
+    text = "abcdefghijklmnopqrstuvwxyz0123456789"
+    assert len(text) > 12
+    val_bytes = ctypes.c_char_p(text.encode())
+    val_p = ctypes.c_void_p.from_buffer(val_bytes).value
+    rc = ducklib.duckdb_bind_varchar(stmt[0], 1, val_p)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert ctypes.c_uint32.from_address(data_p).value == len(text)
+    assert aux_read_string_t(data_p).decode() == text
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_blob_long_out_of_line():
+    """A > 12-byte BLOB uses the same out-of-line string_t layout; the existing
+    blob test only covers the 4-byte inline case."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::BLOB;")
+    assert rc == ducklib.DuckDBSuccess
+    payload = bytes(range(20))
+    assert len(payload) > 12
+    blob_data = ctypes.create_string_buffer(payload, len(payload))
+    blob_p = ctypes.cast(blob_data, ctypes.c_void_p).value
+    rc = ducklib.duckdb_bind_blob(stmt[0], 1, blob_p, len(payload))
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert ctypes.c_uint32.from_address(data_p).value == len(payload)
+    assert aux_read_string_t(data_p) == payload
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 def test_bind_int8_negative():
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
@@ -1098,6 +1204,59 @@ def test_bind_decimal_wide_upper64():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+_INVALID_INDEX_VARCHAR = ctypes.c_char_p(b"x")
+_INVALID_INDEX_VARCHAR_P = ctypes.c_void_p.from_buffer(_INVALID_INDEX_VARCHAR).value
+_INVALID_INDEX_BLOB = ctypes.create_string_buffer(b"\x00\x01\x02\x03", 4)
+_INVALID_INDEX_BLOB_P = ctypes.cast(_INVALID_INDEX_BLOB, ctypes.c_void_p).value
+
+# Every duckdb_bind_* wrapper paired with a call that passes an out-of-range
+# parameter index (999) plus a valid-shaped dummy value. The index is validated
+# before the value, so the dummy value never gets dereferenced.
+_INVALID_INDEX_BINDS = [
+    ("duckdb_bind_boolean", lambda s: ducklib.duckdb_bind_boolean(s, 999, 1)),
+    ("duckdb_bind_int8", lambda s: ducklib.duckdb_bind_int8(s, 999, 1)),
+    ("duckdb_bind_int16", lambda s: ducklib.duckdb_bind_int16(s, 999, 1)),
+    ("duckdb_bind_int32", lambda s: ducklib.duckdb_bind_int32(s, 999, 1)),
+    ("duckdb_bind_int64", lambda s: ducklib.duckdb_bind_int64(s, 999, 1)),
+    ("duckdb_bind_uint8", lambda s: ducklib.duckdb_bind_uint8(s, 999, 1)),
+    ("duckdb_bind_uint16", lambda s: ducklib.duckdb_bind_uint16(s, 999, 1)),
+    ("duckdb_bind_uint32", lambda s: ducklib.duckdb_bind_uint32(s, 999, 1)),
+    ("duckdb_bind_uint64", lambda s: ducklib.duckdb_bind_uint64(s, 999, 1)),
+    ("duckdb_bind_float", lambda s: ducklib.duckdb_bind_float(s, 999, 1.0)),
+    ("duckdb_bind_double", lambda s: ducklib.duckdb_bind_double(s, 999, 1.0)),
+    ("duckdb_bind_date", lambda s: ducklib.duckdb_bind_date(s, 999, 0)),
+    ("duckdb_bind_time", lambda s: ducklib.duckdb_bind_time(s, 999, 0)),
+    ("duckdb_bind_timestamp", lambda s: ducklib.duckdb_bind_timestamp(s, 999, 0)),
+    ("duckdb_bind_timestamp_tz", lambda s: ducklib.duckdb_bind_timestamp_tz(s, 999, 0)),
+    ("duckdb_bind_null", lambda s: ducklib.duckdb_bind_null(s, 999)),
+    ("duckdb_bind_varchar", lambda s: ducklib.duckdb_bind_varchar(s, 999, _INVALID_INDEX_VARCHAR_P)),
+    ("duckdb_bind_varchar_length",
+     lambda s: ducklib.duckdb_bind_varchar_length(s, 999, _INVALID_INDEX_VARCHAR_P, 1)),
+    ("duckdb_bind_blob", lambda s: ducklib.duckdb_bind_blob(s, 999, _INVALID_INDEX_BLOB_P, 4)),
+    ("duckdb_bind_hugeint", lambda s: ducklib.duckdb_bind_hugeint(s, 999, (42, 0))),
+    ("duckdb_bind_uhugeint", lambda s: ducklib.duckdb_bind_uhugeint(s, 999, (100, 0))),
+    ("duckdb_bind_interval", lambda s: ducklib.duckdb_bind_interval(s, 999, (1, 2, 3))),
+    ("duckdb_bind_decimal", lambda s: ducklib.duckdb_bind_decimal(s, 999, (10, 2, 12345, 0))),
+]
+
+
+@pytest.mark.parametrize("name,call", _INVALID_INDEX_BINDS,
+                         ids=[entry[0] for entry in _INVALID_INDEX_BINDS])
+def test_bind_family_invalid_param_index(name, call):
+    """Every duckdb_bind_* wrapper returns DuckDBError (not a crash) for an
+    out-of-range parameter index. Verified on duckdb 1.5.4: all 23 wrappers,
+    including the struct-by-value binds (hugeint/uhugeint/interval/decimal),
+    return DuckDBError; none segfault, so none are excluded."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
+    assert rc == ducklib.DuckDBSuccess
+    rc = call(stmt[0])
+    assert rc == ducklib.DuckDBError, f"{name}: expected DuckDBError, got {rc}"
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 # --- Result Metadata ---
 
 def test_column_name():
@@ -1128,6 +1287,7 @@ def test_column_logical_type():
     out_result_p = out_result.ctypes.data
     logical_type_p = ducklib.duckdb_column_logical_type(out_result_p, 0)
     assert logical_type_p != 0, "Expected valid logical type pointer"
+    assert ducklib.duckdb_get_type_id(logical_type_p) == ducklib.DUCKDB_TYPE_INTEGER
     lt_buf = numpy.zeros(1, dtype=numpy.intp)
     lt_buf[0] = logical_type_p
     ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
@@ -1326,6 +1486,33 @@ def test_jit_connect_query_disconnect():
     assert conn_p != 0, f"expected valid connection pointer, got {conn_p}"
     assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
     assert conn_after == 0, f"expected null after disconnect, got {conn_after}"
+
+
+@njit
+def jit_query_invalid_sql():
+    db = create_duckdb_database()
+    conn = create_duckdb_connection()
+    ducklib.duckdb_open(0, array_data_p(db))
+    ducklib.duckdb_connect(db[0], array_data_p(conn))
+    out = create_duckdb_result()
+    rc = ducklib.duckdb_query(
+        conn[0], get_unicode_data_p('NOT VALID SQL;'), array_data_p(out))
+    detected = 0
+    if rc == ducklib.DuckDBError:
+        detected = 1
+    ducklib.duckdb_destroy_result(array_data_p(out))
+    ducklib.duckdb_disconnect(array_data_p(conn))
+    ducklib.duckdb_close(array_data_p(db))
+    return rc, detected
+
+
+def test_jit_query_invalid_sql():
+    """A DuckDBError return code is produced and branched on entirely inside
+    compiled @njit code (the native LLVM call path), not just via the
+    Python-called dispatcher path every other error test uses."""
+    rc, detected = jit_query_invalid_sql()
+    assert rc == ducklib.DuckDBError, f"expected DuckDBError, got {rc}"
+    assert detected == 1, "in-JIT DuckDBError comparison did not observe the error"
 
 
 # --- JIT: Prepared Statements ---
@@ -1682,6 +1869,8 @@ def test_create_get_bit():
     assert val_p != 0
     result = ducklib.duckdb_get_bit(val_p)
     assert result[1] == 2
+    raw = (ctypes.c_char * result[1]).from_address(result[0])
+    assert raw[:] == b"\x05\xA0"
     ducklib.duckdb_free(result[0])
     aux_destroy_value(val_p)
 
@@ -1958,6 +2147,13 @@ def test_create_array_value():
     vals = numpy.array([v1, v2, v3], dtype=numpy.intp)
     av = ducklib.duckdb_create_array_value(int_type, vals.ctypes.data, 3)
     assert av != 0
+    # ARRAY values have no dedicated size/child getters (duckdb_get_list_* reject
+    # ARRAY-typed values), so verify the contents by type id and rendered text.
+    array_type_p = ducklib.duckdb_get_value_type(av)
+    assert ducklib.duckdb_get_type_id(array_type_p) == ducklib.DUCKDB_TYPE_ARRAY
+    str_p = ducklib.duckdb_value_to_string(av)
+    assert ctypes.string_at(str_p) == b"[1, 2, 3]"
+    ducklib.duckdb_free(str_p)
     aux_destroy_value(av)
     aux_destroy_value(v1)
     aux_destroy_value(v2)
@@ -2008,6 +2204,7 @@ def test_get_value_type():
     assert val_p != 0
     type_p = ducklib.duckdb_get_value_type(val_p)
     assert type_p != 0
+    assert ducklib.duckdb_get_type_id(type_p) == ducklib.DUCKDB_TYPE_INTEGER
     # duckdb_get_value_type returns the same handle as the value for
     # scalar types — do NOT destroy both (double-free)
     aux_destroy_value(val_p)
@@ -2689,9 +2886,15 @@ def test_aggregate_function_round_trip():
 
 
 
+_INIT_CB_FIRED = numpy.zeros(1, dtype=numpy.int64)
+_INIT_CB_FIRED_ADDR = _INIT_CB_FIRED.ctypes.data
+
+
 @njit
 def _init_cb_impl(info):
-    pass
+    marker = carray(
+        _cast_int_to_void_p(_INIT_CB_FIRED_ADDR), (1,), dtype=numpy.int64)
+    marker[0] += 1
 
 
 @cfunc(nb_types.void(nb_types.intp))
@@ -2704,9 +2907,12 @@ def _init_cb(info):
     reason="duckdb_scalar_function_set_init not available",
 )
 def test_scalar_function_set_init():
-    """Verify set_init callback is accepted (v1.5+ only)."""
+    """Verify the set_init callback (v1.5+) is not just accepted but actually
+    invoked: the init impl increments an observable marker, asserted after the
+    query. A binding that silently dropped the init pointer would leave it 0."""
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
+    _INIT_CB_FIRED[0] = 0
 
     func_p = ducklib.duckdb_create_scalar_function()
     ducklib.duckdb_scalar_function_set_name(
@@ -2743,6 +2949,8 @@ def test_scalar_function_set_init():
     data_p = ducklib.duckdb_vector_get_data(vec_p)
     val = (ctypes.c_int32 * 1).from_address(data_p)[0]
     assert val == 43, f"Expected 43, got {val}"
+    assert _INIT_CB_FIRED[0] == 1, \
+        f"init callback did not fire exactly once, marker={_INIT_CB_FIRED[0]}"
 
     chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
@@ -3654,7 +3862,7 @@ def test_welford_numba_only():
         for x in xs_b:
             welford_update(sb, x)
         welford_combine(sa, sb)
-        return welford_finalize(sb)
+        return welford_finalize(sb), sb.mean
 
     xs = numpy.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
     expected = float(numpy.std(xs, ddof=1))
@@ -3663,9 +3871,12 @@ def test_welford_numba_only():
     assert abs(serial - expected) < 1e-10, (
         f"serial: got {serial}, expected {expected}")
 
-    combined = _compute_combined(xs[:3], xs[3:])
+    combined, combined_mean = _compute_combined(xs[:3], xs[3:])
     assert abs(combined - expected) < 1e-10, (
         f"combined: got {combined}, expected {expected}")
+    expected_mean = float(numpy.mean(xs))
+    assert abs(combined_mean - expected_mean) < 1e-10, (
+        f"combined mean: got {combined_mean}, expected {expected_mean}")
 
     single = _compute_serial(numpy.array([42.0]))
     assert math.isnan(single), f"expected NaN for count<2, got {single}"
