@@ -1,3 +1,4 @@
+import ast
 import ctypes
 import functools
 import hashlib
@@ -4532,3 +4533,47 @@ def test_irr_bisect_out_of_bracket_sentinel():
         numpy.array([1.0], dtype=numpy.float64), 1, 1000.0, 0.0)
     assert low == irr.IRR_NO_BRACKET
     assert not math.isnan(low)
+
+
+def _wrapper_name_triples(source):
+    """For every ``_call_lib_func`` wrapper defined at module level in `source`,
+    yield ``(def_name, decorator_key, body_literal)`` where ``decorator_key`` is
+    the string passed to ``signatures.get(...)`` in the wrapper's decorator and
+    ``body_literal`` is the string passed to ``_call_lib_func(...)`` in the body.
+    """
+    tree = ast.parse(source)
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        ret = node.body[-1]
+        if not (isinstance(ret, ast.Return) and isinstance(ret.value, ast.Call)
+                and isinstance(ret.value.func, ast.Name)
+                and ret.value.func.id == "_call_lib_func"):
+            continue
+        body_literal = ret.value.args[0].value
+        decorator_key = None
+        for dec in node.decorator_list:
+            for arg in getattr(dec, "args", []):
+                if (isinstance(arg, ast.Call) and isinstance(arg.func, ast.Attribute)
+                        and arg.func.attr == "get"
+                        and isinstance(arg.func.value, ast.Name)
+                        and arg.func.value.id == "signatures"):
+                    decorator_key = arg.args[0].value
+        yield node.name, decorator_key, body_literal
+
+
+def test_wrapper_name_integrity():
+    """Every binding names its C function three times by hand (the decorator's
+    ``signatures.get`` key, the ``def`` name, and the ``_call_lib_func`` literal);
+    a typo in any one that happens to match another registered key would compile
+    against the wrong signature silently. Assert all three agree and resolve to a
+    registered signatures key, parsing the source so a future drift fails here.
+    """
+    with open(ducklib.__file__) as f:
+        source = f.read()
+    triples = list(_wrapper_name_triples(source))
+    assert len(triples) > 150, len(triples)
+    for name, decorator_key, body_literal in triples:
+        assert body_literal == name, (name, body_literal)
+        assert decorator_key == name, (name, decorator_key)
+        assert name in ducklib.signatures, name
