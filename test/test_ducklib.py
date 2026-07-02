@@ -3736,3 +3736,132 @@ def test_download_refuses_unpinned_version_without_override(monkeypatch):
 
     with pytest.raises(RuntimeError, match="NUMBDUCK_LIBDUCKDB_SHA256"):
         utils._download_libduckdb()
+
+
+def _build_fake_libduckdb_zip(tmp_path):
+    """Write a ZIP holding a fake libduckdb.dylib under a tmp dir.
+
+    Returns (zip_path, dylib_bytes, zip_sha256) so a test can inject the real
+    digest of the archive it built and check the extracted bytes and sidecar.
+    """
+    import io
+    import zipfile
+
+    dylib_bytes = b"\x00fake-libduckdb-native-code\x7fELF"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("libduckdb.dylib", dylib_bytes)
+    zip_path = tmp_path / "libduckdb-osx-universal.zip"
+    zip_path.write_bytes(buf.getvalue())
+    return zip_path, dylib_bytes, hashlib.sha256(buf.getvalue()).hexdigest()
+
+
+def test_fetch_and_cache_local_zip_roundtrip(tmp_path):
+    """Drive _fetch_and_cache end-to-end against a local file:// archive with the
+    expected digest injected: verify extraction, cache-file and sidecar contents,
+    and (on POSIX) the 0o600 file / 0o700 dir permissions. No network.
+    """
+    from numbduck import utils
+
+    zip_path, dylib_bytes, zip_sha = _build_fake_libduckdb_zip(tmp_path)
+    dest = tmp_path / "cache" / "libduckdb.dylib"
+
+    returned = utils._fetch_and_cache(zip_path.as_uri(), str(dest), zip_sha)
+
+    assert returned == str(dest)
+    assert dest.read_bytes() == dylib_bytes
+    sidecar = dest.parent / "libduckdb.dylib.sha256"
+    assert sidecar.read_text() == hashlib.sha256(dylib_bytes).hexdigest()
+    if sys.platform != "win32":
+        assert oct(os.stat(dest).st_mode & 0o777) == "0o600"
+        assert oct(os.stat(dest.parent).st_mode & 0o777) == "0o700"
+
+
+def test_fetch_and_cache_wrong_digest_refuses(tmp_path):
+    """A downloaded ZIP whose SHA-256 does not match the injected expectation is
+    refused before anything is extracted or persisted. No network.
+    """
+    from numbduck import utils
+
+    zip_path, _dylib_bytes, _zip_sha = _build_fake_libduckdb_zip(tmp_path)
+    dest = tmp_path / "cache" / "libduckdb.dylib"
+
+    with pytest.raises(RuntimeError, match="does not match"):
+        utils._fetch_and_cache(zip_path.as_uri(), str(dest), "0" * 64)
+    assert not dest.exists()
+    assert not dest.parent.exists()
+
+
+@pytest.mark.parametrize("headless_mode", ["non_tty", "eof"])
+def test_download_consent_headless_raises_branded(monkeypatch, headless_mode):
+    """A headless import (stdin not a TTY, or input hitting EOF) gets the branded
+    instructional RuntimeError naming NUMBDUCK_LIBDUCKDB_DOWNLOAD=1,
+    NUMBDUCK_LIBDUCKDB, and brew, instead of a raw EOFError. No network.
+    """
+    from numbduck import utils
+
+    # An override digest so the flow reaches the consent gate rather than the
+    # unpinned-refusal gate that sits ahead of it.
+    monkeypatch.setenv("NUMBDUCK_LIBDUCKDB_SHA256", "0" * 64)
+    monkeypatch.delenv("NUMBDUCK_LIBDUCKDB_DOWNLOAD", raising=False)
+
+    class _NonTtyStdin:
+        def isatty(self):
+            return False
+
+    class _TtyStdin:
+        def isatty(self):
+            return True
+
+    def _raise_eof(_prompt):
+        raise EOFError
+
+    if headless_mode == "non_tty":
+        monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+    else:
+        monkeypatch.setattr(sys, "stdin", _TtyStdin())
+        monkeypatch.setattr("builtins.input", _raise_eof)
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("network access attempted")
+
+    monkeypatch.setattr("urllib.request.urlopen", _no_network)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        utils._download_libduckdb()
+    message = str(exc_info.value)
+    assert "NUMBDUCK_LIBDUCKDB_DOWNLOAD=1" in message
+    assert "NUMBDUCK_LIBDUCKDB=" in message
+    assert "brew" in message
+
+
+@pytest.mark.parametrize("env_configured", [False, True])
+def test_load_duckdb_non_darwin_message(monkeypatch, env_configured):
+    """On a non-macOS platform with a symbol-less wheel and no standalone lib,
+    load_duckdb names the macOS-only download asymmetry and distinguishes an
+    unset NUMBDUCK_LIBDUCKDB from one set to a missing path (echoing it). No
+    network.
+    """
+    from numbduck import utils
+
+    monkeypatch.setattr(utils.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
+    monkeypatch.setattr(utils, "load_lib_path", lambda path: object())
+    monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: False)
+    monkeypatch.setattr(utils, "_find_standalone_libduckdb", lambda: None)
+    monkeypatch.setattr(utils, "_migrate_legacy_cache", lambda: None)
+
+    bad_path = "/no/such/dir/libduckdb.so"
+    if env_configured:
+        monkeypatch.setenv("NUMBDUCK_LIBDUCKDB", bad_path)
+    else:
+        monkeypatch.delenv("NUMBDUCK_LIBDUCKDB", raising=False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        utils.load_duckdb()
+    message = str(exc_info.value)
+    assert "macOS" in message
+    if env_configured:
+        assert bad_path in message
+    else:
+        assert "NUMBDUCK_LIBDUCKDB=" in message
