@@ -2,6 +2,7 @@ import ast
 import ctypes
 import functools
 import hashlib
+import importlib.util
 import math
 import os
 import subprocess
@@ -4912,3 +4913,57 @@ def test_wrapper_name_integrity():
         assert body_literal == name, (name, body_literal)
         assert decorator_key == name, (name, decorator_key)
         assert name in ducklib.signatures, name
+
+
+def _load_examples_common():
+    """Load examples/_common.py by absolute path. It lives outside the numbduck
+    package and is not importable as a module from the test directory, so the
+    examples add their own directory to sys.path; here we exec it directly."""
+    common_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "examples", "_common.py",
+    )
+    spec = importlib.util.spec_from_file_location("_common", common_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_examples_common = _load_examples_common()
+
+
+def test_assert_results_match_both_nan_equal():
+    """Variants that all legitimately produce NaN agree; NaN != NaN under
+    IEEE-754 must not be reported as a spurious mismatch."""
+    _examples_common.assert_results_match(math.nan, math.nan, label="both nan")
+
+
+def test_assert_results_match_nan_vs_number_fails():
+    """A NaN against a real value is a genuine disagreement and still fails."""
+    with pytest.raises(AssertionError):
+        _examples_common.assert_results_match(math.nan, 1.0, label="nan vs number")
+
+
+def test_format_table_wrong_width_row_raises():
+    """A row whose cell count differs from the header count is rejected up front,
+    both when it is too long (would IndexError) and too short (would truncate)."""
+    headers = ["A", "B"]
+    alignments = ["<", "<"]
+    with pytest.raises(ValueError):
+        _examples_common.format_table(headers, [["1", "2", "3"]], alignments)
+    with pytest.raises(ValueError):
+        _examples_common.format_table(headers, [["1"]], alignments)
+
+
+def test_format_table_renders():
+    """A well-formed table renders one line per header row and data row."""
+    out = _examples_common.format_table(
+        ["Variant", "Time"],
+        [["Python", "1.000s"], ["JIT", "0.010s"]],
+        ["<", ">"],
+    )
+    lines = out.splitlines()
+    assert len(lines) == 3
+    assert "Variant" in lines[0] and "Time" in lines[0]
+    assert "Python" in lines[1]
+    assert "JIT" in lines[2]
