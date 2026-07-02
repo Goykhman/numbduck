@@ -102,15 +102,26 @@ def _haversine_chunk_impl(info, chunk, output):
     a_lon2 = carray(_cast_int_to_void_p(d_lon2), (n,), dtype=numpy.float64)
     a_out = carray(_cast_int_to_void_p(d_out), (n,), dtype=numpy.float64)
     R = 6371.0
-    for i in range(n):
-        p1 = math.radians(a_lat1[i])
-        p2 = math.radians(a_lat2[i])
-        dp = math.radians(a_lat2[i] - a_lat1[i])
-        dl = math.radians(a_lon2[i] - a_lon1[i])
-        s_dp = math.sin(dp / 2.0)
-        s_dl = math.sin(dl / 2.0)
-        a = s_dp * s_dp + math.cos(p1) * math.cos(p2) * s_dl * s_dl
-        a_out[i] = 2.0 * R * math.asin(math.sqrt(a))
+    # A raise inside this impl is swallowed at the @cfunc boundary (numba prints
+    # it and returns the void default without unwinding into DuckDB), which would
+    # hand DuckDB the partially-written output vector as a silent success. The
+    # guard wraps the whole compute -- outside the hot loop so throughput is
+    # unaffected -- and on failure fills the chunk with a NaN sentinel instead of
+    # leaving garbage in the un-reached rows. No structref is borrowed here, so
+    # there is nothing to leak; the sole hazard is the silent corrupt output.
+    try:
+        for i in range(n):
+            p1 = math.radians(a_lat1[i])
+            p2 = math.radians(a_lat2[i])
+            dp = math.radians(a_lat2[i] - a_lat1[i])
+            dl = math.radians(a_lon2[i] - a_lon1[i])
+            s_dp = math.sin(dp / 2.0)
+            s_dl = math.sin(dl / 2.0)
+            a = s_dp * s_dp + math.cos(p1) * math.cos(p2) * s_dl * s_dl
+            a_out[i] = 2.0 * R * math.asin(math.sqrt(a))
+    except Exception:
+        for i in range(n):
+            a_out[i] = math.nan
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))

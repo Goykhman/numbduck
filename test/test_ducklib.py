@@ -15,6 +15,7 @@ from numba import types as nb_types
 from numba.core.errors import TypingError
 from numba.experimental import structref
 from numbox.core.bindings.call import _call_lib_func
+from numbox.utils.highlevel import make_structref
 from numbox.utils.lowlevel import get_unicode_data_p
 from numbox.utils.meminfo import (
     borrow_structref, export_meminfo, _incref_meminfo,
@@ -4533,6 +4534,340 @@ def test_irr_bisect_out_of_bracket_sentinel():
         numpy.array([1.0], dtype=numpy.float64), 1, 1000.0, 0.0)
     assert low == irr.IRR_NO_BRACKET
     assert not math.isnan(low)
+
+
+# --- @cfunc exception-guard coverage for structref-backed UDAF callbacks ---
+#
+# A Python exception raised from an @njit impl invoked through a @cfunc is
+# swallowed at the C boundary: numba prints it and returns the zero/void default
+# without unwinding into DuckDB. When the raise originates in a nested call while
+# a borrowed structref is still live, numba also skips that borrow's scope-exit
+# decref -- an NRT meminfo leak. A bare try/except inside the impl catches the
+# exception in-frame so the decref runs. These tests pin both halves: an
+# unguarded raise leaks, the guarded form does not.
+
+
+@njit
+def _cfunc_guard_raise(x):
+    """Raise from a nested njit call while the caller holds a live borrow.
+
+    Models vector_push -> numpy.empty raising on allocation failure: the raise
+    crosses a call boundary, which is what skips the borrow's decref on an
+    unguarded path (a direct in-frame raise still runs the decref).
+    """
+    if x > 0.5:
+        raise ValueError("induced failure inside a UDAF callback")
+    return x
+
+
+@njit
+def _welford_update_raise_unguarded_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        s = borrow_structref(welford_type, slot[0])
+        welford_update(s, _cfunc_guard_raise(in_vals[i]))
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _welford_update_raise_unguarded_cb(info, chunk, states):
+    _welford_update_raise_unguarded_impl(info, chunk, states)
+
+
+@njit
+def _welford_update_raise_guarded_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        # Borrow inside the guard so a raise in the nested call releases it.
+        try:
+            s = borrow_structref(welford_type, slot[0])
+            welford_update(s, _cfunc_guard_raise(in_vals[i]))
+        except Exception:
+            pass
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _welford_update_raise_guarded_cb(info, chunk, states):
+    _welford_update_raise_guarded_impl(info, chunk, states)
+
+
+def _register_raising_welford(conn, name, update_cb):
+    """Register a Welford UDAF that reuses the shared init/combine/finalize/
+    destroy callbacks but swaps in a raising update callback."""
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn_p = extract_connection_ptr(conn)
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(func_p, get_unicode_data_p(name))
+    dbl = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_DOUBLE)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, dbl)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, dbl)
+    tb = numpy.array([dbl], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(tb.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, _welford_state_size_cb.address, _welford_init_cb.address,
+        update_cb.address, _welford_combine_cb.address,
+        _welford_finalize_cb.address)
+    ducklib.duckdb_aggregate_function_set_destructor(
+        func_p, _welford_destroy_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    fb = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(fb.ctypes.data)
+
+
+def _run_raising_udaf_nrt_delta(update_cb):
+    """Register a Welford UDAF whose update raises via a nested call, drive it
+    over a non-empty table, and return the NRT (alloc - free) delta across the
+    query. The raise is swallowed at the @cfunc boundary, so the query reports
+    success regardless of whether a leak occurred."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
+    from numba.core.runtime.nrt import rtsys
+
+    conn = duckdb.connect()
+    _register_raising_welford(conn, "wraise", update_cb)
+    conn.execute("CREATE TABLE t_raise AS SELECT 1.0 AS v FROM range(8)")
+    before = rtsys.get_allocation_stats()
+    conn.execute("SELECT wraise(v) FROM t_raise").fetchone()
+    after = rtsys.get_allocation_stats()
+    conn.close()
+    return (after.alloc - before.alloc) - (after.free - before.free)
+
+
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnraisableExceptionWarning")
+def test_udaf_cfunc_unguarded_raise_leaks_borrowed_state():
+    """Control: without the guard, a raise from a nested call while a borrowed
+    structref is live leaks the borrow's incref -- the C boundary swallows the
+    exception and skips the scope-exit decref. This establishes that the raise
+    is real and load-bearing, so the guarded assertion below is meaningful.
+
+    The swallow makes numba print the ignored exception, which pytest surfaces
+    as an unraisable-exception warning; it is expected here and filtered."""
+    leak = _run_raising_udaf_nrt_delta(_welford_update_raise_unguarded_cb)
+    assert leak > 0, f"expected an NRT leak without the guard, got delta {leak}"
+
+
+def test_udaf_cfunc_guarded_raise_no_leak():
+    """A bare try/except around the borrow and its nested raising call catches
+    the exception in-frame, so numba runs the borrow's decref: NRT alloc == free
+    even though every row's update raises. This is the guard the example
+    aggregate callbacks use."""
+    leak = _run_raising_udaf_nrt_delta(_welford_update_raise_guarded_cb)
+    assert leak == 0, f"guarded raise must not leak, got NRT delta {leak}"
+
+
+# ---- Merge-counter UDAF: proves DuckDB invokes the C-API combine callback ----
+
+@structref.register
+class _MergeStateType(nb_types.StructRef):
+    pass
+
+
+_merge_state_fields = [("total", nb_types.float64), ("merges", nb_types.int64)]
+_MergeState = make_structref(
+    "_MergeState", dict(_merge_state_fields), _MergeStateType)
+merge_state_type = _MergeStateType(_merge_state_fields)
+
+
+@njit
+def _merge_state_size_impl(info):
+    return numpy.uint64(8)
+
+
+@cfunc(nb_types.uint64(nb_types.intp))
+def _merge_state_size_cb(info):
+    return _merge_state_size_impl(info)
+
+
+@njit
+def _merge_init_impl(info, state):
+    s = _MergeState(0.0, 0)
+    slot = carray(_cast_int_to_void_p(state), (1,), dtype=numpy.intp)
+    slot[0] = export_meminfo(s)
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp))
+def _merge_init_cb(info, state):
+    _merge_init_impl(info, state)
+
+
+@njit
+def _merge_update_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        s = borrow_structref(merge_state_type, slot[0])
+        s.total += in_vals[i]
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _merge_update_cb(info, chunk, states):
+    _merge_update_impl(info, chunk, states)
+
+
+@njit
+def _merge_combine_impl(info, source, target, count):
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_slots = carray(
+        _cast_int_to_void_p(target), (count,), dtype=numpy.intp)
+    for i in range(count):
+        iu = numpy.uint64(i)
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
+        tgt_slot = carray(
+            _cast_int_to_void_p(tgt_slots[iu]), (1,), dtype=numpy.intp)
+        src = borrow_structref(merge_state_type, src_slot[0])
+        tgt = borrow_structref(merge_state_type, tgt_slot[0])
+        tgt.total += src.total
+        # Count each merged partial so finalize can surface whether combine ran.
+        tgt.merges += src.merges + 1
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                     nb_types.intp, nb_types.uint64))
+def _merge_combine_cb(info, source, target, count):
+    _merge_combine_impl(info, source, target, count)
+
+
+@njit
+def _merge_finalize_impl(info, source, result, count, offset):
+    out_data = ducklib.duckdb_vector_get_data(result)
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _cast_int_to_void_p(out_data), (offset + count,),
+        dtype=numpy.float64)
+    for i in range(count):
+        iu = numpy.uint64(i)
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
+        s = borrow_structref(merge_state_type, src_slot[0])
+        out_vals[numpy.uint64(offset + iu)] = numpy.float64(s.merges)
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp,
+                     nb_types.uint64, nb_types.uint64))
+def _merge_finalize_cb(info, source, result, count, offset):
+    _merge_finalize_impl(info, source, result, count, offset)
+
+
+@njit
+def _merge_destroy_impl(states, count):
+    state_slots = carray(
+        _cast_int_to_void_p(states), (count,), dtype=numpy.intp)
+    for i in range(count):
+        iu = numpy.uint64(i)
+        slot = carray(
+            _cast_int_to_void_p(state_slots[iu]), (1,), dtype=numpy.intp)
+        release_meminfo(slot[0])
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.uint64))
+def _merge_destroy_cb(states, count):
+    _merge_destroy_impl(states, count)
+
+
+def _register_merge_probe(conn):
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn_p = extract_connection_ptr(conn)
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(
+        func_p, get_unicode_data_p("merge_probe"))
+    dbl = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_DOUBLE)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, dbl)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, dbl)
+    tb = numpy.array([dbl], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(tb.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, _merge_state_size_cb.address, _merge_init_cb.address,
+        _merge_update_cb.address, _merge_combine_cb.address,
+        _merge_finalize_cb.address)
+    ducklib.duckdb_aggregate_function_set_destructor(
+        func_p, _merge_destroy_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    fb = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(fb.ctypes.data)
+
+
+def test_irr_example_combine_path_nrt_balanced():
+    """Drive the irr example UDAF under forced parallelism so DuckDB produces
+    multiple partial states and invokes the C-API combine callback, inside an
+    NRT alloc==free region, and assert the aggregate is still correct. A sibling
+    merge-counter UDAF proves that this configuration actually triggers combine
+    on this DuckDB build -- correctness alone cannot, since a single-partition
+    plan would be correct too."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
+    from numba.core.runtime.nrt import rtsys
+
+    irr = _import_irr_example()
+
+    conn = duckdb.connect()
+    # PRAGMA verify_parallelism forces the parallel aggregate path even for tiny
+    # inputs on duckdb 1.5.4, deterministically exercising combine. (SET
+    # verify_parallelism=true is not a recognized parameter -- only the PRAGMA.)
+    conn.execute("PRAGMA verify_parallelism")
+
+    _register_merge_probe(conn)
+    conn.execute(
+        "CREATE TABLE t_probe AS SELECT (range % 3)::INTEGER AS g, 1.0 AS v "
+        "FROM range(96)")
+    before = rtsys.get_allocation_stats()
+    probe_rows = conn.execute(
+        "SELECT g, merge_probe(v) FROM t_probe GROUP BY g ORDER BY g"
+    ).fetchall()
+    after = rtsys.get_allocation_stats()
+    max_merges = max(int(r[1]) for r in probe_rows)
+    assert max_merges > 0, (
+        f"combine never ran under verify_parallelism: {probe_rows}")
+    assert after.alloc - before.alloc == after.free - before.free, (
+        "combine borrow/release imbalance in the merge probe")
+
+    irr.register_irr(conn)
+    conn.execute(
+        "CREATE TABLE t_irr AS SELECT (range + 1)::DOUBLE AS period, "
+        "1000.0 AS cashflow, 10000.0 AS investment, 0.0 AS target_npv "
+        "FROM range(12)")
+    before = rtsys.get_allocation_stats()
+    irr_val = conn.execute(
+        "SELECT irr(cashflow, period, investment, target_npv) "
+        "FROM t_irr").fetchone()[0]
+    after = rtsys.get_allocation_stats()
+    conn.close()
+
+    npv = -10000.0
+    for t in range(1, 13):
+        npv += 1000.0 / (1.0 + irr_val) ** t
+    assert abs(npv) < 1e-6, f"irr wrong under forced parallelism: npv={npv}"
+    assert after.alloc - before.alloc == after.free - before.free, (
+        "irr example combine-path NRT leak under forced parallelism")
 
 
 def _wrapper_name_triples(source):

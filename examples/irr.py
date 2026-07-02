@@ -147,10 +147,24 @@ def irr_bisect(cashflows, periods, n, investment, target_npv):
 # combine (parallel merge) -> finalize -> destroy.
 # Each receives raw pointers; we use the bridge intrinsics to
 # reconstruct the structref from the state slot.
+#
+# Every impl body runs under a bare try/except. A Python exception escaping an
+# @njit impl invoked from a @cfunc is swallowed at the C boundary: numba prints
+# it, returns the zero/void default WITHOUT unwinding into DuckDB (a silent
+# wrong result), and skips the scope-exit decref of any borrowed structref that
+# is still live at the raise point (an NRT meminfo leak). Catching the exception
+# in-frame runs that decref and lets each callback write a defined sentinel
+# instead. The guard must be try/except, not try/finally -- try/finally re-raises
+# on numba 0.65.1, which reintroduces both the swallow and the leak.
 
 @njit
 def _irr_state_size_impl(info):
-    return numpy.uint64(8)
+    # A swallowed raise here would return the 0 default -- a 0-byte state slot
+    # that corrupts every later callback -- so the guard returns the true size.
+    try:
+        return numpy.uint64(8)
+    except Exception:
+        return numpy.uint64(8)
 
 
 @cfunc(nb_types.uint64(nb_types.intp))
@@ -160,12 +174,15 @@ def _irr_state_size_cb(info):
 
 @njit
 def _irr_init_impl(info, state):
-    cfs = Float64Vector(64)
-    pds = Float64Vector(64)
-    s = IRRState(cfs, pds, 0.0, 0.0, 0)
-    p = export_meminfo(s)
     slot = carray(_cast_int_to_void_p(state), (1,), dtype=numpy.intp)
-    slot[0] = p
+    # Sentinel on failure: a null state pointer, which destroy skips.
+    try:
+        cfs = Float64Vector(64)
+        pds = Float64Vector(64)
+        s = IRRState(cfs, pds, 0.0, 0.0, 0)
+        slot[0] = export_meminfo(s)
+    except Exception:
+        slot[0] = 0
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp))
@@ -184,10 +201,10 @@ def _irr_update_impl(info, chunk, states):
     pd_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_pd)), (n,), dtype=numpy.float64)
     inv_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_inv)), (n,), dtype=numpy.float64)
     npv_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_npv)), (n,), dtype=numpy.float64)
-    val_cf = numpy.intp(ducklib.duckdb_vector_get_validity(vec_cf))
-    val_pd = numpy.intp(ducklib.duckdb_vector_get_validity(vec_pd))
-    val_inv = numpy.intp(ducklib.duckdb_vector_get_validity(vec_inv))
-    val_npv = numpy.intp(ducklib.duckdb_vector_get_validity(vec_npv))
+    val_cf = ducklib.duckdb_vector_get_validity(vec_cf)
+    val_pd = ducklib.duckdb_vector_get_validity(vec_pd)
+    val_inv = ducklib.duckdb_vector_get_validity(vec_inv)
+    val_npv = ducklib.duckdb_vector_get_validity(vec_npv)
     state_slots = carray(_cast_int_to_void_p(states), (n,), dtype=numpy.intp)
     for i in range(n):
         if val_cf != 0 and not ducklib.duckdb_validity_row_is_valid(val_cf, i):
@@ -200,13 +217,20 @@ def _irr_update_impl(info, chunk, states):
             continue
         iu = numpy.uint64(i)
         slot = carray(_cast_int_to_void_p(state_slots[iu]), (1,), dtype=numpy.intp)
-        s = borrow_structref(irr_state_type, slot[0])
-        vector_push(s.cashflows, cf_data[iu])
-        vector_push(s.periods, pd_data[iu])
-        if s.initialized == 0:
-            s.investment = inv_data[iu]
-            s.target_npv = npv_data[iu]
-            s.initialized = 1
+        # Borrow inside the guard: if vector_push raises (e.g. OOM growing the
+        # buffer), catching in-frame runs the borrow's decref; without a
+        # per-group error channel the offending row is dropped rather than
+        # leaked, and finalize reflects the reduced data.
+        try:
+            s = borrow_structref(irr_state_type, slot[0])
+            vector_push(s.cashflows, cf_data[iu])
+            vector_push(s.periods, pd_data[iu])
+            if s.initialized == 0:
+                s.investment = inv_data[iu]
+                s.target_npv = npv_data[iu]
+                s.initialized = 1
+        except Exception:
+            pass
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
@@ -220,16 +244,21 @@ def _irr_combine_impl(info, source, target, count):
     tgt_slots = carray(_cast_int_to_void_p(target), (count,), dtype=numpy.intp)
     for i in range(count):
         iu = numpy.uint64(i)
-        src_slot = carray(_cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
-        tgt_slot = carray(_cast_int_to_void_p(tgt_slots[iu]), (1,), dtype=numpy.intp)
-        src = borrow_structref(irr_state_type, src_slot[0])
-        tgt = borrow_structref(irr_state_type, tgt_slot[0])
-        vector_extend(tgt.cashflows, src.cashflows)
-        vector_extend(tgt.periods, src.periods)
-        if tgt.initialized == 0:
-            tgt.investment = src.investment
-            tgt.target_npv = src.target_npv
-            tgt.initialized = src.initialized
+        # Both borrows live inside the guard: a raise in vector_extend releases
+        # source and target in-frame instead of leaking their meminfos.
+        try:
+            src_slot = carray(_cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
+            tgt_slot = carray(_cast_int_to_void_p(tgt_slots[iu]), (1,), dtype=numpy.intp)
+            src = borrow_structref(irr_state_type, src_slot[0])
+            tgt = borrow_structref(irr_state_type, tgt_slot[0])
+            vector_extend(tgt.cashflows, src.cashflows)
+            vector_extend(tgt.periods, src.periods)
+            if tgt.initialized == 0:
+                tgt.investment = src.investment
+                tgt.target_npv = src.target_npv
+                tgt.initialized = src.initialized
+        except Exception:
+            pass
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp, nb_types.uint64))
@@ -244,13 +273,19 @@ def _irr_finalize_impl(info, source, result, count, offset):
     out_vals = carray(_cast_int_to_void_p(out_data), (offset + count,), dtype=numpy.float64)
     for i in range(count):
         iu = numpy.uint64(i)
-        src_slot = carray(_cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
-        s = borrow_structref(irr_state_type, src_slot[0])
-        n = len(s.cashflows)
-        if n == 0:
+        # Sentinel on failure: NaN, matching the empty-group output below. The
+        # borrow lives inside the guard so a raise in irr_bisect releases it.
+        try:
+            src_slot = carray(_cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
+            s = borrow_structref(irr_state_type, src_slot[0])
+            n = len(s.cashflows)
+            if n == 0:
+                out_vals[numpy.uint64(offset + iu)] = math.nan
+            else:
+                out_vals[numpy.uint64(offset + iu)] = irr_bisect(
+                    s.cashflows, s.periods, n, s.investment, s.target_npv)
+        except Exception:
             out_vals[numpy.uint64(offset + iu)] = math.nan
-            continue
-        out_vals[numpy.uint64(offset + iu)] = irr_bisect(s.cashflows, s.periods, n, s.investment, s.target_npv)
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp, nb_types.uint64, nb_types.uint64))
@@ -264,7 +299,13 @@ def _irr_destroy_impl(states, count):
     for i in range(count):
         iu = numpy.uint64(i)
         slot = carray(_cast_int_to_void_p(state_slots[iu]), (1,), dtype=numpy.intp)
-        release_meminfo(slot[0])
+        # Skip the null sentinel a failed init leaves behind, and never let a
+        # release raise back across the @cfunc boundary.
+        try:
+            if slot[0] != 0:
+                release_meminfo(slot[0])
+        except Exception:
+            pass
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.uint64))
