@@ -13,7 +13,10 @@ SQL usage:
     SELECT irr(cashflow, period, investment, target_npv) FROM monthly_data;
 
 NULL handling: rows where any of the four input columns is NULL are
-skipped. If all rows are skipped, the result is NaN.
+skipped. If all rows are skipped, the result is NaN. If a group has data
+but its IRR lies outside the solver's [-0.99, 10.0] monthly-rate bracket,
+the result is +inf (see ``irr_bisect``), kept distinct from the
+empty-group NaN so callers can tell "no root in range" from "no data".
 
 Input contract: ``investment`` and ``target_npv`` are treated as
 per-group constants. The aggregate captures the value from the first
@@ -74,24 +77,68 @@ irr_state_type = IRRStateType(_irr_state_fields)
 
 
 # ---- Bisection solver ----
+#
+# Monthly IRR is the rate r that zeroes the group's NPV. The solver assumes a
+# single sign change of NPV(r) inside the fixed bracket [-0.99, 10.0] — true
+# when the cashflow stream changes sign once (an up-front investment followed
+# by positive cashflows), in which case NPV is monotonically decreasing in r.
+# Convergence is on the width of the rate bracket, not on the residual NPV:
+# the achievable NPV residual at the true root scales with the cashflow
+# magnitude (|dNPV/dr| * ulp(r)), so a fixed absolute NPV tolerance cannot be
+# met for large amounts even after r has resolved to machine precision. A
+# rate-width test is scale-invariant and always terminates with the converged
+# rate.
+
+IRR_NO_BRACKET = math.inf
+
+
+@njit
+def _irr_npv(cashflows, periods, n, investment, target_npv, r):
+    npv = -investment - target_npv
+    for i in range(n):
+        iu = numpy.uint64(i)
+        npv += cashflows[iu] / (1.0 + r) ** periods[iu]
+    return npv
+
 
 @njit
 def irr_bisect(cashflows, periods, n, investment, target_npv):
+    """Solve for the monthly IRR by bisection on the rate bracket [-0.99, 10.0].
+
+    Returns the converged rate (the final bracket midpoint) once the bracket
+    width in r falls below ``rate_tol``; the midpoint is then within
+    ``rate_tol / 2`` of the true root, regardless of cashflow magnitude.
+
+    Assumes NPV(r) changes sign exactly once inside the bracket, which holds
+    for a cashflow stream with a single sign change. When NPV has the same
+    sign at both bracket ends the root lies outside [-0.99, 10.0] (a monthly
+    return above 1000% or a near-total loss below -99%), or the stream lacks a
+    single sign change; the solver then returns the ``IRR_NO_BRACKET`` sentinel
+    (+inf). That sentinel is deliberately distinct from the NaN the finalize
+    step emits for an empty group, so callers can distinguish "no root in the
+    bracket" from "no data".
+    """
     r_lo = -0.99
     r_hi = 10.0
+    npv_lo = _irr_npv(cashflows, periods, n, investment, target_npv, r_lo)
+    npv_hi = _irr_npv(cashflows, periods, n, investment, target_npv, r_hi)
+    if npv_lo == 0.0:
+        return r_lo
+    if npv_hi == 0.0:
+        return r_hi
+    if (npv_lo > 0.0) == (npv_hi > 0.0):
+        return IRR_NO_BRACKET
+    rate_tol = 1e-12
     for _ in range(100):
+        if (r_hi - r_lo) < rate_tol:
+            break
         r_mid = (r_lo + r_hi) / 2.0
-        npv = -investment - target_npv
-        for i in range(n):
-            iu = numpy.uint64(i)
-            npv += cashflows[iu] / (1.0 + r_mid) ** periods[iu]
-        if abs(npv) < 1e-9:
-            return r_mid
+        npv = _irr_npv(cashflows, periods, n, investment, target_npv, r_mid)
         if npv > 0.0:
             r_lo = r_mid
         else:
             r_hi = r_mid
-    return math.nan
+    return (r_lo + r_hi) / 2.0
 
 
 # ---- DuckDB aggregate callbacks ----

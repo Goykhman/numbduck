@@ -4419,3 +4419,69 @@ def test_load_duckdb_non_darwin_message(monkeypatch, env_configured):
         assert bad_path in message
     else:
         assert "NUMBDUCK_LIBDUCKDB=" in message
+
+
+def _import_irr_example():
+    """Import the IRR UDAF example module (examples/irr.py).
+
+    The module is imported as ``irr`` (the name examples/run_irr.py also uses),
+    keeping ``IRRStateType.__module__`` stable so numba type inference matches.
+    Importing it also compiles every @cfunc/@njit callback, exercising that the
+    finalize -> irr_bisect chain still builds under numba.
+    """
+    examples_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+    if examples_dir not in sys.path:
+        sys.path.insert(0, examples_dir)
+    import irr
+    return irr
+
+
+def test_irr_bisect_large_magnitude_converges():
+    """IRR is scale-invariant, so scaling the sparse single-cashflow case by
+    1000 (10,000,000 investment / 13,000,000 cashflow at period 12) must yield
+    the same monthly rate as the 10,000 / 13,000 case, and a finite value.
+
+    The pre-fix solver only exited on a fixed absolute NPV tolerance, which the
+    residual at the true root cannot reach at large magnitude, so it returned
+    NaN despite full convergence. The bracket-width exit returns the converged
+    rate at every scale.
+    """
+    irr = _import_irr_example()
+    periods = numpy.array([12.0], dtype=numpy.float64)
+    expected = (13000.0 / 10000.0) ** (1.0 / 12.0) - 1.0
+
+    small = irr.irr_bisect(
+        numpy.array([13000.0], dtype=numpy.float64), periods, 1, 10000.0, 0.0)
+    large = irr.irr_bisect(
+        numpy.array([13000000.0], dtype=numpy.float64), periods, 1,
+        10000000.0, 0.0)
+
+    assert math.isfinite(small), small
+    assert math.isfinite(large), large
+    assert abs(small - expected) < 1e-9, (small, expected)
+    assert abs(large - expected) < 1e-9, (large, expected)
+    assert abs(large - small) < 1e-12, (large, small)
+
+
+def test_irr_bisect_out_of_bracket_sentinel():
+    """A root outside [-0.99, 10.0] leaves NPV the same sign at both bracket
+    ends; the solver returns the IRR_NO_BRACKET sentinel (+inf), which is
+    distinct from the NaN the finalize step emits for an empty group.
+    """
+    irr = _import_irr_example()
+
+    # Root near r=999 (monthly return far above the 10.0 bracket top):
+    # NPV(r) = -1 + 1000 / (1 + r) is positive at both r=-0.99 and r=10.
+    high = irr.irr_bisect(
+        numpy.array([1000.0], dtype=numpy.float64),
+        numpy.array([1.0], dtype=numpy.float64), 1, 1.0, 0.0)
+    assert high == irr.IRR_NO_BRACKET
+    assert not math.isnan(high)
+
+    # Near-total loss, root below -0.99: NPV negative at both bracket ends.
+    low = irr.irr_bisect(
+        numpy.array([1.0], dtype=numpy.float64),
+        numpy.array([1.0], dtype=numpy.float64), 1, 1000.0, 0.0)
+    assert low == irr.IRR_NO_BRACKET
+    assert not math.isnan(low)
