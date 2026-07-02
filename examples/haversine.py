@@ -96,6 +96,10 @@ def _haversine_chunk_impl(info, chunk, output):
     d_lat2 = ducklib.duckdb_vector_get_data(v_lat2)
     d_lon2 = ducklib.duckdb_vector_get_data(v_lon2)
     d_out = ducklib.duckdb_vector_get_data(output)
+    val_lat1 = ducklib.duckdb_vector_get_validity(v_lat1)
+    val_lon1 = ducklib.duckdb_vector_get_validity(v_lon1)
+    val_lat2 = ducklib.duckdb_vector_get_validity(v_lat2)
+    val_lon2 = ducklib.duckdb_vector_get_validity(v_lon2)
     a_lat1 = carray(_cast_int_to_void_p(d_lat1), (n,), dtype=numpy.float64)
     a_lon1 = carray(_cast_int_to_void_p(d_lon1), (n,), dtype=numpy.float64)
     a_lat2 = carray(_cast_int_to_void_p(d_lat2), (n,), dtype=numpy.float64)
@@ -111,6 +115,20 @@ def _haversine_chunk_impl(info, chunk, output):
     # there is nothing to leak; the sole hazard is the silent corrupt output.
     try:
         for i in range(n):
+            # DuckDB can hand this callback rows whose inputs are NULL, and the
+            # data slot of a NULL row holds stale bytes. Consult each input's
+            # validity mask and emit the same NaN sentinel rather than folding a
+            # garbage coordinate into the distance. A zero validity pointer means
+            # the vector carries no NULLs, so the per-row check is skipped.
+            null_in = (
+                (val_lat1 != 0 and not ducklib.duckdb_validity_row_is_valid(val_lat1, i))
+                or (val_lon1 != 0 and not ducklib.duckdb_validity_row_is_valid(val_lon1, i))
+                or (val_lat2 != 0 and not ducklib.duckdb_validity_row_is_valid(val_lat2, i))
+                or (val_lon2 != 0 and not ducklib.duckdb_validity_row_is_valid(val_lon2, i))
+            )
+            if null_in:
+                a_out[i] = math.nan
+                continue
             p1 = math.radians(a_lat1[i])
             p2 = math.radians(a_lat2[i])
             dp = math.radians(a_lat2[i] - a_lat1[i])

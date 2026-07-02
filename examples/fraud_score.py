@@ -57,6 +57,11 @@ if os.environ.get("NUMBDUCK_BENCH_BIG") == "1":
 if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
     ROW_COUNTS = [1_000]
 PY_MAX_N = 10_000
+# A scalar UDF has no way to write SQL NULL back through this C API (ducklib
+# binds no validity-write helper), so a row with any NULL input is scored with
+# an out-of-range sentinel. Every rule adds non-negative points, so a real
+# score is always >= 0 and -1 unambiguously marks a NULL/unknown transaction.
+NULL_SCORE = -1
 
 
 def fraud_score_py(amount, country, home_country, hour, risk_tier, recent_txns):
@@ -115,6 +120,12 @@ def _fraud_chunk_impl(info, chunk, output):
     d_rt = ducklib.duckdb_vector_get_data(v_rt)
     d_rx = ducklib.duckdb_vector_get_data(v_rx)
     d_out = ducklib.duckdb_vector_get_data(output)
+    val_amt = ducklib.duckdb_vector_get_validity(v_amt)
+    val_co = ducklib.duckdb_vector_get_validity(v_co)
+    val_hco = ducklib.duckdb_vector_get_validity(v_hco)
+    val_hr = ducklib.duckdb_vector_get_validity(v_hr)
+    val_rt = ducklib.duckdb_vector_get_validity(v_rt)
+    val_rx = ducklib.duckdb_vector_get_validity(v_rx)
     a_amt = carray(_cast_int_to_void_p(d_amt), (n,), dtype=numpy.float64)
     a_co = carray(_cast_int_to_void_p(d_co), (n,), dtype=numpy.int8)
     a_hco = carray(_cast_int_to_void_p(d_hco), (n,), dtype=numpy.int8)
@@ -123,6 +134,21 @@ def _fraud_chunk_impl(info, chunk, output):
     a_rx = carray(_cast_int_to_void_p(d_rx), (n,), dtype=numpy.int32)
     a_out = carray(_cast_int_to_void_p(d_out), (n,), dtype=numpy.int32)
     for i in range(n):
+        # DuckDB can pass NULL input rows to this callback, and a NULL row's
+        # data slot holds stale bytes. Read each input's validity mask and score
+        # any NULL-bearing row with the sentinel instead of folding garbage into
+        # the total. A zero validity pointer means the vector has no NULLs.
+        null_in = (
+            (val_amt != 0 and not ducklib.duckdb_validity_row_is_valid(val_amt, i))
+            or (val_co != 0 and not ducklib.duckdb_validity_row_is_valid(val_co, i))
+            or (val_hco != 0 and not ducklib.duckdb_validity_row_is_valid(val_hco, i))
+            or (val_hr != 0 and not ducklib.duckdb_validity_row_is_valid(val_hr, i))
+            or (val_rt != 0 and not ducklib.duckdb_validity_row_is_valid(val_rt, i))
+            or (val_rx != 0 and not ducklib.duckdb_validity_row_is_valid(val_rx, i))
+        )
+        if null_in:
+            a_out[i] = NULL_SCORE
+            continue
         s = 0
         amt = a_amt[i]
         if amt > 1000.0:
