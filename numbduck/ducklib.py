@@ -1,7 +1,7 @@
 import sys
 
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
-from numbox.core.bindings.call import _call_lib_func, _call_lib_func_byval
+from numbox.core.bindings.call import _call_lib_func
 from numbox.core.bindings.signatures import signatures
 from numbox.core.proxy.proxy import proxy, proxy_if_available
 
@@ -943,7 +943,7 @@ def duckdb_is_null_value(value_p):
 @proxy(signatures.get("duckdb_fetch_chunk"), jit_options=jit_options)
 def duckdb_fetch_chunk(duckdb_result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_fetch_chunk """
-    return _call_lib_func_byval("duckdb_fetch_chunk", duckdb_result)
+    return _call_lib_func("duckdb_fetch_chunk", (duckdb_result,))
 
 
 @proxy(signatures.get("duckdb_free"), jit_options=jit_options)
@@ -1129,13 +1129,13 @@ def duckdb_result_error_type(duckdb_result_p):
 @proxy(signatures.get("duckdb_result_return_type"), jit_options=jit_options)
 def duckdb_result_return_type(result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_return_type """
-    return _call_lib_func_byval("duckdb_result_return_type", result)
+    return _call_lib_func("duckdb_result_return_type", (result,))
 
 
 @proxy(signatures.get("duckdb_result_statement_type"), jit_options=jit_options)
 def duckdb_result_statement_type(result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_statement_type """
-    return _call_lib_func_byval("duckdb_result_statement_type", result)
+    return _call_lib_func("duckdb_result_statement_type", (result,))
 
 
 @proxy(signatures.get("duckdb_row_count"), jit_options=jit_options)
