@@ -54,6 +54,7 @@ def format_table(headers: list[str], rows: list[list[str]], alignments: list[str
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
+
     def fmt_row(cells):
         return "  " + "  ".join(
             f"{c:{a}{w}s}" for c, a, w in zip(cells, alignments, widths)

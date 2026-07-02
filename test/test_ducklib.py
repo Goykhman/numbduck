@@ -2445,9 +2445,6 @@ def test_create_enum_type():
     ducklib.duckdb_destroy_logical_type(enum_buf.ctypes.data)
 
 
-
-
-
 @njit
 def _add_one_impl(info, chunk, output):
     n = ducklib.duckdb_data_chunk_get_size(chunk)
@@ -2646,7 +2643,6 @@ def test_scalar_function_set_overloads():
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
-
     # Integer variant
     int_func_p = ducklib.duckdb_create_scalar_function()
     ducklib.duckdb_scalar_function_set_name(
@@ -2722,9 +2718,6 @@ def test_scalar_function_set_overloads():
     ducklib.duckdb_destroy_result(result.ctypes.data)
 
     aux_close_db(duckdb_database, duckdb_connection)
-
-
-
 
 
 AGG_STATE_SIZE = 8  # int64 accumulator
@@ -2882,10 +2875,6 @@ def test_aggregate_function_round_trip():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-
-
-
-
 _INIT_CB_FIRED = numpy.zeros(1, dtype=numpy.int64)
 _INIT_CB_FIRED_ADDR = _INIT_CB_FIRED.ctypes.data
 
@@ -2958,10 +2947,6 @@ def test_scalar_function_set_init():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-
-
-
-
 def test_aggregate_function_set_overloads():
     """Register overloaded aggregate with int32 and int64 variants."""
     duckdb_database, duckdb_connection = aux_connect_db()
@@ -2975,7 +2960,6 @@ def test_aggregate_function_set_overloads():
         conn_p, query_p, result.ctypes.data)
     assert rc == ducklib.DuckDBSuccess
     ducklib.duckdb_destroy_result(result.ctypes.data)
-
 
     # Integer input variant (reuses existing agg callbacks)
     int_func_p = ducklib.duckdb_create_aggregate_function()
@@ -3067,10 +3051,6 @@ def test_aggregate_function_set_overloads():
     ducklib.duckdb_destroy_result(result.ctypes.data)
 
     aux_close_db(duckdb_database, duckdb_connection)
-
-
-
-
 
 
 @njit
