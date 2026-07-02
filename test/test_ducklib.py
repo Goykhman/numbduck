@@ -1,4 +1,5 @@
 import ctypes
+import functools
 import math
 import os
 import subprocess
@@ -27,6 +28,106 @@ from numbduck.duckdb_utils import (
 )
 from numbox.utils.lowlevel import _cast_int_to_void_p
 from numbox.utils.lowlevel import array_data_p
+
+
+class _HandleFamily:
+    """One DuckDB C-handle lifetime family: the binding calls that acquire a
+    handle (each paired with a predicate that says whether a given call actually
+    produced one) and the calls that release it."""
+
+    def __init__(self, name, acquires, releases):
+        self.name = name
+        self.acquires = acquires
+        self.releases = releases
+
+
+def _acquired_by_return(args, result):
+    return result != 0
+
+
+def _acquired_by_last_arg(args, result):
+    # duckdb_query only allocates a result when a non-null out pointer is passed.
+    return args[-1] != 0
+
+
+RESULT_FAMILY = _HandleFamily(
+    "result",
+    {"duckdb_query": _acquired_by_last_arg},
+    ("duckdb_destroy_result",),
+)
+CHUNK_FAMILY = _HandleFamily(
+    "data_chunk",
+    {"duckdb_fetch_chunk": _acquired_by_return},
+    ("duckdb_destroy_data_chunk",),
+)
+VALUE_FAMILY = _HandleFamily(
+    "value",
+    {name: _acquired_by_return for name in (
+        "duckdb_create_int64", "duckdb_create_bool", "duckdb_create_double"
+    )},
+    ("duckdb_destroy_value",),
+)
+LOGICAL_TYPE_FAMILY = _HandleFamily(
+    "logical_type",
+    {"duckdb_create_logical_type": _acquired_by_return},
+    ("duckdb_destroy_logical_type",),
+)
+
+
+class handle_balance:
+    """Count paired acquire/release calls on the DuckDB bindings and assert the
+    two match on exit. DuckDB's C API exposes no allocator-stats accessor, so a
+    missing destroy or a double free surfaces here as a per-family imbalance in
+    the wrapped call counts. Every patched binding is restored before the balance
+    is checked, so a failing assertion never leaves the module monkeypatched."""
+
+    def __init__(self, *families):
+        self._families = families
+        self._saved = {}
+        self._counts = {}
+
+    def __enter__(self):
+        for family in self._families:
+            self._counts[family.name] = [0, 0]
+            for name, predicate in family.acquires.items():
+                self._wrap(name, family.name, 0, predicate)
+            for name in family.releases:
+                self._wrap(name, family.name, 1, None)
+        return self
+
+    def _wrap(self, name, family_name, slot, predicate):
+        original = getattr(ducklib, name)
+        self._saved[name] = original
+        counts = self._counts[family_name]
+
+        def wrapper(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if predicate is None or predicate(args, result):
+                counts[slot] += 1
+            return result
+
+        setattr(ducklib, name, wrapper)
+
+    def __exit__(self, exc_type, exc, tb):
+        for name, original in self._saved.items():
+            setattr(ducklib, name, original)
+        if exc_type is not None:
+            return False
+        for name, (acquired, released) in self._counts.items():
+            assert acquired == released, \
+                f"{name} handle imbalance: {acquired} acquired, {released} released"
+        return False
+
+
+def balanced(*families):
+    """Run the decorated test under a handle_balance harness over the given families."""
+    def decorate(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with handle_balance(*families):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorate
 
 
 def aux_open_database(db_name_p_):
@@ -71,6 +172,14 @@ def aux_connect_db():
 def aux_close_db(duckdb_database, duckdb_connection):
     ducklib.duckdb_disconnect(duckdb_connection.ctypes.data)
     ducklib.duckdb_close(duckdb_database.ctypes.data)
+
+
+def aux_destroy_data_chunk(chunk_p):
+    """Destroy a data chunk fetched via duckdb_fetch_chunk by passing the buffer
+    address (pointer-to-handle) to duckdb_destroy_data_chunk."""
+    buf = numpy.zeros(1, dtype=numpy.intp)
+    buf[0] = chunk_p
+    ducklib.duckdb_destroy_data_chunk(buf.ctypes.data)
 
 
 def test_connect():
@@ -133,11 +242,13 @@ def aux_query_1():
     return out_result, duckdb_database, duckdb_connection
 
 
+@balanced(RESULT_FAMILY)
 def test_query():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     print(f"out_result = {out_result}")
     num_of_columns = out_result[0]
     assert num_of_columns == 2, f"expected 'i', 'j', got {num_of_columns} columns"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
@@ -154,6 +265,7 @@ def test_query_invalid_sql():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY)
 def test_duckdb_column_count_and_duckdb_row_count():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     out_result_p = out_result.ctypes.data
@@ -161,9 +273,11 @@ def test_duckdb_column_count_and_duckdb_row_count():
     num_of_rows = ducklib.duckdb_row_count(out_result_p)
     assert num_of_cols == 2, num_of_cols
     assert num_of_rows == 3, num_of_rows
+    ducklib.duckdb_destroy_result(out_result_p)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY)
 def test_duckdb_destroy_result():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     out_result_p = out_result.ctypes.data
@@ -183,25 +297,32 @@ def aux_get_data_vector():
     i_vec_data_p = ducklib.duckdb_vector_get_data(i_vec_p)
     i_arr = arr_ty.from_address(i_vec_data_p)
     assert all([i_arr_ == i_col_ for i_arr_, i_col_ in zip(i_arr, i_col)])
-    return duckdb_result, data_chunk_p, duckdb_database, duckdb_connection
+    return out_result, data_chunk_p, duckdb_database, duckdb_connection
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_data_chunk_get_column_count():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    out_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
     col_count = ducklib.duckdb_data_chunk_get_column_count(data_chunk_p)
     assert col_count == 2, f"Expected 2 columns, got {col_count}"
+    aux_destroy_data_chunk(data_chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_data_chunk_get_size():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    out_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
     chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
     assert chunk_size == 3, f"Expected 3 rows in chunk, got {chunk_size}"
+    aux_destroy_data_chunk(data_chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_destroy_data_chunk():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    out_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
     assert data_chunk_p != 0, f"Expected valid chunk pointer, got {data_chunk_p}"
     chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
     assert chunk_size > 0, f"Expected rows in chunk before destroy, got {chunk_size}"
@@ -210,21 +331,26 @@ def test_duckdb_destroy_data_chunk():
     data_chunk_pp = data_chunk.ctypes.data
     ducklib.duckdb_destroy_data_chunk(data_chunk_pp)
     assert data_chunk[0] == 0, f"Expected null after destroy, got {data_chunk[0]}"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_fetch_chunk_exhausted():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     duckdb_result = tuple(out_result)
     chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
     assert chunk_p != 0, "Expected first chunk, got null"
+    aux_destroy_data_chunk(chunk_p)
     chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
     assert chunk_p == 0, f"Expected null for exhausted result, got {chunk_p}"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    out_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
     assert data_chunk_p
     j_vec_p = ducklib.duckdb_data_chunk_get_vector(data_chunk_p, 1)
     j_vec_data_p = ducklib.duckdb_vector_get_data(j_vec_p)
@@ -236,7 +362,40 @@ def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
         (j_arr_ == j_col_) if j_val_ else True
         for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)
     ])
+    aux_destroy_data_chunk(data_chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_handle_balance_value_family():
+    with handle_balance(VALUE_FAMILY):
+        v_int = ducklib.duckdb_create_int64(7)
+        v_bool = ducklib.duckdb_create_bool(1)
+        v_double = ducklib.duckdb_create_double(1.5)
+        assert v_int != 0 and v_bool != 0 and v_double != 0
+        aux_destroy_value(v_int)
+        aux_destroy_value(v_bool)
+        aux_destroy_value(v_double)
+
+
+def test_handle_balance_logical_type_family():
+    with handle_balance(LOGICAL_TYPE_FAMILY):
+        lt_int = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+        lt_big = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
+        assert lt_int != 0 and lt_big != 0
+        for lt_p in (lt_int, lt_big):
+            lt_buf = numpy.zeros(1, dtype=numpy.intp)
+            lt_buf[0] = lt_p
+            ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+
+
+def test_handle_balance_detects_missing_destroy():
+    leaked_p = 0
+    with pytest.raises(AssertionError, match="value handle imbalance"):
+        with handle_balance(VALUE_FAMILY):
+            leaked_p = ducklib.duckdb_create_int64(11)
+            assert leaked_p != 0
+    aux_destroy_value(leaked_p)
 
 
 # --- Prepared Statements ---
