@@ -50,15 +50,34 @@ def extract_connection_ptr(conn):
     wheel keeps its own — this raises rather than hand a wheel-minted
     ``Connection*`` to a possibly-different libduckdb build (a cross-runtime
     dereference under a mismatched internal layout is undefined behavior that the
-    ``SELECT 1`` validation cannot catch).
+    ``SELECT 1`` smoke-test cannot catch).
 
-    The extracted pointer is then validated by running ``SELECT 1`` via the C API
-    before it is returned.
+    Each intermediate pointer is checked for null before it is used. A closed (or
+    otherwise null-backed) ``DuckDBPyConnection`` resets its
+    ``unique_ptr<Connection>`` to null, so the ``+32`` read yields ``None``; that
+    is reported as ``RuntimeError`` before any pointer arithmetic or C-API call,
+    instead of surfacing as an opaque numba typing error or a NULL-connection
+    dereference.
 
-    Validated on duckdb 1.3.2 / Linux x86-64 / libstdc++. The pybind11
-    instance layout and the ``DuckDBPyConnection`` struct layout are
-    implementation details of the duckdb Python package and may change with
-    major duckdb releases. Re-verify offsets when upgrading duckdb.
+    The extracted pointer is then handed to ``SELECT 1`` via the C API as a
+    best-effort liveness smoke-test: it confirms only that a *plausibly-correct*
+    pointer resolves to a connection that can run a trivial query. It is not a
+    validation of the ABI offsets and cannot catch a structurally-wrong (wild)
+    pointer — dereferencing one inside ``duckdb_query`` is undefined behavior
+    (typically a segfault) that happens before any result code is produced, so
+    the ``SELECT 1`` check never observes it. Offset drift across a duckdb release
+    is exactly this uncatchable case: the offsets are validated on duckdb 1.3.2 /
+    Linux x86-64 / libstdc++, and the pybind11 instance layout and the
+    ``DuckDBPyConnection`` struct layout are implementation details of the duckdb
+    Python package that may change with major duckdb releases. Re-verify the
+    offsets when upgrading duckdb.
+
+    The type guard uses exact-type identity (``type(conn) is
+    duckdb.DuckDBPyConnection``); it is a convenience check, not a proof of memory
+    layout. Passing a non-canonical object that merely satisfies ``isinstance``
+    (a subclass, or one spoofing ``__class__`` / ``__instancecheck__``) is
+    undefined behavior — the two chained ``from_address`` reads would dereference
+    arbitrary addresses taken from that object.
 
     Parameters
     ----------
@@ -67,18 +86,30 @@ def extract_connection_ptr(conn):
     Returns
     -------
     int
-        The ``Connection*`` as a Python int (``intp``-compatible).
+        The ``Connection*`` as a Python int (``intp``-compatible). The pointer is
+        **borrowed** from *conn*: it is owned by the ``DuckDBPyConnection`` (which
+        holds the ``unique_ptr<Connection>``) and stays valid only while *conn* is
+        alive and open. A Python ``int`` cannot keep *conn* referenced, so the
+        keep-alive is the caller's responsibility.
+
+    Warning
+    -------
+    The caller must retain *conn*, alive and open, for the entire lifetime of any
+    ``@njit`` use of the returned pointer. Using the pointer after
+    ``conn.close()`` or after *conn* is garbage-collected dereferences a dangling
+    ``Connection*`` — a use-after-free.
 
     Raises
     ------
     TypeError
-        If *conn* is not a ``duckdb.DuckDBPyConnection``.
+        If *conn* is not exactly a ``duckdb.DuckDBPyConnection``.
     RuntimeError
         If numbduck's JIT bindings and the Python ``duckdb`` module resolve
-        different libduckdb versions, or if the extracted pointer fails the
-        validation query.
+        different libduckdb versions, if the extracted pointer is null (a closed
+        or uninitialized connection), or if the pointer fails the ``SELECT 1``
+        liveness smoke-test.
     """
-    if not isinstance(conn, duckdb.DuckDBPyConnection):
+    if type(conn) is not duckdb.DuckDBPyConnection:
         raise TypeError(
             f"expected duckdb.DuckDBPyConnection, got {type(conn).__name__}"
         )
@@ -99,12 +130,21 @@ def extract_connection_ptr(conn):
     py_obj_addr = id(conn)
     cpp_obj_p = ctypes.c_void_p.from_address(
         py_obj_addr + PYBIND11_HELD_OBJECT_OFFSET).value
+    if not cpp_obj_p:
+        raise RuntimeError(
+            "extracted null DuckDBPyConnection* from duckdb.DuckDBPyConnection"
+        )
 
     # Step 2: read the Connection* from the unique_ptr<Connection> field.
     conn_ptr = ctypes.c_void_p.from_address(
         cpp_obj_p + DUCKDBPY_CONNECTION_OFFSET).value
+    if not conn_ptr:
+        raise RuntimeError(
+            "extracted null Connection* from duckdb.DuckDBPyConnection "
+            "(is the connection closed?)"
+        )
 
-    # Validate by running a trivial query through the C API.
+    # Liveness smoke-test: run a trivial query through the C API.
     result = create_duckdb_result()
     query_p = get_unicode_data_p("SELECT 1")
     rc = ducklib.duckdb_query(conn_ptr, query_p, result.ctypes.data)

@@ -3674,6 +3674,20 @@ def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
         conn.close()
 
 
+def test_pybridge_closed_connection_raises_runtime_error():
+    """A closed connection resets its unique_ptr<Connection> to null, so the
+    documented offset yields a null pointer. extract_connection_ptr must raise a
+    clean RuntimeError there rather than pass the null on to duckdb_query (an
+    opaque numba TypeError or a NULL-connection dereference).
+    """
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    conn.close()
+    with pytest.raises(RuntimeError, match="null"):
+        extract_connection_ptr(conn)
+
+
 def test_verify_cached_dylib_roundtrip(monkeypatch, tmp_path):
     """A cached dylib matching its sidecar passes; a missing sidecar is refused."""
     from numbduck import utils
