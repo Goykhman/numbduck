@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import sys
+import tempfile
 from inspect import getfile
 from numba.experimental.structref import register
 from numba.core.types import StructRef
@@ -286,30 +287,33 @@ def _fetch_and_cache(url, dest, expected_sha):
     # exist_ok skips the mode above when the dir already exists under a looser
     # umask, so tighten it explicitly to close the local-poisoning window.
     os.chmod(cache_dir, 0o700)
-    # Stage into temp files in the same dir and os.replace() into place so we
-    # never rewrite a libduckdb.dylib another process may already have mapped
-    # (an in-place rewrite can corrupt that live mapping); a same-dir rename is
-    # atomic. Put the sidecar in place first so that once the dylib appears, its
-    # integrity sidecar is already paired with it.
+    # Stage into unique per-writer temp files (via mkstemp, not a fixed
+    # dest + ".tmp") and os.replace() each into place. Unique names keep two
+    # processes downloading concurrently from clobbering each other's in-flight
+    # write; the atomic same-dir rename never rewrites a libduckdb.dylib another
+    # process may already have mapped. The sidecar is placed first so that once
+    # the dylib appears its integrity sidecar is already paired with it.
     digest = hashlib.sha256(member).hexdigest()
     sidecar = dest + ".sha256"
-    tmp_dest = dest + ".tmp"
-    tmp_sidecar = sidecar + ".tmp"
+    fd_dest, tmp_dest = tempfile.mkstemp(dir=cache_dir, prefix="libduckdb.", suffix=".tmp")
+    tmp_sidecar = None
     try:
-        with open(tmp_dest, "wb") as dst:
+        with os.fdopen(fd_dest, "wb") as dst:
             dst.write(member)
         os.chmod(tmp_dest, 0o600)
-        with open(tmp_sidecar, "w") as fh:
+        fd_sidecar, tmp_sidecar = tempfile.mkstemp(dir=cache_dir, prefix="libduckdb.sha256.", suffix=".tmp")
+        with os.fdopen(fd_sidecar, "w") as fh:
             fh.write(digest)
         os.chmod(tmp_sidecar, 0o600)
         os.replace(tmp_sidecar, sidecar)
         os.replace(tmp_dest, dest)
     except OSError:
         for tmp in (tmp_dest, tmp_sidecar):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            if tmp is not None:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
         raise
     return dest
 
