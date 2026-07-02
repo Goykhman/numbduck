@@ -18,8 +18,6 @@ from numbox.utils.meminfo import (
     release_meminfo, structref_meminfo
 )
 
-from numba.core.types import intp
-
 from numbduck import ducklib
 from numbduck.configurations import get_jit_options
 from numbduck.duckdb_utils import (
@@ -1383,8 +1381,7 @@ def jit_prepare_bind_execute():
     # col 3: null check
     v3_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 3)
     v3_validity_p = ducklib.duckdb_vector_get_validity(v3_p)
-    col3_valid = ducklib.duckdb_validity_row_is_valid(
-        intp(v3_validity_p), intp(0))
+    col3_valid = ducklib.duckdb_validity_row_is_valid(v3_validity_p, 0)
 
     # cleanup (reverse order)
     chunk_buf = create_duckdb_data_chunk()
@@ -3847,7 +3844,7 @@ def _null_to_sentinel_impl(info, chunk, output):
         # A null validity pointer means the vector is all-valid; otherwise bit i
         # of the mask is the row's validity.
         valid = validity_p == 0 or ducklib.duckdb_validity_row_is_valid(
-            intp(validity_p), intp(i)) != 0
+            validity_p, i) != 0
         out_arr[i] = in_arr[i] if valid else NULL_SENTINEL
 
 
@@ -3884,7 +3881,7 @@ def _null_count_update_impl(info, chunk, states):
     state_ptrs = carray(_cast_int_to_void_p(states), (n,), dtype=numpy.intp)
     for i in range(n):
         valid = validity_p == 0 or ducklib.duckdb_validity_row_is_valid(
-            intp(validity_p), intp(i)) != 0
+            validity_p, i) != 0
         if valid:
             acc = carray(_cast_int_to_void_p(state_ptrs[i]), (1,), dtype=numpy.int64)
             acc[0] += 1
