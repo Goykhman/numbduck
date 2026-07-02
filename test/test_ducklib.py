@@ -3611,3 +3611,44 @@ def test_aggregate_function_array_variance():
     free_delta = stats_after.free - stats_before.free
     assert alloc_delta == free_delta, (
         f"leak: alloc={alloc_delta}, free={free_delta}")
+
+
+def test_load_duckdb_refuses_version_mismatch(monkeypatch):
+    """The standalone-fallback loader refuses a libduckdb whose version differs.
+
+    Simulates the macOS dual-runtime seam on any platform: force the wheel to
+    look symbol-less, hand back a standalone libduckdb whose reported version
+    disagrees with the installed duckdb wheel, and assert load_duckdb refuses.
+    """
+    from numbduck import utils
+
+    wheel_lib = object()
+    standalone_lib = object()
+
+    def fake_load_lib_path(path):
+        return wheel_lib if path == "/fake/wheel.so" else standalone_lib
+
+    monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
+    monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
+    monkeypatch.setattr(
+        utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
+    monkeypatch.setattr(utils, "_library_version", lambda lib: "9.9.9")
+
+    with pytest.raises(RuntimeError, match="NUMBDUCK_LIBDUCKDB"):
+        utils.load_duckdb()
+
+
+def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
+    """pybridge refuses to extract a Connection* when runtimes are uncoordinated."""
+    from numbduck import pybridge
+
+    monkeypatch.setattr(pybridge, "libraries_coordinated", lambda: False)
+    monkeypatch.setattr(pybridge, "loaded_library_version", lambda: "9.9.9")
+
+    conn = duckdb.connect()
+    try:
+        with pytest.raises(RuntimeError, match="libduckdb"):
+            pybridge.extract_connection_ptr(conn)
+    finally:
+        conn.close()

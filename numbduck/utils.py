@@ -1,3 +1,4 @@
+import ctypes
 import duckdb
 import os
 import platform
@@ -26,8 +27,60 @@ _MACOS_LIBDUCKDB_SEARCH_PATHS = [
 ]
 
 
+# The libduckdb whose C API backs numbduck's JIT bindings, retained so the
+# coordination check can probe its reported version. On the wheel path this is
+# the same shared object the Python ``duckdb`` module uses; on the standalone
+# fallback it is a second, independently loaded libduckdb (see load_duckdb).
+_loaded_libduckdb = None
+
+
 def _has_capi_symbols(lib):
     return hasattr(lib, "duckdb_open")
+
+
+def _normalize_version(version):
+    # duckdb_library_version() reports e.g. "v1.5.4" while duckdb.__version__ is
+    # "1.5.4"; strip the leading "v" so the two compare directly.
+    return version.strip().lstrip("v")
+
+
+def _library_version(lib):
+    """Version string reported by *lib*'s ``duckdb_library_version()``.
+
+    Returns the normalized version (leading ``v`` stripped) or ``None`` when the
+    symbol is absent or reports nothing.
+    """
+    if not hasattr(lib, "duckdb_library_version"):
+        return None
+    fn = lib.duckdb_library_version
+    fn.restype = ctypes.c_char_p
+    raw = fn()
+    if raw is None:
+        return None
+    return _normalize_version(raw.decode())
+
+
+def _require_coordinated_standalone(lib, source):
+    """Refuse a standalone libduckdb whose version disagrees with the wheel.
+
+    pybridge extracts a raw ``Connection*`` minted by the Python ``duckdb``
+    wheel's runtime and hands it to the C API resolved against this standalone
+    library. That is only sound when both are the same DuckDB build: a
+    different build casts the pointer back to its own internal Connection
+    layout, so dereferencing it is undefined behavior. Detect the mismatch and
+    refuse rather than corrupt memory at query time.
+    """
+    lib_version = _library_version(lib)
+    wheel_version = _normalize_version(duckdb.__version__)
+    if lib_version is not None and lib_version != wheel_version:
+        raise RuntimeError(
+            f"numbduck loaded a standalone libduckdb (version {lib_version!r}) "
+            f"from {source!r}, but the installed Python duckdb package is "
+            f"version {wheel_version!r}. Passing a connection minted by the "
+            f"duckdb wheel into a different libduckdb build is undefined "
+            f"behavior. Install a matching libduckdb or set NUMBDUCK_LIBDUCKDB "
+            f"to a libduckdb whose version equals {wheel_version!r}."
+        )
 
 
 def _find_standalone_libduckdb():
@@ -111,15 +164,31 @@ def find_duckdb_shared_lib():
 
 
 def load_duckdb():
+    global _loaded_libduckdb
     lib_path = find_duckdb_shared_lib()
     lib = load_lib_path(lib_path)
     if _has_capi_symbols(lib):
+        # Single-runtime invariant: the wheel's own shared object backs both the
+        # Python ``duckdb`` module and numbduck's JIT bindings, so any handle is
+        # allocated and consumed by one libduckdb — coordinated by construction.
+        _loaded_libduckdb = lib
         return lib
-    # Python wheel missing C API symbols (macOS with 1.5.2 >= duckdb >= 1.4.1)
+    # Python wheel missing C API symbols (macOS with 1.5.2 >= duckdb >= 1.4.1).
+    # numbduck must load a second, standalone libduckdb RTLD_GLOBAL to supply the
+    # C API, leaving two DuckDB runtimes resident: the wheel's (used by the
+    # Python ``duckdb`` module) and this standalone (bound by numbduck's JIT
+    # code). The single-runtime invariant no longer holds automatically. pybridge
+    # hands a Connection* minted by the wheel to this standalone's C API, which is
+    # sound only when the two are the same DuckDB build; refuse any version
+    # mismatch rather than dereference a cross-runtime pointer. Every handle used
+    # from JIT must originate from this standalone runtime, never from the Python
+    # ``duckdb`` module directly.
     standalone = _find_standalone_libduckdb()
     if standalone:
         lib = load_lib_path(standalone)
         if _has_capi_symbols(lib):
+            _require_coordinated_standalone(lib, standalone)
+            _loaded_libduckdb = lib
             return lib
     if platform.system() != "Darwin":
         raise RuntimeError(
@@ -127,4 +196,34 @@ def load_duckdb():
             "Set NUMBDUCK_LIBDUCKDB=/path/to/libduckdb.so"
         )
     downloaded = _download_libduckdb()
-    return load_lib_path(downloaded)
+    lib = load_lib_path(downloaded)
+    _require_coordinated_standalone(lib, downloaded)
+    _loaded_libduckdb = lib
+    return lib
+
+
+def loaded_library_version():
+    """Normalized version of the libduckdb backing numbduck's JIT bindings.
+
+    Returns ``None`` before :func:`load_duckdb` has run or when the version
+    cannot be read.
+    """
+    if _loaded_libduckdb is None:
+        return None
+    return _library_version(_loaded_libduckdb)
+
+
+def libraries_coordinated():
+    """True when numbduck's JIT libduckdb matches the Python ``duckdb`` module.
+
+    Compares the version reported by the libduckdb :func:`load_duckdb` bound
+    into numbduck's bindings against ``duckdb.__version__`` (the wheel that mints
+    the ``Connection*`` pybridge extracts). Only an exact match makes it safe to
+    hand that pointer across the two, mirroring numbox's ``libraries_coordinated``
+    guard. When it returns ``False``, pybridge refuses the extraction rather than
+    dereference a pointer under a possibly-different internal layout.
+    """
+    jit_version = loaded_library_version()
+    if jit_version is None:
+        return False
+    return jit_version == _normalize_version(duckdb.__version__)
