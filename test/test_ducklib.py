@@ -11,7 +11,9 @@ import numpy
 import pytest
 from numba import njit, cfunc, carray
 from numba import types as nb_types
+from numba.core.errors import TypingError
 from numba.experimental import structref
+from numbox.core.bindings.call import _call_lib_func
 from numbox.utils.lowlevel import get_unicode_data_p
 from numbox.utils.meminfo import (
     borrow_structref, export_meminfo, _incref_meminfo,
@@ -1620,6 +1622,54 @@ def test_create_get_varint():
     assert raw[:] == b"\x01\x00"
     ducklib.duckdb_free(result[0])
     aux_destroy_value(val_p)
+
+
+def test_gated_binding_missing_symbol_raises_clear_njit_error():
+    """A version-gated binding whose C symbol is absent from libduckdb raises a
+    clear, named error at @njit typing time, not an opaque numba TypingError.
+
+    The loaded libduckdb here has every gated symbol, so the absent-symbol path
+    is simulated with a lib object that lacks the attribute."""
+
+    class _NoSymLib:
+        pass
+
+    @ducklib._proxy_if_available(
+        _NoSymLib(), ducklib.signatures.get("duckdb_create_varint"),
+        jit_options=ducklib.jit_options)
+    def duckdb_create_varint(val):
+        return _call_lib_func("duckdb_create_varint", (val,))
+
+    @njit
+    def use_gated(x):
+        return duckdb_create_varint(x)
+
+    with pytest.raises(TypingError) as excinfo:
+        use_gated(0)
+    message = str(excinfo.value)
+    assert "duckdb_create_varint" in message
+    assert "not available" in message
+    assert "C symbol missing" in message
+
+
+@pytest.mark.skipif(
+    hasattr(ducklib.duckdb_lib, 'duckdb_create_varint'),
+    reason="duckdb_create_varint present in this libduckdb; absent-symbol path not exercised",
+)
+def test_gated_binding_unavailable_real_name_njit_error():
+    """The actual version-gated ducklib binding, when absent from the loaded
+    libduckdb, raises a clear named error at @njit typing time rather than an
+    opaque numba TypingError."""
+
+    @njit
+    def use_varint(val):
+        return ducklib.duckdb_create_varint(val)
+
+    with pytest.raises(TypingError) as excinfo:
+        use_varint((0, 0, 0))
+    message = str(excinfo.value)
+    assert "duckdb_create_varint" in message
+    assert "not available" in message
 
 
 def test_create_get_bit():

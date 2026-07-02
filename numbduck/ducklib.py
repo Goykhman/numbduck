@@ -1,6 +1,8 @@
 import sys
 
+from numba.core.errors import TypingError
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
+from numba.extending import overload
 from numbox.core.bindings.call import _call_lib_func
 from numbox.core.bindings.signatures import signatures
 from numbox.core.proxy.proxy import proxy, proxy_if_available
@@ -12,6 +14,32 @@ from numbduck.utils import load_duckdb
 duckdb_lib = load_duckdb()
 
 _is_win = sys.platform == 'win32'
+
+
+def _proxy_if_available(lib, sig, jit_options=None):
+    """Like numbox's ``proxy_if_available``, but the absent-symbol stub also
+    raises a clear, named error when referenced from ``@njit`` code.
+
+    numbox's stub raises ``NotImplementedError`` for Python callers only; from
+    ``@njit`` the untyped stub surfaces an opaque numba ``TypingError`` that
+    names neither the binding nor the missing symbol. Registering an
+    ``@overload`` that raises a ``TypingError`` naming the binding and the
+    missing-symbol cause gives JIT callers a clear diagnostic at typing time.
+    """
+    def _(func):
+        binding = proxy_if_available(lib, sig, jit_options=jit_options)(func)
+        if hasattr(lib, func.__name__):
+            return binding
+        name = func.__name__
+
+        @overload(binding)
+        def _unavailable(*args, **kwargs):
+            raise TypingError(
+                f"{name} is not available in the loaded libduckdb "
+                f"(C symbol missing; requires a newer DuckDB version)"
+            )
+        return binding
+    return _
 
 
 duckdb_state_ty = int32
@@ -723,7 +751,7 @@ def duckdb_create_uuid(val):
     return _call_lib_func("duckdb_create_uuid", (val,))
 
 
-@proxy_if_available(duckdb_lib, signatures.get("duckdb_create_varint"), jit_options=jit_options)
+@_proxy_if_available(duckdb_lib, signatures.get("duckdb_create_varint"), jit_options=jit_options)
 def duckdb_create_varint(val):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_create_varint """
     return _call_lib_func("duckdb_create_varint", (val,))
@@ -1048,7 +1076,7 @@ def duckdb_get_uuid(val_p):
     return _call_lib_func("duckdb_get_uuid", (val_p,))
 
 
-@proxy_if_available(duckdb_lib, signatures.get("duckdb_get_varint"), jit_options=jit_options)
+@_proxy_if_available(duckdb_lib, signatures.get("duckdb_get_varint"), jit_options=jit_options)
 def duckdb_get_varint(val_p):
     """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
     return _call_lib_func("duckdb_get_varint", (val_p,))
@@ -1282,7 +1310,7 @@ def duckdb_scalar_function_set_special_handling(scalar_function_p):
     return _call_lib_func("duckdb_scalar_function_set_special_handling", (scalar_function_p,))
 
 
-@proxy_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_init"), jit_options=jit_options)
+@_proxy_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_init"), jit_options=jit_options)
 def duckdb_scalar_function_set_init(scalar_function_p, init_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_init """
     return _call_lib_func("duckdb_scalar_function_set_init", (scalar_function_p, init_p))
