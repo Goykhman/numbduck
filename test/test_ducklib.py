@@ -1065,6 +1065,7 @@ def test_bind_decimal():
     # The stored value is the unscaled integer: 12345 represents 123.45
     stored = (ctypes.c_int64 * 1).from_address(data_p)[0]
     assert stored == 12345
+    aux_destroy_data_chunk(chunk_p)
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
