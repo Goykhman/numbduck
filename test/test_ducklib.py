@@ -1070,6 +1070,30 @@ def test_bind_decimal():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+def test_bind_decimal_wide_upper64():
+    """DECIMAL(38,0) uses INT128 physical storage. Bind a value whose magnitude
+    genuinely needs the upper 64 bits and assert both halves of the stored
+    int128 round-trip (test_bind_decimal only exercises width <= 18, INT64
+    physical, with the upper word always zero)."""
+    lower = 0xFEDCBA9876543210
+    upper = 0x0123456789ABCDEF
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::DECIMAL(38, 0);")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_decimal(stmt[0], 1, (38, 0, lower, upper))
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    halves = (ctypes.c_uint64 * 2).from_address(data_p)
+    assert halves[0] == lower, halves[0]
+    assert halves[1] == upper, halves[1]
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 # --- Result Metadata ---
 
 def test_column_name():
@@ -1944,28 +1968,39 @@ def test_destroy_value():
     aux_destroy_value(val_p)
 
 
-# --- Struct size guard ---
+# --- Struct-by-value ABI round-trip ---
 
 
-def test_struct_size_guard():
-    """Verify the size computation used by _call_lib_func_struct_in/out."""
-    from numba.core.types import UniTuple, Tuple, int32, int64, uint64, uint8
+def test_struct_by_value_abi_roundtrip():
+    """Round-trip a 16-byte and a 24-byte struct through the real create/get
+    wrappers, exercising numbox's <=16-byte by-value vs >16-byte by-pointer
+    struct-ABI classification. Both eightbytes of each struct's 128-bit payload
+    are fully populated, so a dropped or mis-packed upper eightbyte is caught.
+    (The arithmetic-only predecessor asserted sum(bitwidth)/8 over numba type
+    metadata and never called into ducklib, so it could not detect an ABI
+    regression at all.)"""
+    lower = 0xFEDCBA9876543210
+    upper = 0x0123456789ABCDEF
 
-    # 16-byte structs (should pass the ≤16 byte guard)
-    assert sum(t.bitwidth for t in UniTuple(int64, 2)) / 8 == 16
-    assert sum(t.bitwidth for t in UniTuple(uint64, 2)) / 8 == 16
-    assert sum(t.bitwidth for t in Tuple((uint64, int64))) / 8 == 16
+    # duckdb_hugeint = {uint64 lower; int64 upper} is a 16-byte struct passed and
+    # returned by value on SysV x86-64 and AAPCS64.
+    hugeint_p = ducklib.duckdb_create_hugeint((lower, upper))
+    assert hugeint_p != 0
+    hugeint = ducklib.duckdb_get_hugeint(hugeint_p)
+    assert hugeint[0] == lower
+    assert hugeint[1] == upper
+    aux_destroy_value(hugeint_p)
 
-    # 8-byte struct
-    assert sum(t.bitwidth for t in UniTuple(int32, 2)) / 8 == 8
-
-    # Mixed-width tuples
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint64, int64))) / 8 == 18
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 == 19
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 > 16
-
-    # 24-byte struct (should fail the guard)
-    assert sum(t.bitwidth for t in UniTuple(int64, 3)) / 8 == 24
+    # duckdb_decimal is padded to 24 bytes and therefore passed by pointer; a
+    # width > 18 keeps INT128 physical storage so the upper eightbyte is live.
+    decimal_p = ducklib.duckdb_create_decimal((38, 0, lower, upper))
+    assert decimal_p != 0
+    decimal = ducklib.duckdb_get_decimal(decimal_p)
+    assert decimal[0] == 38
+    assert decimal[1] == 0
+    assert decimal[2] == lower
+    assert decimal[3] == upper
+    aux_destroy_value(decimal_p)
 
 
 def test_create_logical_type_integer():
@@ -3790,6 +3825,351 @@ def test_aggregate_function_array_variance():
     free_delta = stats_after.free - stats_before.free
     assert alloc_delta == free_delta, (
         f"leak: alloc={alloc_delta}, free={free_delta}")
+
+
+# --- Multi-chunk and NULL-aware coverage ---
+
+STANDARD_VECTOR_SIZE = 2048
+NULL_SENTINEL = -999
+
+
+@njit
+def _null_to_sentinel_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    validity_p = ducklib.duckdb_vector_get_validity(vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        # A null validity pointer means the vector is all-valid; otherwise bit i
+        # of the mask is the row's validity.
+        valid = validity_p == 0 or ducklib.duckdb_validity_row_is_valid(
+            intp(validity_p), intp(i)) != 0
+        out_arr[i] = in_arr[i] if valid else NULL_SENTINEL
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _null_to_sentinel_cb(info, chunk, output):
+    _null_to_sentinel_impl(info, chunk, output)
+
+
+@njit
+def _null_count_state_size_impl(info):
+    return numpy.uint64(8)
+
+
+@cfunc(nb_types.uint64(nb_types.intp))
+def _null_count_state_size_cb(info):
+    return _null_count_state_size_impl(info)
+
+
+@njit
+def _null_count_init_impl(info, state):
+    carray(_cast_int_to_void_p(state), (1,), dtype=numpy.int64)[0] = 0
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp))
+def _null_count_init_cb(info, state):
+    _null_count_init_impl(info, state)
+
+
+@njit
+def _null_count_update_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    validity_p = ducklib.duckdb_vector_get_validity(vec)
+    state_ptrs = carray(_cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    for i in range(n):
+        valid = validity_p == 0 or ducklib.duckdb_validity_row_is_valid(
+            intp(validity_p), intp(i)) != 0
+        if valid:
+            acc = carray(_cast_int_to_void_p(state_ptrs[i]), (1,), dtype=numpy.int64)
+            acc[0] += 1
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _null_count_update_cb(info, chunk, states):
+    _null_count_update_impl(info, chunk, states)
+
+
+@njit
+def _null_count_combine_impl(info, source, target, count):
+    src_ptrs = carray(_cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_ptrs = carray(_cast_int_to_void_p(target), (count,), dtype=numpy.intp)
+    for i in range(count):
+        src_acc = carray(_cast_int_to_void_p(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
+        tgt_acc = carray(_cast_int_to_void_p(tgt_ptrs[i]), (1,), dtype=numpy.int64)
+        tgt_acc[0] += src_acc
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                     nb_types.intp, nb_types.uint64))
+def _null_count_combine_cb(info, source, target, count):
+    _null_count_combine_impl(info, source, target, count)
+
+
+@njit
+def _null_count_finalize_impl(info, source, result, count, offset):
+    out_data = ducklib.duckdb_vector_get_data(result)
+    src_ptrs = carray(_cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _cast_int_to_void_p(out_data), (offset + count,), dtype=numpy.int64)
+    for i in range(count):
+        acc = carray(_cast_int_to_void_p(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
+        out_vals[offset + i] = acc
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp,
+                     nb_types.uint64, nb_types.uint64))
+def _null_count_finalize_cb(info, source, result, count, offset):
+    _null_count_finalize_impl(info, source, result, count, offset)
+
+
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
+def test_scalar_function_multi_chunk():
+    """Drive a scalar UDF over more than STANDARD_VECTOR_SIZE rows so its
+    callback runs on chunks past the first, then loop duckdb_fetch_chunk to
+    reassemble the multi-chunk result and assert the values straddling the
+    2048-row chunk boundary."""
+    n_rows = 5000
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    # Bind the SQL to a name: get_unicode_data_p borrows the str's data pointer,
+    # so a runtime-built string must outlive the duckdb_query call.
+    create_sql = f"CREATE TABLE t_mc AS SELECT range::INTEGER AS v FROM range({n_rows})"
+    query_p = get_unicode_data_p(create_sql)
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(func_p, get_unicode_data_p("add_one"))
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+    ducklib.duckdb_scalar_function_set_function(func_p, _add_one_cb.address)
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT add_one(v) FROM t_mc ORDER BY v")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    outputs = []
+    chunk_sizes = []
+    while True:
+        chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+        if chunk_p == 0:
+            break
+        size = ducklib.duckdb_data_chunk_get_size(chunk_p)
+        vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+        data_p = ducklib.duckdb_vector_get_data(vec_p)
+        outputs.extend((ctypes.c_int32 * size).from_address(data_p))
+        chunk_sizes.append(size)
+        aux_destroy_data_chunk(chunk_p)
+
+    assert sum(chunk_sizes) == n_rows, chunk_sizes
+    assert len(chunk_sizes) >= 2, "expected a multi-chunk result"
+    assert chunk_sizes[0] == STANDARD_VECTOR_SIZE, chunk_sizes[0]
+    assert outputs == list(range(1, n_rows + 1))
+    # values straddling the first chunk boundary
+    assert outputs[STANDARD_VECTOR_SIZE - 1] == STANDARD_VECTOR_SIZE
+    assert outputs[STANDARD_VECTOR_SIZE] == STANDARD_VECTOR_SIZE + 1
+
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
+def test_aggregate_function_multi_chunk():
+    """Drive a UDAF that produces more than STANDARD_VECTOR_SIZE groups so
+    finalize is called across multiple output chunks, then loop
+    duckdb_fetch_chunk over the grouped result and assert the group sums
+    straddling the 2048-row chunk boundary."""
+    n_groups = 5000
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    # get_unicode_data_p borrows the str's data pointer, so hold the runtime-built
+    # SQL in a name until duckdb_query has read it.
+    create_sql = (
+        "CREATE TABLE t_grp AS SELECT range::INTEGER AS g, "
+        f"range::INTEGER AS v FROM range({n_groups})")
+    query_p = get_unicode_data_p(create_sql)
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(func_p, get_unicode_data_p("mc_sum"))
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    bigint_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, bigint_type_p)
+    for tp in (int_type_p, bigint_type_p):
+        buf = numpy.array([tp], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, _agg_state_size_cb.address, _agg_init_cb.address,
+        _agg_update_cb.address, _agg_combine_cb.address, _agg_finalize_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "SELECT mc_sum(v) FROM t_grp GROUP BY g ORDER BY g")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    sums = []
+    chunk_sizes = []
+    while True:
+        chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+        if chunk_p == 0:
+            break
+        size = ducklib.duckdb_data_chunk_get_size(chunk_p)
+        vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+        data_p = ducklib.duckdb_vector_get_data(vec_p)
+        sums.extend((ctypes.c_int64 * size).from_address(data_p))
+        chunk_sizes.append(size)
+        aux_destroy_data_chunk(chunk_p)
+
+    assert sum(chunk_sizes) == n_groups, chunk_sizes
+    assert len(chunk_sizes) >= 2, "expected a multi-chunk result"
+    assert chunk_sizes[0] == STANDARD_VECTOR_SIZE, chunk_sizes[0]
+    # each singleton group g has my_sum(v) == g
+    assert sums == list(range(n_groups))
+    assert sums[STANDARD_VECTOR_SIZE - 1] == STANDARD_VECTOR_SIZE - 1
+    assert sums[STANDARD_VECTOR_SIZE] == STANDARD_VECTOR_SIZE
+
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
+def test_scalar_function_null_aware():
+    """A scalar UDF over a NULL-containing column. Special handling passes the
+    NULL rows to the callback, which reads duckdb_vector_get_validity and maps
+    them to a sentinel; a validity-blind callback would return the NULL rows'
+    (arbitrary) storage instead."""
+    inputs = [1, None, 3, None, 5]
+    expected = sorted(NULL_SENTINEL if x is None else x for x in inputs)
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t_null AS SELECT * FROM "
+        "(VALUES (1),(NULL),(3),(NULL),(5)) AS t(v)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("null_to_sentinel"))
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_special_handling(func_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+    ducklib.duckdb_scalar_function_set_function(func_p, _null_to_sentinel_cb.address)
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT null_to_sentinel(v) FROM t_null")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    size = ducklib.duckdb_data_chunk_get_size(chunk_p)
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    outputs = sorted((ctypes.c_int32 * size).from_address(data_p))
+    assert outputs == expected, f"got {outputs}, expected {expected}"
+
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
+def test_aggregate_function_null_aware():
+    """A UDAF over a NULL-containing column. Special handling passes the NULL
+    rows to update, which reads duckdb_vector_get_validity and counts only the
+    valid rows; the result matches DuckDB's NULL-ignoring count(v), whereas a
+    validity-blind update would instead count every row (count(*))."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t_nullagg AS SELECT * FROM "
+        "(VALUES (1),(NULL),(3),(NULL),(5)) AS t(v)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(
+        func_p, get_unicode_data_p("null_count"))
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    bigint_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, bigint_type_p)
+    ducklib.duckdb_aggregate_function_set_special_handling(func_p)
+    for tp in (int_type_p, bigint_type_p):
+        buf = numpy.array([tp], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, _null_count_state_size_cb.address, _null_count_init_cb.address,
+        _null_count_update_cb.address, _null_count_combine_cb.address,
+        _null_count_finalize_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "SELECT null_count(v), count(v), count(*) FROM t_nullagg")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    d0 = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 0))
+    d1 = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 1))
+    d2 = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 2))
+    null_count = (ctypes.c_int64 * 1).from_address(d0)[0]
+    builtin_count_v = (ctypes.c_int64 * 1).from_address(d1)[0]
+    count_star = (ctypes.c_int64 * 1).from_address(d2)[0]
+    assert null_count == 3, null_count
+    assert null_count == builtin_count_v
+    assert count_star == 5
+    assert null_count != count_star
+
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
 
 
 def test_load_duckdb_refuses_version_mismatch(monkeypatch):
