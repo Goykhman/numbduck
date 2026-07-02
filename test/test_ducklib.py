@@ -1,4 +1,5 @@
 import ctypes
+import hashlib
 import math
 import os
 import subprocess
@@ -3671,3 +3672,67 @@ def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
             pybridge.extract_connection_ptr(conn)
     finally:
         conn.close()
+
+
+def test_verify_cached_dylib_roundtrip(monkeypatch, tmp_path):
+    """A cached dylib matching its sidecar passes; a missing sidecar is refused."""
+    from numbduck import utils
+
+    cached = tmp_path / "libduckdb.dylib"
+    sidecar = tmp_path / "libduckdb.dylib.sha256"
+    cached.write_bytes(b"trusted-bytes")
+    sidecar.write_text(hashlib.sha256(b"trusted-bytes").hexdigest())
+
+    monkeypatch.setattr(utils, "_LIBDUCKDB_SIDECAR", str(sidecar))
+    monkeypatch.setattr(utils, "_LIBDUCKDB_CACHE_DIR", str(tmp_path))
+
+    utils._verify_cached_dylib(str(cached))  # matches -> no raise
+
+    sidecar.unlink()
+    with pytest.raises(RuntimeError, match="integrity sidecar"):
+        utils._verify_cached_dylib(str(cached))
+
+
+def test_load_duckdb_rejects_tampered_cache(monkeypatch, tmp_path):
+    """A cached standalone libduckdb whose bytes no longer match its sidecar is
+    refused before it is dlopen'd, simulating local cache poisoning. No network.
+    """
+    from numbduck import utils
+
+    cached = tmp_path / "libduckdb.dylib"
+    sidecar = tmp_path / "libduckdb.dylib.sha256"
+    cached.write_bytes(b"trusted-bytes")
+    sidecar.write_text(hashlib.sha256(b"trusted-bytes").hexdigest())
+    # Poison the cached file without updating the sidecar.
+    cached.write_bytes(b"attacker-controlled-native-code")
+
+    monkeypatch.setattr(utils, "_LIBDUCKDB_CACHED_DYLIB", str(cached))
+    monkeypatch.setattr(utils, "_LIBDUCKDB_SIDECAR", str(sidecar))
+    monkeypatch.setattr(utils, "_LIBDUCKDB_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
+    monkeypatch.setattr(utils, "load_lib_path", lambda path: object())
+    # Force the standalone fallback and steer it at the poisoned cache path.
+    monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: False)
+    monkeypatch.setattr(utils, "_find_standalone_libduckdb", lambda: str(cached))
+
+    with pytest.raises(RuntimeError, match="integrity check"):
+        utils.load_duckdb()
+
+
+def test_download_refuses_unpinned_version_without_override(monkeypatch):
+    """A download for a version with neither a pinned digest nor an explicit
+    NUMBDUCK_LIBDUCKDB_SHA256 override is refused before any network access.
+    """
+    from numbduck import utils
+
+    monkeypatch.setattr(duckdb, "__version__", "9.9.9")
+    monkeypatch.delenv("NUMBDUCK_LIBDUCKDB_SHA256", raising=False)
+    monkeypatch.setenv("NUMBDUCK_LIBDUCKDB_DOWNLOAD", "1")
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("network access attempted")
+
+    monkeypatch.setattr("urllib.request.urlopen", _no_network)
+
+    with pytest.raises(RuntimeError, match="NUMBDUCK_LIBDUCKDB_SHA256"):
+        utils._download_libduckdb()
