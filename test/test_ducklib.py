@@ -4499,7 +4499,6 @@ def test_verify_cached_dylib_roundtrip(monkeypatch, tmp_path):
     cached.write_bytes(b"trusted-bytes")
     sidecar.write_text(hashlib.sha256(b"trusted-bytes").hexdigest())
 
-    monkeypatch.setattr(utils, "_LIBDUCKDB_SIDECAR", str(sidecar))
     monkeypatch.setattr(utils, "_LIBDUCKDB_CACHE_DIR", str(tmp_path))
 
     utils._verify_cached_dylib(str(cached))  # matches -> no raise
@@ -4523,7 +4522,6 @@ def test_load_duckdb_rejects_tampered_cache(monkeypatch, tmp_path):
     cached.write_bytes(b"attacker-controlled-native-code")
 
     monkeypatch.setattr(utils, "_LIBDUCKDB_CACHED_DYLIB", str(cached))
-    monkeypatch.setattr(utils, "_LIBDUCKDB_SIDECAR", str(sidecar))
     monkeypatch.setattr(utils, "_LIBDUCKDB_CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
     monkeypatch.setattr(utils, "load_lib_path", lambda path: object())

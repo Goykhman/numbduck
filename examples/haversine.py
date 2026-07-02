@@ -136,6 +136,16 @@ def _haversine_chunk_impl(info, chunk, output):
             s_dp = math.sin(dp / 2.0)
             s_dl = math.sin(dl / 2.0)
             a = s_dp * s_dp + math.cos(p1) * math.cos(p2) * s_dl * s_dl
+            # Rounding can nudge a a hair past 1.0 (or below 0.0); inside @njit
+            # asin/sqrt don't raise on an out-of-domain value, they return NaN, so
+            # a near-1.0 row would silently come back NaN. Clamp with comparisons
+            # rather than min/max so a genuine NaN a (an Inf/NaN input coordinate,
+            # which min/max would pin to 1.0 and a bogus max distance) still falls
+            # through to the NaN sentinel this callback emits for invalid rows.
+            if a > 1.0:
+                a = 1.0
+            elif a < 0.0:
+                a = 0.0
             a_out[i] = 2.0 * R * math.asin(math.sqrt(a))
     except Exception:
         for i in range(n):

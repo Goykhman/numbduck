@@ -32,7 +32,6 @@ _LIBDUCKDB_DYLIB_NAME = "libduckdb.dylib"
 # the SHA-256 of exactly those bytes so a cache poisoned between runs is caught
 # before the dylib is dlopen'd.
 _LIBDUCKDB_CACHED_DYLIB = os.path.join(_LIBDUCKDB_CACHE_DIR, _LIBDUCKDB_DYLIB_NAME)
-_LIBDUCKDB_SIDECAR = _LIBDUCKDB_CACHED_DYLIB + ".sha256"
 
 # Bounded so a hung or trickling endpoint fails fast instead of wedging import.
 _LIBDUCKDB_DOWNLOAD_TIMEOUT = 60
@@ -183,15 +182,16 @@ def _verify_cached_dylib(path):
     it is out of scope for this threat model. The download-time pinned-ZIP digest
     is the layer that resists a compromised or corrupted upstream asset.
     """
+    sidecar = path + ".sha256"
     try:
-        with open(_LIBDUCKDB_SIDECAR) as fh:
+        with open(sidecar) as fh:
             expected = fh.read().strip()
     except OSError:
         expected = None
     if not expected:
         raise RuntimeError(
             f"numbduck's cached libduckdb at {path!r} has no integrity sidecar "
-            f"({_LIBDUCKDB_SIDECAR!r}); refusing to load it. Delete "
+            f"({sidecar!r}); refusing to load it. Delete "
             f"{_LIBDUCKDB_CACHE_DIR!r} to re-download, or set NUMBDUCK_LIBDUCKDB "
             f"to a trusted libduckdb.dylib."
         )
@@ -286,13 +286,31 @@ def _fetch_and_cache(url, dest, expected_sha):
     # exist_ok skips the mode above when the dir already exists under a looser
     # umask, so tighten it explicitly to close the local-poisoning window.
     os.chmod(cache_dir, 0o700)
-    with open(dest, "wb") as dst:
-        dst.write(member)
-    os.chmod(dest, 0o600)
+    # Stage into temp files in the same dir and os.replace() into place so we
+    # never rewrite a libduckdb.dylib another process may already have mapped
+    # (an in-place rewrite can corrupt that live mapping); a same-dir rename is
+    # atomic. Put the sidecar in place first so that once the dylib appears, its
+    # integrity sidecar is already paired with it.
+    digest = hashlib.sha256(member).hexdigest()
     sidecar = dest + ".sha256"
-    with open(sidecar, "w") as fh:
-        fh.write(hashlib.sha256(member).hexdigest())
-    os.chmod(sidecar, 0o600)
+    tmp_dest = dest + ".tmp"
+    tmp_sidecar = sidecar + ".tmp"
+    try:
+        with open(tmp_dest, "wb") as dst:
+            dst.write(member)
+        os.chmod(tmp_dest, 0o600)
+        with open(tmp_sidecar, "w") as fh:
+            fh.write(digest)
+        os.chmod(tmp_sidecar, 0o600)
+        os.replace(tmp_sidecar, sidecar)
+        os.replace(tmp_dest, dest)
+    except OSError:
+        for tmp in (tmp_dest, tmp_sidecar):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
     return dest
 
 
