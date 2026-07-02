@@ -19,6 +19,7 @@ from numbox.utils.meminfo import (
 from numba.core.types import intp
 
 from numbduck import ducklib
+from numbduck.configurations import get_jit_options
 from numbduck.duckdb_utils import (
     create_duckdb_connection, create_duckdb_data_chunk,
     create_duckdb_database, create_duckdb_prepared_statement,
@@ -1053,6 +1054,24 @@ def test_fetch_chunk_byval_roundtrip_low_opt():
     )
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     assert "BYVAL_ROUNDTRIP_OK" in proc.stdout, proc.stdout
+
+
+def test_get_jit_options_rejects_non_object(monkeypatch):
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '["cache"]')
+    with pytest.raises(ValueError, match="NUMBDUCK_JIT_OPTIONS"):
+        get_jit_options()
+
+
+def test_get_jit_options_rejects_unknown_key(monkeypatch):
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": true, "foobar": 1}')
+    with pytest.raises(ValueError, match="NUMBDUCK_JIT_OPTIONS") as exc_info:
+        get_jit_options()
+    assert "foobar" in str(exc_info.value)
+
+
+def test_get_jit_options_accepts_valid_object(monkeypatch):
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": false, "_dbg_optnone": true}')
+    assert get_jit_options() == {"cache": False, "_dbg_optnone": True}
 
 
 # --- JIT Tests ---
