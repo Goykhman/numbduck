@@ -114,13 +114,24 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
     for i in range(n):
         t0 = monotonic_ns()
 
-        ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(1), ids[i])
-        ducklib.duckdb_execute_prepared(stmt_p, result_p)
+        bind_rc = ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(1), ids[i])
+        exec_rc = ducklib.duckdb_execute_prepared(stmt_p, result_p)
+        if bind_rc != ducklib.DuckDBSuccess or exec_rc != ducklib.DuckDBSuccess:
+            ducklib.duckdb_destroy_result(result_p)
+            raise RuntimeError("bind/execute failed in scoring loop")
         result_tup = (
             result_buf[0], result_buf[1], result_buf[2],
             result_buf[3], result_buf[4], result_buf[5],
         )
         chunk_p = ducklib.duckdb_fetch_chunk(result_tup)
+        # This point lookup matches exactly one row; a NULL (0) or empty chunk
+        # means a missed key. Guard before dereferencing so a bad key raises
+        # instead of segfaulting on a NULL chunk inside the nogil loop.
+        if chunk_p == 0 or ducklib.duckdb_data_chunk_get_size(chunk_p) == 0:
+            chunk_buf[0] = chunk_p
+            ducklib.duckdb_destroy_data_chunk(chunk_pp)
+            ducklib.duckdb_destroy_result(result_p)
+            raise RuntimeError("no matching feature row in scoring loop")
 
         v0 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
         v1 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 1)
@@ -152,13 +163,18 @@ def score_jit(conn, ids, x):
     conn_ptr = extract_connection_ptr(conn)
     stmt = create_duckdb_prepared_statement()
     sql = "SELECT w0, w1, w2, w3 FROM features WHERE id = $1"
-    rc = ducklib.duckdb_prepare(conn_ptr, get_unicode_data_p(sql), stmt.ctypes.data)
-    assert rc == ducklib.DuckDBSuccess
     n = len(ids)
     scores = numpy.empty(n, dtype=numpy.float64)
     latencies = numpy.empty(n, dtype=numpy.int64)
-    _score_jit_loop(int(stmt[0]), ids, x, scores, latencies)
-    ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
+    # duckdb_prepare allocates a statement object even when the prepare fails
+    # (it owns the error message), so it must always be destroyed — hence the
+    # try/finally, which also covers any exception raised inside the loop.
+    try:
+        rc = ducklib.duckdb_prepare(conn_ptr, get_unicode_data_p(sql), stmt.ctypes.data)
+        assert rc == ducklib.DuckDBSuccess
+        _score_jit_loop(int(stmt[0]), ids, x, scores, latencies)
+    finally:
+        ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
     return scores, latencies
 
 

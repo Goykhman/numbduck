@@ -132,9 +132,11 @@ def register_jit_udf(conn):
     ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
     ducklib.duckdb_scalar_function_set_function(func_p, _haversine_chunk_cb.address)
     rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
-    assert rc == ducklib.DuckDBSuccess
+    # Registration never takes ownership of func_p, so destroy it on both the
+    # success and failure paths — i.e. before asserting on the return code.
     func_buf = numpy.array([func_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
 
 
 def setup_data(conn, n):
