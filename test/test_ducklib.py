@@ -4256,7 +4256,8 @@ def test_aggregate_function_multi_chunk():
     """Drive a UDAF that produces more than STANDARD_VECTOR_SIZE groups so
     finalize is called across multiple output chunks, then loop
     duckdb_fetch_chunk over the grouped result and assert the group sums
-    straddling the 2048-row chunk boundary."""
+    across the chunk boundaries (grouped output is not guaranteed to fill
+    chunks to STANDARD_VECTOR_SIZE; duckdb 1.3.2 emits 1295-row chunks)."""
     n_groups = 5000
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
@@ -4310,7 +4311,7 @@ def test_aggregate_function_multi_chunk():
 
     assert sum(chunk_sizes) == n_groups, chunk_sizes
     assert len(chunk_sizes) >= 2, "expected a multi-chunk result"
-    assert chunk_sizes[0] == STANDARD_VECTOR_SIZE, chunk_sizes[0]
+    assert all(s <= STANDARD_VECTOR_SIZE for s in chunk_sizes), chunk_sizes
     # each singleton group g has my_sum(v) == g
     assert sums == list(range(n_groups))
     assert sums[STANDARD_VECTOR_SIZE - 1] == STANDARD_VECTOR_SIZE - 1
