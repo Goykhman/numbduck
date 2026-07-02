@@ -1,5 +1,8 @@
 import ctypes
 import math
+import os
+import subprocess
+import sys
 
 import duckdb
 import numpy
@@ -988,6 +991,68 @@ def test_result_statement_type():
     assert stmt_type == 1, f"Expected SELECT (1), got {stmt_type}"
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
+
+
+_BYVAL_ROUNDTRIP_SCRIPT = """
+import ctypes
+
+import numbduck.ducklib as ducklib
+from numbduck.duckdb_utils import (
+    create_duckdb_connection, create_duckdb_database, create_duckdb_result,
+)
+from numbox.utils.lowlevel import get_unicode_data_p
+
+db = create_duckdb_database()
+assert ducklib.duckdb_open(0, db.ctypes.data) == ducklib.DuckDBSuccess
+conn = create_duckdb_connection()
+assert ducklib.duckdb_connect(db[0], conn.ctypes.data) == ducklib.DuckDBSuccess
+conn_p = conn[0]
+
+
+def run(sql):
+    return ducklib.duckdb_query(conn_p, get_unicode_data_p(sql), 0)
+
+
+assert run("CREATE TABLE t (i INTEGER);") == ducklib.DuckDBSuccess
+assert run("INSERT INTO t VALUES (3), (5), (7);") == ducklib.DuckDBSuccess
+
+result = create_duckdb_result()
+rc = ducklib.duckdb_query(
+    conn_p, get_unicode_data_p("SELECT i FROM t ORDER BY i;"), result.ctypes.data)
+assert rc == ducklib.DuckDBSuccess
+result_tup = tuple(result)
+
+assert ducklib.duckdb_result_return_type(result_tup) == 3
+assert ducklib.duckdb_result_statement_type(result_tup) == 1
+
+chunk_p = ducklib.duckdb_fetch_chunk(result_tup)
+assert chunk_p != 0
+assert ducklib.duckdb_data_chunk_get_size(chunk_p) == 3
+vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+data_p = ducklib.duckdb_vector_get_data(vec_p)
+arr = (ctypes.c_int32 * 3).from_address(data_p)
+assert list(arr) == [3, 5, 7], list(arr)
+print("BYVAL_ROUNDTRIP_OK")
+"""
+
+
+def test_fetch_chunk_byval_roundtrip_low_opt():
+    """Exercise the by-value duckdb_result path (duckdb_fetch_chunk,
+    duckdb_result_return_type, duckdb_result_statement_type) with the numba
+    optimizer disabled, so the >16-byte struct argument is marshalled the
+    ABI-correct way (byval stack copy on SysV x86-64) rather than relying on
+    the optimized stack layout happening to place the value where the callee
+    reads it. Runs in a subprocess because NUMBDUCK_JIT_OPTIONS is read once,
+    at ducklib import time, to build every wrapper's jit_options.
+    """
+    env = dict(os.environ)
+    env["NUMBDUCK_JIT_OPTIONS"] = '{"cache": false, "_dbg_optnone": true}'
+    proc = subprocess.run(
+        [sys.executable, "-c", _BYVAL_ROUNDTRIP_SCRIPT],
+        env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "BYVAL_ROUNDTRIP_OK" in proc.stdout, proc.stdout
 
 
 # --- JIT Tests ---
