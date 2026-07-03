@@ -206,8 +206,7 @@ def run_latency_block(conn, ids, x):
 
 
 def run_scaling_block(conn_factory, ids, x):
-    """For T in thread_counts: launch T workers each scoring n/T events.
-    Each worker uses its own connection. Returns dict {variant: {T: total_wall}}."""
+    """Each worker uses its own connection. Returns dict {variant: {T: total_wall}}."""
     n = len(ids)
     out = {"python": {}, "jit": {}}
     if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":

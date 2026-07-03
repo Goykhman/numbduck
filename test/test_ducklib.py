@@ -473,7 +473,6 @@ def aux_execute_prepared(stmt_p):
 
 
 def aux_read_column_data(chunk_p, col_idx):
-    """Return the raw data pointer for a column in a chunk."""
     vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, col_idx)
     return ducklib.duckdb_vector_get_data(vec_p)
 

@@ -786,8 +786,7 @@ def duckdb_decimal_width(type_p):
 
 @proxy(signatures.get("duckdb_destroy_data_chunk"), jit_options=jit_options)
 def duckdb_destroy_data_chunk(data_chunk_pp):
-    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_data_chunk
-    todo: need to access pp """
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_data_chunk """
     return _call_lib_func("duckdb_destroy_data_chunk", (data_chunk_pp,))
 
 

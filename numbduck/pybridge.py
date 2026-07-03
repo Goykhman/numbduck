@@ -25,23 +25,12 @@ DUCKDBPY_CONNECTION_OFFSET = 32
 def extract_connection_ptr(conn):
     """Extract the raw C API ``Connection*`` from a Python duckdb connection.
 
-    Uses ctypes to read the pybind11 instance layout of
-    ``DuckDBPyConnection``:
-
-    1. ``id(conn) + PYBIND11_HELD_OBJECT_OFFSET`` — reads a ``c_void_p``; this is
-       the ``DuckDBPyConnection*`` (the C++ object managed by pybind11).
-    2. ``DuckDBPyConnection* + DUCKDBPY_CONNECTION_OFFSET`` — reads a
-       ``c_void_p``; this is the ``Connection*`` (``duckdb_connection`` in the C
-       API).
-
-    See the module-level ``PYBIND11_HELD_OBJECT_OFFSET`` /
-    ``DUCKDBPY_CONNECTION_OFFSET`` constants for the derivation of each offset.
-    The ``DUCKDBPY_CONNECTION_OFFSET`` (32) inside ``DuckDBPyConnection`` is
-    derived from the struct layout::
-
-        [0]  enable_shared_from_this weak_ptr  — 16 bytes
-        [16] shared_ptr<DuckDB> database       — 16 bytes
-        [32] unique_ptr<Connection> connection — pointer we want
+    Walks the pybind11 instance layout via two chained ``c_void_p.from_address``
+    reads — first to the held ``DuckDBPyConnection*``, then to its
+    ``unique_ptr<Connection>`` field, yielding the ``Connection*``
+    (``duckdb_connection`` in the C API) — using the module-level
+    ``PYBIND11_HELD_OBJECT_OFFSET`` / ``DUCKDBPY_CONNECTION_OFFSET`` constants
+    (see those for the offset derivations).
 
     Before the pointer is walked, :func:`~numbduck.utils.libraries_coordinated`
     checks that the libduckdb backing numbduck's JIT bindings is the same version
