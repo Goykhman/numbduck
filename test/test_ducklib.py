@@ -1214,6 +1214,12 @@ vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
 data_p = ducklib.duckdb_vector_get_data(vec_p)
 arr = (ctypes.c_int32 * 3).from_address(data_p)
 assert list(arr) == [3, 5, 7], list(arr)
+
+chunk_buf = (ctypes.c_int64 * 1)(chunk_p)
+ducklib.duckdb_destroy_data_chunk(ctypes.addressof(chunk_buf))
+ducklib.duckdb_destroy_result(result.ctypes.data)
+ducklib.duckdb_disconnect(conn.ctypes.data)
+ducklib.duckdb_close(db.ctypes.data)
 print("BYVAL_ROUNDTRIP_OK")
 """
 

@@ -1,32 +1,18 @@
 import json
 import os
 
+from numba.core.options import DefaultOptions
 
-# njit's accepted compilation options: the numba CPU target-options mixin
-# (numba.core.cpu.CPUTargetOptions) plus the dispatcher-level ``cache`` flag
+
+# njit's accepted compilation options. Take the target-level options straight
+# from numba (``DefaultOptions`` carries one attribute per njit option) so this
+# stays in sync automatically, and add the dispatcher-level ``cache`` flag
 # handled by numba.core.decorators.jit. Any other key reaches njit as an
 # unrecognized kwarg and aborts ducklib import with a numba error that never
 # names the env var, so unknown keys are rejected here instead.
-_ALLOWED_JIT_OPTIONS = frozenset({
-    "cache",
-    "nopython",
-    "forceobj",
-    "looplift",
-    "_nrt",
-    "debug",
-    "boundscheck",
-    "nogil",
-    "no_rewrites",
-    "no_cpython_wrapper",
-    "no_cfunc_wrapper",
-    "parallel",
-    "fastmath",
-    "error_model",
-    "inline",
-    "forceinline",
-    "_dbg_extend_lifetimes",
-    "_dbg_optnone",
-})
+_ALLOWED_JIT_OPTIONS = frozenset(
+    name for name in vars(DefaultOptions) if not name.startswith("__")
+) | {"cache"}
 
 
 def get_jit_options():
