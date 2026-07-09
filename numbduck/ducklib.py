@@ -1,7 +1,7 @@
 import sys
 
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
-from numbox.core.bindings.call import _call_lib_func, _call_lib_func_byval
+from numbox.core.bindings.call import _call_lib_func
 from numbox.core.bindings.signatures import signatures
 from numbox.core.proxy.proxy import proxy, proxy_if_available
 
@@ -103,7 +103,7 @@ signatures["duckdb_bind_value"] = duckdb_state_ty(intp, uint64, intp)
 signatures["duckdb_bind_varchar"] = duckdb_state_ty(intp, uint64, intp)
 signatures["duckdb_bind_varchar_length"] = duckdb_state_ty(intp, uint64, intp, uint64)
 signatures["duckdb_close"] = void(intp)
-signatures["duckdb_column_count"] = intp(intp)
+signatures["duckdb_column_count"] = uint64(intp)
 signatures["duckdb_column_logical_type"] = intp(intp, uint64)
 signatures["duckdb_column_name"] = intp(intp, uint64)
 signatures["duckdb_column_type"] = int32(intp, uint64)
@@ -153,9 +153,9 @@ signatures["duckdb_create_uuid"] = intp(duckdb_uhugeint_ty)
 signatures["duckdb_create_varint"] = intp(duckdb_varint_ty)
 signatures["duckdb_create_varchar"] = intp(intp)
 signatures["duckdb_create_varchar_length"] = intp(intp, uint64)
-signatures["duckdb_data_chunk_get_column_count"] = intp(intp)
-signatures["duckdb_data_chunk_get_size"] = intp(intp)
-signatures["duckdb_data_chunk_get_vector"] = intp(intp, intp)
+signatures["duckdb_data_chunk_get_column_count"] = uint64(intp)
+signatures["duckdb_data_chunk_get_size"] = uint64(intp)
+signatures["duckdb_data_chunk_get_vector"] = intp(intp, uint64)
 signatures["duckdb_decimal_internal_type"] = int32(intp)
 signatures["duckdb_decimal_scale"] = uint8(intp)
 signatures["duckdb_decimal_width"] = uint8(intp)
@@ -223,7 +223,7 @@ signatures["duckdb_result_error"] = intp(intp)
 signatures["duckdb_result_error_type"] = int32(intp)
 signatures["duckdb_result_return_type"] = int32(duckdb_result_ty)
 signatures["duckdb_result_statement_type"] = int32(duckdb_result_ty)
-signatures["duckdb_row_count"] = intp(intp)
+signatures["duckdb_row_count"] = uint64(intp)
 signatures["duckdb_rows_changed"] = uint64(intp)
 signatures["duckdb_struct_type_child_count"] = uint64(intp)
 signatures["duckdb_struct_type_child_name"] = intp(intp, uint64)
@@ -231,10 +231,10 @@ signatures["duckdb_struct_type_child_type"] = intp(intp, uint64)
 signatures["duckdb_union_type_member_count"] = uint64(intp)
 signatures["duckdb_union_type_member_name"] = intp(intp, uint64)
 signatures["duckdb_union_type_member_type"] = intp(intp, uint64)
-signatures["duckdb_validity_row_is_valid"] = int8(intp, intp)
+signatures["duckdb_validity_row_is_valid"] = int8(intp, uint64)
 signatures["duckdb_value_to_string"] = intp(intp)
 signatures["duckdb_vector_get_data"] = intp(intp)
-signatures["duckdb_vector_get_validity"] = uint64(intp)
+signatures["duckdb_vector_get_validity"] = intp(intp)
 
 signatures["duckdb_create_scalar_function"] = intp()
 signatures["duckdb_destroy_scalar_function"] = void(intp)
@@ -943,7 +943,7 @@ def duckdb_is_null_value(value_p):
 @proxy(signatures.get("duckdb_fetch_chunk"), jit_options=jit_options)
 def duckdb_fetch_chunk(duckdb_result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_fetch_chunk """
-    return _call_lib_func_byval("duckdb_fetch_chunk", duckdb_result)
+    return _call_lib_func("duckdb_fetch_chunk", (duckdb_result,))
 
 
 @proxy(signatures.get("duckdb_free"), jit_options=jit_options)
@@ -1129,13 +1129,13 @@ def duckdb_result_error_type(duckdb_result_p):
 @proxy(signatures.get("duckdb_result_return_type"), jit_options=jit_options)
 def duckdb_result_return_type(result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_return_type """
-    return _call_lib_func_byval("duckdb_result_return_type", result)
+    return _call_lib_func("duckdb_result_return_type", (result,))
 
 
 @proxy(signatures.get("duckdb_result_statement_type"), jit_options=jit_options)
 def duckdb_result_statement_type(result):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_statement_type """
-    return _call_lib_func_byval("duckdb_result_statement_type", result)
+    return _call_lib_func("duckdb_result_statement_type", (result,))
 
 
 @proxy(signatures.get("duckdb_row_count"), jit_options=jit_options)

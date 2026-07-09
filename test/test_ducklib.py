@@ -1,5 +1,9 @@
 import ctypes
+import functools
 import math
+import os
+import subprocess
+import sys
 
 import duckdb
 import numpy
@@ -13,9 +17,8 @@ from numbox.utils.meminfo import (
     release_meminfo, structref_meminfo
 )
 
-from numba.core.types import intp
-
 from numbduck import ducklib
+from numbduck.configurations import get_jit_options
 from numbduck.duckdb_utils import (
     create_duckdb_connection, create_duckdb_data_chunk,
     create_duckdb_database, create_duckdb_prepared_statement,
@@ -23,6 +26,106 @@ from numbduck.duckdb_utils import (
 )
 from numbox.utils.lowlevel import _cast_int_to_void_p
 from numbox.utils.lowlevel import array_data_p
+
+
+class _HandleFamily:
+    """One DuckDB C-handle lifetime family: the binding calls that acquire a
+    handle (each paired with a predicate that says whether a given call actually
+    produced one) and the calls that release it."""
+
+    def __init__(self, name, acquires, releases):
+        self.name = name
+        self.acquires = acquires
+        self.releases = releases
+
+
+def _acquired_by_return(args, result):
+    return result != 0
+
+
+def _acquired_by_last_arg(args, result):
+    # duckdb_query only allocates a result when a non-null out pointer is passed.
+    return args[-1] != 0
+
+
+RESULT_FAMILY = _HandleFamily(
+    "result",
+    {"duckdb_query": _acquired_by_last_arg},
+    ("duckdb_destroy_result",),
+)
+CHUNK_FAMILY = _HandleFamily(
+    "data_chunk",
+    {"duckdb_fetch_chunk": _acquired_by_return},
+    ("duckdb_destroy_data_chunk",),
+)
+VALUE_FAMILY = _HandleFamily(
+    "value",
+    {name: _acquired_by_return for name in (
+        "duckdb_create_int64", "duckdb_create_bool", "duckdb_create_double"
+    )},
+    ("duckdb_destroy_value",),
+)
+LOGICAL_TYPE_FAMILY = _HandleFamily(
+    "logical_type",
+    {"duckdb_create_logical_type": _acquired_by_return},
+    ("duckdb_destroy_logical_type",),
+)
+
+
+class handle_balance:
+    """Count paired acquire/release calls on the DuckDB bindings and assert the
+    two match on exit. DuckDB's C API exposes no allocator-stats accessor, so a
+    missing destroy or a double free surfaces here as a per-family imbalance in
+    the wrapped call counts. Every patched binding is restored before the balance
+    is checked, so a failing assertion never leaves the module monkeypatched."""
+
+    def __init__(self, *families):
+        self._families = families
+        self._saved = {}
+        self._counts = {}
+
+    def __enter__(self):
+        for family in self._families:
+            self._counts[family.name] = [0, 0]
+            for name, predicate in family.acquires.items():
+                self._wrap(name, family.name, 0, predicate)
+            for name in family.releases:
+                self._wrap(name, family.name, 1, None)
+        return self
+
+    def _wrap(self, name, family_name, slot, predicate):
+        original = getattr(ducklib, name)
+        self._saved[name] = original
+        counts = self._counts[family_name]
+
+        def wrapper(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if predicate is None or predicate(args, result):
+                counts[slot] += 1
+            return result
+
+        setattr(ducklib, name, wrapper)
+
+    def __exit__(self, exc_type, exc, tb):
+        for name, original in self._saved.items():
+            setattr(ducklib, name, original)
+        if exc_type is not None:
+            return False
+        for name, (acquired, released) in self._counts.items():
+            assert acquired == released, \
+                f"{name} handle imbalance: {acquired} acquired, {released} released"
+        return False
+
+
+def balanced(*families):
+    """Run the decorated test under a handle_balance harness over the given families."""
+    def decorate(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with handle_balance(*families):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorate
 
 
 def aux_open_database(db_name_p_):
@@ -67,6 +170,14 @@ def aux_connect_db():
 def aux_close_db(duckdb_database, duckdb_connection):
     ducklib.duckdb_disconnect(duckdb_connection.ctypes.data)
     ducklib.duckdb_close(duckdb_database.ctypes.data)
+
+
+def aux_destroy_data_chunk(chunk_p):
+    """Destroy a data chunk fetched via duckdb_fetch_chunk by passing the buffer
+    address (pointer-to-handle) to duckdb_destroy_data_chunk."""
+    buf = numpy.zeros(1, dtype=numpy.intp)
+    buf[0] = chunk_p
+    ducklib.duckdb_destroy_data_chunk(buf.ctypes.data)
 
 
 def test_connect():
@@ -129,11 +240,13 @@ def aux_query_1():
     return out_result, duckdb_database, duckdb_connection
 
 
+@balanced(RESULT_FAMILY)
 def test_query():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     print(f"out_result = {out_result}")
     num_of_columns = out_result[0]
     assert num_of_columns == 2, f"expected 'i', 'j', got {num_of_columns} columns"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
@@ -150,6 +263,7 @@ def test_query_invalid_sql():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY)
 def test_duckdb_column_count_and_duckdb_row_count():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     out_result_p = out_result.ctypes.data
@@ -157,9 +271,11 @@ def test_duckdb_column_count_and_duckdb_row_count():
     num_of_rows = ducklib.duckdb_row_count(out_result_p)
     assert num_of_cols == 2, num_of_cols
     assert num_of_rows == 3, num_of_rows
+    ducklib.duckdb_destroy_result(out_result_p)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY)
 def test_duckdb_destroy_result():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     out_result_p = out_result.ctypes.data
@@ -179,25 +295,32 @@ def aux_get_data_vector():
     i_vec_data_p = ducklib.duckdb_vector_get_data(i_vec_p)
     i_arr = arr_ty.from_address(i_vec_data_p)
     assert all([i_arr_ == i_col_ for i_arr_, i_col_ in zip(i_arr, i_col)])
-    return duckdb_result, data_chunk_p, duckdb_database, duckdb_connection
+    return out_result, data_chunk_p, duckdb_database, duckdb_connection
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_data_chunk_get_column_count():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    out_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
     col_count = ducklib.duckdb_data_chunk_get_column_count(data_chunk_p)
     assert col_count == 2, f"Expected 2 columns, got {col_count}"
+    aux_destroy_data_chunk(data_chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_data_chunk_get_size():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    out_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
     chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
     assert chunk_size == 3, f"Expected 3 rows in chunk, got {chunk_size}"
+    aux_destroy_data_chunk(data_chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_destroy_data_chunk():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    out_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
     assert data_chunk_p != 0, f"Expected valid chunk pointer, got {data_chunk_p}"
     chunk_size = ducklib.duckdb_data_chunk_get_size(data_chunk_p)
     assert chunk_size > 0, f"Expected rows in chunk before destroy, got {chunk_size}"
@@ -206,21 +329,26 @@ def test_duckdb_destroy_data_chunk():
     data_chunk_pp = data_chunk.ctypes.data
     ducklib.duckdb_destroy_data_chunk(data_chunk_pp)
     assert data_chunk[0] == 0, f"Expected null after destroy, got {data_chunk[0]}"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_fetch_chunk_exhausted():
     out_result, duckdb_database, duckdb_connection = aux_query_1()
     duckdb_result = tuple(out_result)
     chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
     assert chunk_p != 0, "Expected first chunk, got null"
+    aux_destroy_data_chunk(chunk_p)
     chunk_p = ducklib.duckdb_fetch_chunk(duckdb_result)
     assert chunk_p == 0, f"Expected null for exhausted result, got {chunk_p}"
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
-    duckdb_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
+    out_result, data_chunk_p, duckdb_database, duckdb_connection = aux_get_data_vector()
     assert data_chunk_p
     j_vec_p = ducklib.duckdb_data_chunk_get_vector(data_chunk_p, 1)
     j_vec_data_p = ducklib.duckdb_vector_get_data(j_vec_p)
@@ -232,7 +360,40 @@ def test_duckdb_fetch_chunk_data_chunk_get_vector_get_data_vector():
         (j_arr_ == j_col_) if j_val_ else True
         for j_arr_, j_col_, j_val_ in zip(j_arr, j_col, j_val)
     ])
+    aux_destroy_data_chunk(data_chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_handle_balance_value_family():
+    with handle_balance(VALUE_FAMILY):
+        v_int = ducklib.duckdb_create_int64(7)
+        v_bool = ducklib.duckdb_create_bool(1)
+        v_double = ducklib.duckdb_create_double(1.5)
+        assert v_int != 0 and v_bool != 0 and v_double != 0
+        aux_destroy_value(v_int)
+        aux_destroy_value(v_bool)
+        aux_destroy_value(v_double)
+
+
+def test_handle_balance_logical_type_family():
+    with handle_balance(LOGICAL_TYPE_FAMILY):
+        lt_int = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+        lt_big = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
+        assert lt_int != 0 and lt_big != 0
+        for lt_p in (lt_int, lt_big):
+            lt_buf = numpy.zeros(1, dtype=numpy.intp)
+            lt_buf[0] = lt_p
+            ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
+
+
+def test_handle_balance_detects_missing_destroy():
+    leaked_p = 0
+    with pytest.raises(AssertionError, match="value handle imbalance"):
+        with handle_balance(VALUE_FAMILY):
+            leaked_p = ducklib.duckdb_create_int64(11)
+            assert leaked_p != 0
+    aux_destroy_value(leaked_p)
 
 
 # --- Prepared Statements ---
@@ -906,6 +1067,30 @@ def test_bind_decimal():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+def test_bind_decimal_wide_upper64():
+    """DECIMAL(38,0) uses INT128 physical storage. Bind a value whose magnitude
+    genuinely needs the upper 64 bits and assert both halves of the stored
+    int128 round-trip (test_bind_decimal only exercises width <= 18, INT64
+    physical, with the upper word always zero)."""
+    lower = 0xFEDCBA9876543210
+    upper = 0x0123456789ABCDEF
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::DECIMAL(38, 0);")
+    assert rc == ducklib.DuckDBSuccess
+    rc = ducklib.duckdb_bind_decimal(stmt[0], 1, (38, 0, lower, upper))
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    halves = (ctypes.c_uint64 * 2).from_address(data_p)
+    assert halves[0] == lower, halves[0]
+    assert halves[1] == upper, halves[1]
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 # --- Result Metadata ---
 
 def test_column_name():
@@ -988,6 +1173,95 @@ def test_result_statement_type():
     assert stmt_type == 1, f"Expected SELECT (1), got {stmt_type}"
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
+
+
+_BYVAL_ROUNDTRIP_SCRIPT = """
+import ctypes
+
+import numbduck.ducklib as ducklib
+from numbduck.duckdb_utils import (
+    create_duckdb_connection, create_duckdb_database, create_duckdb_result,
+)
+from numbox.utils.lowlevel import get_unicode_data_p
+
+db = create_duckdb_database()
+assert ducklib.duckdb_open(0, db.ctypes.data) == ducklib.DuckDBSuccess
+conn = create_duckdb_connection()
+assert ducklib.duckdb_connect(db[0], conn.ctypes.data) == ducklib.DuckDBSuccess
+conn_p = conn[0]
+
+
+def run(sql):
+    return ducklib.duckdb_query(conn_p, get_unicode_data_p(sql), 0)
+
+
+assert run("CREATE TABLE t (i INTEGER);") == ducklib.DuckDBSuccess
+assert run("INSERT INTO t VALUES (3), (5), (7);") == ducklib.DuckDBSuccess
+
+result = create_duckdb_result()
+rc = ducklib.duckdb_query(
+    conn_p, get_unicode_data_p("SELECT i FROM t ORDER BY i;"), result.ctypes.data)
+assert rc == ducklib.DuckDBSuccess
+result_tup = tuple(result)
+
+assert ducklib.duckdb_result_return_type(result_tup) == 3
+assert ducklib.duckdb_result_statement_type(result_tup) == 1
+
+chunk_p = ducklib.duckdb_fetch_chunk(result_tup)
+assert chunk_p != 0
+assert ducklib.duckdb_data_chunk_get_size(chunk_p) == 3
+vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+data_p = ducklib.duckdb_vector_get_data(vec_p)
+arr = (ctypes.c_int32 * 3).from_address(data_p)
+assert list(arr) == [3, 5, 7], list(arr)
+
+chunk_buf = (ctypes.c_int64 * 1)(chunk_p)
+ducklib.duckdb_destroy_data_chunk(ctypes.addressof(chunk_buf))
+ducklib.duckdb_destroy_result(result.ctypes.data)
+ducklib.duckdb_disconnect(conn.ctypes.data)
+ducklib.duckdb_close(db.ctypes.data)
+print("BYVAL_ROUNDTRIP_OK")
+"""
+
+
+def test_fetch_chunk_byval_roundtrip_low_opt():
+    """Exercise the by-value duckdb_result path (duckdb_fetch_chunk,
+    duckdb_result_return_type, duckdb_result_statement_type) with the numba
+    optimizer disabled, so the >16-byte struct argument is marshalled the
+    ABI-correct way (byval stack copy on SysV x86-64) rather than relying on
+    the optimized stack layout happening to place the value where the callee
+    reads it. Runs in a subprocess because NUMBDUCK_JIT_OPTIONS is read once,
+    at ducklib import time, to build every wrapper's jit_options.
+    """
+    env = dict(os.environ)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    env["NUMBDUCK_JIT_OPTIONS"] = '{"cache": false, "_dbg_optnone": true}'
+    proc = subprocess.run(
+        [sys.executable, "-c", _BYVAL_ROUNDTRIP_SCRIPT],
+        env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "BYVAL_ROUNDTRIP_OK" in proc.stdout, proc.stdout
+
+
+def test_get_jit_options_rejects_non_object(monkeypatch):
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '["cache"]')
+    with pytest.raises(ValueError, match="NUMBDUCK_JIT_OPTIONS"):
+        get_jit_options()
+
+
+def test_get_jit_options_rejects_unknown_key(monkeypatch):
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": true, "foobar": 1}')
+    with pytest.raises(ValueError, match="NUMBDUCK_JIT_OPTIONS") as exc_info:
+        get_jit_options()
+    assert "foobar" in str(exc_info.value)
+
+
+def test_get_jit_options_accepts_valid_object(monkeypatch):
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": false, "_dbg_optnone": true}')
+    assert get_jit_options() == {"cache": False, "_dbg_optnone": True}
 
 
 # --- JIT Tests ---
@@ -1114,8 +1388,7 @@ def jit_prepare_bind_execute():
     # col 3: null check
     v3_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 3)
     v3_validity_p = ducklib.duckdb_vector_get_validity(v3_p)
-    col3_valid = ducklib.duckdb_validity_row_is_valid(
-        intp(v3_validity_p), intp(0))
+    col3_valid = ducklib.duckdb_validity_row_is_valid(v3_validity_p, 0)
 
     # cleanup (reverse order)
     chunk_buf = create_duckdb_data_chunk()
@@ -1700,28 +1973,39 @@ def test_destroy_value():
     aux_destroy_value(val_p)
 
 
-# --- Struct size guard ---
+# --- Struct-by-value ABI round-trip ---
 
 
-def test_struct_size_guard():
-    """Verify the size computation used by _call_lib_func_struct_in/out."""
-    from numba.core.types import UniTuple, Tuple, int32, int64, uint64, uint8
+def test_struct_by_value_abi_roundtrip():
+    """Round-trip a 16-byte and a 24-byte struct through the real create/get
+    wrappers, exercising numbox's <=16-byte by-value vs >16-byte by-pointer
+    struct-ABI classification. Both eightbytes of each struct's 128-bit payload
+    are fully populated, so a dropped or mis-packed upper eightbyte is caught.
+    (The arithmetic-only predecessor asserted sum(bitwidth)/8 over numba type
+    metadata and never called into ducklib, so it could not detect an ABI
+    regression at all.)"""
+    lower = 0xFEDCBA9876543210
+    upper = 0x0123456789ABCDEF
 
-    # 16-byte structs (should pass the ≤16 byte guard)
-    assert sum(t.bitwidth for t in UniTuple(int64, 2)) / 8 == 16
-    assert sum(t.bitwidth for t in UniTuple(uint64, 2)) / 8 == 16
-    assert sum(t.bitwidth for t in Tuple((uint64, int64))) / 8 == 16
+    # duckdb_hugeint = {uint64 lower; int64 upper} is a 16-byte struct passed and
+    # returned by value on SysV x86-64 and AAPCS64.
+    hugeint_p = ducklib.duckdb_create_hugeint((lower, upper))
+    assert hugeint_p != 0
+    hugeint = ducklib.duckdb_get_hugeint(hugeint_p)
+    assert hugeint[0] == lower
+    assert hugeint[1] == upper
+    aux_destroy_value(hugeint_p)
 
-    # 8-byte struct
-    assert sum(t.bitwidth for t in UniTuple(int32, 2)) / 8 == 8
-
-    # Mixed-width tuples
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint64, int64))) / 8 == 18
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 == 19
-    assert sum(t.bitwidth for t in Tuple((uint8, uint8, uint8, uint64, int64))) / 8 > 16
-
-    # 24-byte struct (should fail the guard)
-    assert sum(t.bitwidth for t in UniTuple(int64, 3)) / 8 == 24
+    # duckdb_decimal is padded to 24 bytes and therefore passed by pointer; a
+    # width > 18 keeps INT128 physical storage so the upper eightbyte is live.
+    decimal_p = ducklib.duckdb_create_decimal((38, 0, lower, upper))
+    assert decimal_p != 0
+    decimal = ducklib.duckdb_get_decimal(decimal_p)
+    assert decimal[0] == 38
+    assert decimal[1] == 0
+    assert decimal[2] == lower
+    assert decimal[3] == upper
+    aux_destroy_value(decimal_p)
 
 
 def test_create_logical_type_integer():
@@ -3546,3 +3830,349 @@ def test_aggregate_function_array_variance():
     free_delta = stats_after.free - stats_before.free
     assert alloc_delta == free_delta, (
         f"leak: alloc={alloc_delta}, free={free_delta}")
+
+
+# --- Multi-chunk and NULL-aware coverage ---
+
+STANDARD_VECTOR_SIZE = 2048
+NULL_SENTINEL = -999
+
+
+@njit
+def _null_to_sentinel_impl(info, chunk, output):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    validity_p = ducklib.duckdb_vector_get_validity(vec)
+    out_data = ducklib.duckdb_vector_get_data(output)
+    in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
+    out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
+    for i in range(n):
+        # A null validity pointer means the vector is all-valid; otherwise bit i
+        # of the mask is the row's validity.
+        valid = validity_p == 0 or ducklib.duckdb_validity_row_is_valid(
+            validity_p, i) != 0
+        out_arr[i] = in_arr[i] if valid else NULL_SENTINEL
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _null_to_sentinel_cb(info, chunk, output):
+    _null_to_sentinel_impl(info, chunk, output)
+
+
+@njit
+def _null_count_state_size_impl(info):
+    return numpy.uint64(8)
+
+
+@cfunc(nb_types.uint64(nb_types.intp))
+def _null_count_state_size_cb(info):
+    return _null_count_state_size_impl(info)
+
+
+@njit
+def _null_count_init_impl(info, state):
+    carray(_cast_int_to_void_p(state), (1,), dtype=numpy.int64)[0] = 0
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp))
+def _null_count_init_cb(info, state):
+    _null_count_init_impl(info, state)
+
+
+@njit
+def _null_count_update_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    validity_p = ducklib.duckdb_vector_get_validity(vec)
+    state_ptrs = carray(_cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    for i in range(n):
+        valid = validity_p == 0 or ducklib.duckdb_validity_row_is_valid(
+            validity_p, i) != 0
+        if valid:
+            acc = carray(_cast_int_to_void_p(state_ptrs[i]), (1,), dtype=numpy.int64)
+            acc[0] += 1
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+def _null_count_update_cb(info, chunk, states):
+    _null_count_update_impl(info, chunk, states)
+
+
+@njit
+def _null_count_combine_impl(info, source, target, count):
+    src_ptrs = carray(_cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_ptrs = carray(_cast_int_to_void_p(target), (count,), dtype=numpy.intp)
+    for i in range(count):
+        src_acc = carray(_cast_int_to_void_p(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
+        tgt_acc = carray(_cast_int_to_void_p(tgt_ptrs[i]), (1,), dtype=numpy.int64)
+        tgt_acc[0] += src_acc
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                     nb_types.intp, nb_types.uint64))
+def _null_count_combine_cb(info, source, target, count):
+    _null_count_combine_impl(info, source, target, count)
+
+
+@njit
+def _null_count_finalize_impl(info, source, result, count, offset):
+    out_data = ducklib.duckdb_vector_get_data(result)
+    src_ptrs = carray(_cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _cast_int_to_void_p(out_data), (offset + count,), dtype=numpy.int64)
+    for i in range(count):
+        acc = carray(_cast_int_to_void_p(src_ptrs[i]), (1,), dtype=numpy.int64)[0]
+        out_vals[offset + i] = acc
+
+
+@cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp,
+                     nb_types.uint64, nb_types.uint64))
+def _null_count_finalize_cb(info, source, result, count, offset):
+    _null_count_finalize_impl(info, source, result, count, offset)
+
+
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
+def test_scalar_function_multi_chunk():
+    """Drive a scalar UDF over more than STANDARD_VECTOR_SIZE rows so its
+    callback runs on chunks past the first, then loop duckdb_fetch_chunk to
+    reassemble the multi-chunk result and assert the values straddling the
+    2048-row chunk boundary."""
+    n_rows = 5000
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    # Bind the SQL to a name: get_unicode_data_p borrows the str's data pointer,
+    # so a runtime-built string must outlive the duckdb_query call.
+    create_sql = f"CREATE TABLE t_mc AS SELECT range::INTEGER AS v FROM range({n_rows})"
+    query_p = get_unicode_data_p(create_sql)
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(func_p, get_unicode_data_p("add_one"))
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+    ducklib.duckdb_scalar_function_set_function(func_p, _add_one_cb.address)
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT add_one(v) FROM t_mc ORDER BY v")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    outputs = []
+    chunk_sizes = []
+    while True:
+        chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+        if chunk_p == 0:
+            break
+        size = ducklib.duckdb_data_chunk_get_size(chunk_p)
+        vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+        data_p = ducklib.duckdb_vector_get_data(vec_p)
+        outputs.extend((ctypes.c_int32 * size).from_address(data_p))
+        chunk_sizes.append(size)
+        aux_destroy_data_chunk(chunk_p)
+
+    assert sum(chunk_sizes) == n_rows, chunk_sizes
+    assert len(chunk_sizes) >= 2, "expected a multi-chunk result"
+    assert chunk_sizes[0] == STANDARD_VECTOR_SIZE, chunk_sizes[0]
+    assert outputs == list(range(1, n_rows + 1))
+    # values straddling the first chunk boundary
+    assert outputs[STANDARD_VECTOR_SIZE - 1] == STANDARD_VECTOR_SIZE
+    assert outputs[STANDARD_VECTOR_SIZE] == STANDARD_VECTOR_SIZE + 1
+
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
+def test_aggregate_function_multi_chunk():
+    """Drive a UDAF that produces more than STANDARD_VECTOR_SIZE groups so
+    finalize is called across multiple output chunks, then loop
+    duckdb_fetch_chunk over the grouped result and assert the group sums
+    across the chunk boundaries (grouped output is not guaranteed to fill
+    chunks to STANDARD_VECTOR_SIZE; duckdb 1.3.2 emits 1295-row chunks)."""
+    n_groups = 5000
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    # get_unicode_data_p borrows the str's data pointer, so hold the runtime-built
+    # SQL in a name until duckdb_query has read it.
+    create_sql = (
+        "CREATE TABLE t_grp AS SELECT range::INTEGER AS g, "
+        f"range::INTEGER AS v FROM range({n_groups})")
+    query_p = get_unicode_data_p(create_sql)
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(func_p, get_unicode_data_p("mc_sum"))
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    bigint_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, bigint_type_p)
+    for tp in (int_type_p, bigint_type_p):
+        buf = numpy.array([tp], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, _agg_state_size_cb.address, _agg_init_cb.address,
+        _agg_update_cb.address, _agg_combine_cb.address, _agg_finalize_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "SELECT mc_sum(v) FROM t_grp GROUP BY g ORDER BY g")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    sums = []
+    chunk_sizes = []
+    while True:
+        chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+        if chunk_p == 0:
+            break
+        size = ducklib.duckdb_data_chunk_get_size(chunk_p)
+        vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+        data_p = ducklib.duckdb_vector_get_data(vec_p)
+        sums.extend((ctypes.c_int64 * size).from_address(data_p))
+        chunk_sizes.append(size)
+        aux_destroy_data_chunk(chunk_p)
+
+    assert sum(chunk_sizes) == n_groups, chunk_sizes
+    assert len(chunk_sizes) >= 2, "expected a multi-chunk result"
+    assert all(s <= STANDARD_VECTOR_SIZE for s in chunk_sizes), chunk_sizes
+    # each singleton group g has my_sum(v) == g
+    assert sums == list(range(n_groups))
+    assert sums[STANDARD_VECTOR_SIZE - 1] == STANDARD_VECTOR_SIZE - 1
+    assert sums[STANDARD_VECTOR_SIZE] == STANDARD_VECTOR_SIZE
+
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
+def test_scalar_function_null_aware():
+    """A scalar UDF over a NULL-containing column. Special handling passes the
+    NULL rows to the callback, which reads duckdb_vector_get_validity and maps
+    them to a sentinel; a validity-blind callback would return the NULL rows'
+    (arbitrary) storage instead."""
+    inputs = [1, None, 3, None, 5]
+    expected = sorted(NULL_SENTINEL if x is None else x for x in inputs)
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t_null AS SELECT * FROM "
+        "(VALUES (1),(NULL),(3),(NULL),(5)) AS t(v)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_scalar_function()
+    ducklib.duckdb_scalar_function_set_name(
+        func_p, get_unicode_data_p("null_to_sentinel"))
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    ducklib.duckdb_scalar_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_return_type(func_p, int_type_p)
+    ducklib.duckdb_scalar_function_set_special_handling(func_p)
+    type_buf = numpy.array([int_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(type_buf.ctypes.data)
+    ducklib.duckdb_scalar_function_set_function(func_p, _null_to_sentinel_cb.address)
+    rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p("SELECT null_to_sentinel(v) FROM t_null")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    size = ducklib.duckdb_data_chunk_get_size(chunk_p)
+    vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
+    data_p = ducklib.duckdb_vector_get_data(vec_p)
+    outputs = sorted((ctypes.c_int32 * size).from_address(data_p))
+    assert outputs == expected, f"got {outputs}, expected {expected}"
+
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+@balanced(RESULT_FAMILY, CHUNK_FAMILY)
+def test_aggregate_function_null_aware():
+    """A UDAF over a NULL-containing column. Special handling passes the NULL
+    rows to update, which reads duckdb_vector_get_validity and counts only the
+    valid rows; the result matches DuckDB's NULL-ignoring count(v), whereas a
+    validity-blind update would instead count every row (count(*))."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    conn_p = duckdb_connection[0]
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "CREATE TABLE t_nullagg AS SELECT * FROM "
+        "(VALUES (1),(NULL),(3),(NULL),(5)) AS t(v)")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(
+        func_p, get_unicode_data_p("null_count"))
+    int_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    bigint_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_BIGINT)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, int_type_p)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, bigint_type_p)
+    ducklib.duckdb_aggregate_function_set_special_handling(func_p)
+    for tp in (int_type_p, bigint_type_p):
+        buf = numpy.array([tp], dtype=numpy.intp)
+        ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, _null_count_state_size_cb.address, _null_count_init_cb.address,
+        _null_count_update_cb.address, _null_count_combine_cb.address,
+        _null_count_finalize_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    func_buf = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(func_buf.ctypes.data)
+
+    result = create_duckdb_result()
+    query_p = get_unicode_data_p(
+        "SELECT null_count(v), count(v), count(*) FROM t_nullagg")
+    rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess, f"Query failed, rc={rc}"
+
+    chunk_p = ducklib.duckdb_fetch_chunk(tuple(result))
+    d0 = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 0))
+    d1 = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 1))
+    d2 = ducklib.duckdb_vector_get_data(
+        ducklib.duckdb_data_chunk_get_vector(chunk_p, 2))
+    null_count = (ctypes.c_int64 * 1).from_address(d0)[0]
+    builtin_count_v = (ctypes.c_int64 * 1).from_address(d1)[0]
+    count_star = (ctypes.c_int64 * 1).from_address(d2)[0]
+    assert null_count == 3, null_count
+    assert null_count == builtin_count_v
+    assert count_star == 5
+    assert null_count != count_star
+
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    aux_close_db(duckdb_database, duckdb_connection)
