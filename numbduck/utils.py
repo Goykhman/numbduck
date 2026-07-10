@@ -199,7 +199,8 @@ def _fetch_and_cache(url, dest):
             f"/path/to/libduckdb.dylib."
         ) from exc
     try:
-        member = zipfile.ZipFile(io.BytesIO(data)).read(_LIBDUCKDB_DYLIB_NAME)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            member = zf.read(_LIBDUCKDB_DYLIB_NAME)
     except (zipfile.BadZipFile, KeyError) as exc:
         raise RuntimeError(
             f"numbduck could not extract {_LIBDUCKDB_DYLIB_NAME} from {url}: "
@@ -217,12 +218,17 @@ def _fetch_and_cache(url, dest):
         with os.fdopen(fd_dest, "wb") as dst:
             dst.write(member)
         os.replace(tmp_dest, dest)
-    except OSError:
+    except OSError as exc:
         try:
             os.remove(tmp_dest)
         except OSError:
             pass
-        raise
+        raise RuntimeError(
+            f"numbduck could not write the downloaded libduckdb to its cache at "
+            f"{dest!r} ({exc}). Check permissions on {os.path.dirname(dest)!r}, "
+            f"or set NUMBDUCK_LIBDUCKDB=/path/to/libduckdb.dylib to skip the "
+            f"download."
+        ) from exc
     return dest
 
 
