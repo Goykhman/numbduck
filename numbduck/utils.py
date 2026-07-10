@@ -52,9 +52,11 @@ def _has_capi_symbols(lib):
 
 
 def _normalize_version(version):
-    # duckdb_library_version() reports e.g. "v1.5.4" while duckdb.__version__ is
-    # "1.5.4"; strip the leading "v" so the two compare directly.
-    return version.strip().lstrip("v")
+    # duckdb_library_version() and PRAGMA version report e.g. "v1.5.4" while the
+    # bare package version is "1.5.4"; drop the single leading "v" so library
+    # versions from either source compare directly (removeprefix, not lstrip, so
+    # it strips one prefix rather than a run of leading "v"s).
+    return version.strip().removeprefix("v")
 
 
 def _library_version(lib):
@@ -73,36 +75,76 @@ def _library_version(lib):
     return _normalize_version(raw.decode())
 
 
+_wheel_library_version_cache = None
+
+
+def _wheel_library_version():
+    """Library version the Python ``duckdb`` wheel reports for its own core.
+
+    Read via ``PRAGMA version`` through the Python API — which works even on the
+    macOS wheels that strip the C-API symbols — so it is in the same
+    ``vX.Y.Z[-devN]`` scheme as a standalone's ``duckdb_library_version()``. That
+    is the right identity to coordinate on: ``duckdb.__version__`` is the Python
+    *package* version, which coincides with the library version only for releases
+    and diverges for pre-release (``.dev``/``rc``) builds, so comparing against it
+    refuses a genuinely-matched dev build. Cached because the running wheel's core
+    version cannot change in-process. Returns the normalized version, or ``None``
+    when it cannot be read.
+    """
+    global _wheel_library_version_cache
+    if _wheel_library_version_cache is None:
+        try:
+            row = duckdb.connect(":memory:").execute("PRAGMA version").fetchone()
+        except Exception:
+            # Fail closed: an unreadable wheel version makes the caller refuse
+            # rather than proceed with an unverified pairing.
+            return None
+        if not row or row[0] is None:
+            return None
+        _wheel_library_version_cache = _normalize_version(row[0])
+    return _wheel_library_version_cache
+
+
 def _require_coordinated_standalone(lib, source):
-    """Refuse a standalone libduckdb whose version disagrees with the wheel.
+    """Refuse a standalone libduckdb whose build disagrees with the wheel.
 
     pybridge extracts a raw ``Connection*`` minted by the Python ``duckdb``
-    wheel's runtime and hands it to the C API resolved against this standalone
-    library. That is only sound when both are the same DuckDB build: a
-    different build casts the pointer back to its own internal Connection
-    layout, so dereferencing it is undefined behavior. Detect the mismatch and
-    refuse rather than corrupt memory at query time.
+    wheel's runtime and hands it to this standalone library's C API, whose
+    ``duckdb_query`` casts it back to the standalone's own internal Connection
+    layout and dereferences it. That is only sound when both are the same DuckDB
+    build: a different build has a candidate-different struct layout, so the
+    dereference is undefined behavior. Coordinate on the library version, which
+    both sides report in the same ``vX.Y.Z[-devN]`` scheme — the wheel's via
+    :func:`_wheel_library_version`, the standalone's via :func:`_library_version`.
+    Detect a mismatch and refuse rather than corrupt memory at query time.
     """
     lib_version = _library_version(lib)
-    wheel_version = _normalize_version(duckdb.__version__)
+    wheel_version = _wheel_library_version()
+    if wheel_version is None:
+        raise RuntimeError(
+            f"numbduck could not read the duckdb wheel's own library version "
+            f"(via PRAGMA version) to coordinate it with the standalone libduckdb "
+            f"loaded from {source!r}; refusing to hand a wheel-minted connection "
+            f"to an unverifiable pairing."
+        )
     if lib_version is None:
         raise RuntimeError(
             f"numbduck loaded a standalone libduckdb from {source!r} but could "
             f"not read its library version (duckdb_library_version is absent or "
             f"returned nothing). A verifiable version is required to confirm it "
-            f"matches the Python duckdb package (version {wheel_version!r}) "
-            f"before a wheel-minted connection is handed to it; refusing to load "
-            f"an unverifiable libduckdb build. Set NUMBDUCK_LIBDUCKDB to a "
-            f"libduckdb whose version equals {wheel_version!r}."
+            f"matches the duckdb wheel (library version {wheel_version!r}) before "
+            f"a wheel-minted connection is handed to it; refusing to load an "
+            f"unverifiable libduckdb build. Set NUMBDUCK_LIBDUCKDB to a libduckdb "
+            f"whose version equals {wheel_version!r}."
         )
     if lib_version != wheel_version:
         raise RuntimeError(
             f"numbduck loaded a standalone libduckdb (version {lib_version!r}) "
-            f"from {source!r}, but the installed Python duckdb package is "
-            f"version {wheel_version!r}. Passing a connection minted by the "
-            f"duckdb wheel into a different libduckdb build is undefined "
-            f"behavior. Install a matching libduckdb or set NUMBDUCK_LIBDUCKDB "
-            f"to a libduckdb whose version equals {wheel_version!r}."
+            f"from {source!r}, but the duckdb wheel's library version is "
+            f"{wheel_version!r}. Passing a connection minted by the duckdb wheel "
+            f"into a different libduckdb build is undefined behavior. Install a "
+            f"matching libduckdb or set NUMBDUCK_LIBDUCKDB to a libduckdb whose "
+            f"version equals {wheel_version!r}."
         )
 
 
@@ -369,16 +411,21 @@ def loaded_library_version():
 
 
 def libraries_coordinated():
-    """True when numbduck's JIT libduckdb matches the Python ``duckdb`` module.
+    """True when numbduck's JIT libduckdb matches the Python ``duckdb`` wheel.
 
-    Compares the version reported by the libduckdb :func:`load_duckdb` bound
-    into numbduck's bindings against ``duckdb.__version__`` (the wheel that mints
-    the ``Connection*`` pybridge extracts). Only an exact match makes it safe to
-    hand that pointer across the two, mirroring numbox's ``libraries_coordinated``
-    guard. When it returns ``False``, pybridge refuses the extraction rather than
-    dereference a pointer under a possibly-different internal layout.
+    Compares the library version reported by the libduckdb :func:`load_duckdb`
+    bound into numbduck's bindings against the wheel's own library version
+    (:func:`_wheel_library_version`, read via ``PRAGMA version`` so it is the same
+    ``vX.Y.Z[-devN]`` scheme, not the ``duckdb.__version__`` package version).
+    Only an exact match makes it safe to hand a wheel-minted ``Connection*``
+    across the two, mirroring numbox's ``libraries_coordinated`` guard. When it
+    returns ``False``, pybridge refuses the extraction rather than dereference a
+    pointer under a possibly-different internal layout.
     """
     jit_version = loaded_library_version()
     if jit_version is None:
         return False
-    return jit_version == _normalize_version(duckdb.__version__)
+    wheel_version = _wheel_library_version()
+    if wheel_version is None:
+        return False
+    return jit_version == wheel_version

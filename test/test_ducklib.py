@@ -4257,6 +4257,62 @@ def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
         utils.load_duckdb()
 
 
+def test_load_duckdb_refuses_dev_suffix_same_base(monkeypatch):
+    """A standalone dev build is refused even when it shares the release's base.
+
+    The coordination check compares the full library version, never a stripped
+    ``X.Y.Z``, so a ``.dev``/``rc`` build — a different commit with a possibly
+    different Connection layout — never passes as the release that shares its
+    base. Pins that we do not "normalize out" the suffix.
+    """
+    from numbduck import utils
+
+    wheel_lib = object()
+    standalone_lib = object()
+
+    def fake_load_lib_path(path):
+        return wheel_lib if path == "/fake/wheel.so" else standalone_lib
+
+    monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
+    monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
+    monkeypatch.setattr(
+        utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
+    monkeypatch.setattr(utils, "_wheel_library_version", lambda: "1.5.4")
+    monkeypatch.setattr(utils, "_library_version", lambda lib: "1.5.4-dev12")
+
+    with pytest.raises(RuntimeError, match="undefined behavior"):
+        utils.load_duckdb()
+
+
+def test_libraries_coordinated_compares_library_version_not_package(monkeypatch):
+    """Coordination compares the wheel's own library version (PRAGMA version),
+    not ``duckdb.__version__``. A dev build whose library version matches the
+    standalone's is coordinated even though the Python package version uses a
+    different pre-release scheme — the pairing the old package-version compare
+    wrongly refused. A differing library version still fails closed.
+    """
+    from numbduck import utils
+
+    monkeypatch.setattr(utils, "loaded_library_version", lambda: "1.6.0-dev10121")
+    monkeypatch.setattr(utils, "_wheel_library_version", lambda: "1.6.0-dev10121")
+    assert utils.libraries_coordinated() is True
+
+    monkeypatch.setattr(utils, "_wheel_library_version", lambda: "1.6.0-dev9999")
+    assert utils.libraries_coordinated() is False
+
+
+def test_wheel_library_version_reads_pragma_version():
+    """_wheel_library_version reports the wheel's own library version from
+    PRAGMA version (normalized) — the like-for-like counterpart to a standalone's
+    duckdb_library_version().
+    """
+    from numbduck import utils
+
+    row = duckdb.connect(":memory:").execute("PRAGMA version").fetchone()
+    assert utils._wheel_library_version() == utils._normalize_version(row[0])
+
+
 def test_non_darwin_capi_error_uses_platform_extension(monkeypatch):
     """The non-macOS C-API-missing guidance names the platform's own library
     extension (.dll on Windows, .so elsewhere), not a hard-coded .so.
