@@ -4176,3 +4176,256 @@ def test_aggregate_function_null_aware():
     aux_destroy_data_chunk(chunk_p)
     ducklib.duckdb_destroy_result(result.ctypes.data)
     aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_load_duckdb_refuses_version_mismatch(monkeypatch):
+    """The standalone-fallback loader refuses a libduckdb whose version differs.
+
+    Simulates the macOS dual-runtime seam on any platform: force the wheel to
+    look symbol-less, hand back a standalone libduckdb whose reported version
+    disagrees with the installed duckdb wheel, and assert load_duckdb refuses.
+    """
+    from numbduck import utils
+
+    wheel_lib = object()
+    standalone_lib = object()
+
+    def fake_load_lib_path(path):
+        return wheel_lib if path == "/fake/wheel.so" else standalone_lib
+
+    monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
+    monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
+    monkeypatch.setattr(
+        utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
+    monkeypatch.setattr(utils, "_library_version", lambda lib: "9.9.9")
+
+    with pytest.raises(RuntimeError, match="NUMBDUCK_LIBDUCKDB"):
+        utils.load_duckdb()
+
+
+def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
+    """pybridge refuses to extract a Connection* when runtimes are uncoordinated."""
+    from numbduck import pybridge
+
+    monkeypatch.setattr(pybridge, "libraries_coordinated", lambda: False)
+    monkeypatch.setattr(pybridge, "loaded_library_version", lambda: "9.9.9")
+
+    conn = duckdb.connect()
+    try:
+        with pytest.raises(RuntimeError, match="libduckdb"):
+            pybridge.extract_connection_ptr(conn)
+    finally:
+        conn.close()
+
+
+def test_pybridge_closed_connection_raises_runtime_error():
+    """A closed connection resets its unique_ptr<Connection> to null, so the
+    documented offset yields a null pointer. extract_connection_ptr must raise a
+    clean RuntimeError there rather than pass the null on to duckdb_query (an
+    opaque numba TypeError or a NULL-connection dereference).
+    """
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    conn.close()
+    with pytest.raises(RuntimeError, match="null"):
+        extract_connection_ptr(conn)
+
+
+def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
+    """A standalone libduckdb whose version cannot be read is refused rather than
+    loaded unverified — otherwise it surfaces later as a confusing 'libduckdb
+    None' coordination error. No network.
+    """
+    from numbduck import utils
+
+    wheel_lib = object()
+    standalone_lib = object()
+
+    def fake_load_lib_path(path):
+        return wheel_lib if path == "/fake/wheel.so" else standalone_lib
+
+    monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
+    monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
+    monkeypatch.setattr(
+        utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
+    monkeypatch.setattr(utils, "_library_version", lambda lib: None)
+
+    with pytest.raises(RuntimeError, match="could not read its library version"):
+        utils.load_duckdb()
+
+
+def test_load_duckdb_refuses_dev_suffix_same_base(monkeypatch):
+    """A standalone dev build is refused even when it shares the release's base.
+
+    The coordination check compares the full library version, never a stripped
+    ``X.Y.Z``, so a ``.dev``/``rc`` build — a different commit with a possibly
+    different Connection layout — never passes as the release that shares its
+    base. Pins that we do not "normalize out" the suffix.
+    """
+    from numbduck import utils
+
+    wheel_lib = object()
+    standalone_lib = object()
+
+    def fake_load_lib_path(path):
+        return wheel_lib if path == "/fake/wheel.so" else standalone_lib
+
+    monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
+    monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
+    monkeypatch.setattr(
+        utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
+    monkeypatch.setattr(utils, "_wheel_library_version", lambda: "1.5.4")
+    monkeypatch.setattr(utils, "_library_version", lambda lib: "1.5.4-dev12")
+
+    with pytest.raises(RuntimeError, match="undefined behavior"):
+        utils.load_duckdb()
+
+
+def test_libraries_coordinated_compares_library_version_not_package(monkeypatch):
+    """Coordination compares the wheel's own library version (PRAGMA version),
+    not ``duckdb.__version__``. A dev build whose library version matches the
+    standalone's is coordinated even though the Python package version uses a
+    different pre-release scheme — the pairing the old package-version compare
+    wrongly refused. A differing library version still fails closed.
+    """
+    from numbduck import utils
+
+    monkeypatch.setattr(utils, "loaded_library_version", lambda: "1.6.0-dev10121")
+    monkeypatch.setattr(utils, "_wheel_library_version", lambda: "1.6.0-dev10121")
+    assert utils.libraries_coordinated() is True
+
+    monkeypatch.setattr(utils, "_wheel_library_version", lambda: "1.6.0-dev9999")
+    assert utils.libraries_coordinated() is False
+
+
+def test_wheel_library_version_reads_pragma_version():
+    """_wheel_library_version reports the wheel's own library version from
+    PRAGMA version (normalized) — the like-for-like counterpart to a standalone's
+    duckdb_library_version().
+    """
+    from numbduck import utils
+
+    row = duckdb.connect(":memory:").execute("PRAGMA version").fetchone()
+    assert utils._wheel_library_version() == utils._normalize_version(row[0])
+
+
+def test_non_darwin_capi_error_uses_platform_extension(monkeypatch):
+    """The non-macOS C-API-missing guidance names the platform's own library
+    extension (.dll on Windows, .so elsewhere), not a hard-coded .so.
+    """
+    from numbduck import utils
+
+    monkeypatch.delenv("NUMBDUCK_LIBDUCKDB", raising=False)
+    monkeypatch.setattr(utils.platform, "system", lambda: "Windows")
+    assert "libduckdb.dll" in utils._non_darwin_capi_error()
+    monkeypatch.setattr(utils.platform, "system", lambda: "Linux")
+    assert "libduckdb.so" in utils._non_darwin_capi_error()
+
+
+def _build_fake_libduckdb_zip(tmp_path):
+    """Write a ZIP holding a fake libduckdb.dylib under a tmp dir.
+
+    Returns (zip_path, dylib_bytes) for driving _fetch_and_cache against a local
+    file:// archive.
+    """
+    import io
+    import zipfile
+
+    dylib_bytes = b"\x00fake-libduckdb-native-code\x7fELF"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("libduckdb.dylib", dylib_bytes)
+    zip_path = tmp_path / "libduckdb-osx-universal.zip"
+    zip_path.write_bytes(buf.getvalue())
+    return zip_path, dylib_bytes
+
+
+def test_fetch_and_cache_local_zip_roundtrip(tmp_path):
+    """Drive _fetch_and_cache end-to-end against a local file:// archive: it must
+    extract the dylib and atomically write it to the cache path. No network.
+    """
+    from numbduck import utils
+
+    zip_path, dylib_bytes = _build_fake_libduckdb_zip(tmp_path)
+    dest = tmp_path / "cache" / "libduckdb.dylib"
+
+    returned = utils._fetch_and_cache(zip_path.as_uri(), str(dest))
+
+    assert returned == str(dest)
+    assert dest.read_bytes() == dylib_bytes
+
+
+@pytest.mark.parametrize("headless_mode", ["non_tty", "eof"])
+def test_download_consent_headless_raises_branded(monkeypatch, headless_mode):
+    """A headless import (stdin not a TTY, or input hitting EOF) gets the branded
+    instructional RuntimeError naming NUMBDUCK_LIBDUCKDB_DOWNLOAD=1,
+    NUMBDUCK_LIBDUCKDB, and brew, instead of a raw EOFError. No network.
+    """
+    from numbduck import utils
+
+    monkeypatch.delenv("NUMBDUCK_LIBDUCKDB_DOWNLOAD", raising=False)
+
+    class _NonTtyStdin:
+        def isatty(self):
+            return False
+
+    class _TtyStdin:
+        def isatty(self):
+            return True
+
+    def _raise_eof(_prompt):
+        raise EOFError
+
+    if headless_mode == "non_tty":
+        monkeypatch.setattr(sys, "stdin", _NonTtyStdin())
+    else:
+        monkeypatch.setattr(sys, "stdin", _TtyStdin())
+        monkeypatch.setattr("builtins.input", _raise_eof)
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("network access attempted")
+
+    monkeypatch.setattr("urllib.request.urlopen", _no_network)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        utils._download_libduckdb()
+    message = str(exc_info.value)
+    assert "NUMBDUCK_LIBDUCKDB_DOWNLOAD=1" in message
+    assert "NUMBDUCK_LIBDUCKDB=" in message
+    assert "brew" in message
+
+
+@pytest.mark.parametrize("env_configured", [False, True])
+def test_load_duckdb_non_darwin_message(monkeypatch, env_configured):
+    """On a non-macOS platform with a symbol-less wheel and no standalone lib,
+    load_duckdb names the macOS-only download asymmetry and distinguishes an
+    unset NUMBDUCK_LIBDUCKDB from one set to a missing path (echoing it). No
+    network.
+    """
+    from numbduck import utils
+
+    monkeypatch.setattr(utils.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
+    monkeypatch.setattr(utils, "load_lib_path", lambda path: object())
+    monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: False)
+    monkeypatch.setattr(utils, "_find_standalone_libduckdb", lambda: None)
+    monkeypatch.setattr(utils, "_migrate_legacy_cache", lambda: None)
+
+    bad_path = "/no/such/dir/libduckdb.so"
+    if env_configured:
+        monkeypatch.setenv("NUMBDUCK_LIBDUCKDB", bad_path)
+    else:
+        monkeypatch.delenv("NUMBDUCK_LIBDUCKDB", raising=False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        utils.load_duckdb()
+    message = str(exc_info.value)
+    assert "macOS" in message
+    if env_configured:
+        assert bad_path in message
+    else:
+        assert "NUMBDUCK_LIBDUCKDB=" in message
