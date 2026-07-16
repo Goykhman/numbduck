@@ -20,7 +20,7 @@ or negative scaling; the JIT loop scales roughly linearly with cores.
 
 Run:
     python examples/online_scoring.py
-    NUMBDUCK_BENCH_BIG=1 python examples/online_scoring.py    # 500K events
+    NUMBDUCK_BENCH_BIG=1 python examples/online_scoring.py    # 500K-event dataset
 
 Last measured on: 2026-04-10, x86_64 (WSL2, 8 cores), python 3.12.3,
 duckdb 1.5.1, numba 0.64.0:
@@ -86,6 +86,14 @@ def setup_events(n_events, k_features, seed=43):
     return ids, x
 
 
+def sample_sizes(n_events):
+    """(latency_events, scaling_events) actually scored for a dataset of
+    n_events. Sized off the dataset so NUMBDUCK_BENCH_BIG enlarges the measured
+    workload, not just the allocation; scaling scores fewer than latency so all
+    thread counts fit the budget."""
+    return n_events // 10, n_events // 25
+
+
 def score_python(conn, ids, x):
     """Pure-Python loop. Returns (scores, latencies_ns)."""
     n = len(ids)
@@ -114,18 +122,52 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
     for i in range(n):
         t0 = monotonic_ns()
 
-        ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(1), ids[i])
-        ducklib.duckdb_execute_prepared(stmt_p, result_p)
+        # The bind/execute return-code checks below are defensive: this demo's
+        # fixed point-lookup with a valid parameter index never fails them.
+        bind_rc = ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(1), ids[i])
+        if bind_rc != ducklib.DuckDBSuccess:
+            # Bind failed before any result was produced -- nothing to destroy.
+            raise RuntimeError("bind failed in scoring loop")
+        exec_rc = ducklib.duckdb_execute_prepared(stmt_p, result_p)
+        if exec_rc != ducklib.DuckDBSuccess:
+            # execute_prepared fills an error result even on failure; destroy it.
+            ducklib.duckdb_destroy_result(result_p)
+            raise RuntimeError("execute failed in scoring loop")
         result_tup = (
             result_buf[0], result_buf[1], result_buf[2],
             result_buf[3], result_buf[4], result_buf[5],
         )
         chunk_p = ducklib.duckdb_fetch_chunk(result_tup)
+        # This point lookup matches exactly one row; a NULL (0) or empty chunk
+        # means a missed key. Guard before dereferencing so a bad key raises
+        # instead of segfaulting on a NULL chunk inside the nogil loop.
+        if chunk_p == 0 or ducklib.duckdb_data_chunk_get_size(chunk_p) == 0:
+            chunk_buf[0] = chunk_p
+            ducklib.duckdb_destroy_data_chunk(chunk_pp)
+            ducklib.duckdb_destroy_result(result_p)
+            raise RuntimeError("no matching feature row in scoring loop")
 
         v0 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
         v1 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 1)
         v2 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 2)
         v3 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 3)
+        # A NULL feature cell would be read as stale storage and silently score
+        # wrong; the Python reference raises on None*float, so match that here.
+        # Free the chunk+result before raising inside the nogil loop.
+        val0 = ducklib.duckdb_vector_get_validity(v0)
+        val1 = ducklib.duckdb_vector_get_validity(v1)
+        val2 = ducklib.duckdb_vector_get_validity(v2)
+        val3 = ducklib.duckdb_vector_get_validity(v3)
+        if (
+            (val0 != 0 and not ducklib.duckdb_validity_row_is_valid(val0, 0))
+            or (val1 != 0 and not ducklib.duckdb_validity_row_is_valid(val1, 0))
+            or (val2 != 0 and not ducklib.duckdb_validity_row_is_valid(val2, 0))
+            or (val3 != 0 and not ducklib.duckdb_validity_row_is_valid(val3, 0))
+        ):
+            chunk_buf[0] = chunk_p
+            ducklib.duckdb_destroy_data_chunk(chunk_pp)
+            ducklib.duckdb_destroy_result(result_p)
+            raise RuntimeError("NULL feature value in scoring loop")
         d0 = ducklib.duckdb_vector_get_data(v0)
         d1 = ducklib.duckdb_vector_get_data(v1)
         d2 = ducklib.duckdb_vector_get_data(v2)
@@ -152,13 +194,18 @@ def score_jit(conn, ids, x):
     conn_ptr = extract_connection_ptr(conn)
     stmt = create_duckdb_prepared_statement()
     sql = "SELECT w0, w1, w2, w3 FROM features WHERE id = $1"
-    rc = ducklib.duckdb_prepare(conn_ptr, get_unicode_data_p(sql), stmt.ctypes.data)
-    assert rc == ducklib.DuckDBSuccess
     n = len(ids)
     scores = numpy.empty(n, dtype=numpy.float64)
     latencies = numpy.empty(n, dtype=numpy.int64)
-    _score_jit_loop(int(stmt[0]), ids, x, scores, latencies)
-    ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
+    # duckdb_prepare allocates a statement object even when the prepare fails
+    # (it owns the error message), so it must always be destroyed — hence the
+    # try/finally, which also covers any exception raised inside the loop.
+    try:
+        rc = ducklib.duckdb_prepare(conn_ptr, get_unicode_data_p(sql), stmt.ctypes.data)
+        assert rc == ducklib.DuckDBSuccess
+        _score_jit_loop(int(stmt[0]), ids, x, scores, latencies)
+    finally:
+        ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
     return scores, latencies
 
 
@@ -190,8 +237,9 @@ def run_latency_block(conn, ids, x):
 
 
 def run_scaling_block(conn_factory, ids, x):
-    """For T in thread_counts: launch T workers each scoring n/T events.
-    Each worker uses its own connection. Returns dict {variant: {T: total_wall}}."""
+    """For each T in the thread counts, launch T workers that each score n/T of
+    the events; each worker uses its own connection. Returns dict
+    {variant: {T: total_wall}}."""
     n = len(ids)
     out = {"python": {}, "jit": {}}
     if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
@@ -227,7 +275,7 @@ def run_scaling_block(conn_factory, ids, x):
 
 def main():
     print_env()
-    print(f"  Online scoring — {N_EVENTS:,d} events, {N_FEATURES:,d} features")
+    print(f"  Online scoring — {N_EVENTS:,d}-event dataset, {N_FEATURES:,d} features")
     print()
 
     db = duckdb.connect()
@@ -235,9 +283,11 @@ def main():
 
     ids, x = setup_events(N_EVENTS, N_FEATURES)
 
-    # Use a smaller sample for the per-event latency block — the Python path
-    # is so slow per call that 50K Python events would blow the time budget.
-    LAT_N = min(N_EVENTS, 5_000 if os.environ.get("NUMBDUCK_BENCH_TINY") != "1" else 100)
+    # Both blocks score a prefix sample of the dataset (the events are i.i.d., so
+    # a prefix is a valid random sample) because the Python reference is too slow
+    # per call to score the whole pool. Sizing the samples off N_EVENTS is what
+    # makes NUMBDUCK_BENCH_BIG enlarge the measured workload, not just the array.
+    LAT_N, SCALE_N = sample_sizes(N_EVENTS)
     py_lats, jit_lats = run_latency_block(db, ids[:LAT_N], x[:LAT_N])
 
     py_total_us = py_lats.sum() / 1000.0
@@ -261,9 +311,8 @@ def main():
     print(lat_table)
     print()
 
-    # Parallel scaling — use a smaller sample so all four T values fit in the
-    # time budget. Each worker opens its own connection on the same on-disk db.
-    SCALE_N = min(N_EVENTS, 2_000 if os.environ.get("NUMBDUCK_BENCH_TINY") != "1" else 100)
+    # Parallel scaling — each worker opens its own connection on the same
+    # on-disk db.
     scale_fd, scale_db_path = tempfile.mkstemp(suffix=".duckdb", prefix="numbduck_online_scoring_")
     os.close(scale_fd)
     os.remove(scale_db_path)  # duckdb.connect wants to create the file itself
@@ -300,22 +349,34 @@ def main():
         alignments=[">", ">", ">", ">", ">"],
     ))
     print()
+    # Interpolate every number in the Discussion straight from this run's own
+    # measurements so the prose can never contradict the tables above (only the
+    # qualitative story is fixed) and never cites a thread count this mode did
+    # not run.
+    lat_ratio = py_p50 / jit_p50
+    Ts = sorted(scaling["python"].keys())
+    max_T = Ts[-1]
+    best_py_T = max(Ts, key=lambda t: base_py / scaling["python"][t])
+    best_py_speedup = base_py / scaling["python"][best_py_T]
+    jit_max_speedup = base_jit / scaling["jit"][max_T]
     print(
         "  Discussion:\n"
-        "    Per-event latency: the JIT loop runs at ~5.5K events/sec versus\n"
-        "    ~2.5K events/sec for the pure-Python loop — about 2.2x lower median\n"
-        "    latency (152µs vs 369µs at p50). The win is modest because every\n"
-        "    iteration still pays for a real DuckDB execute + chunk fetch + chunk\n"
-        "    destroy + result destroy; the JIT only removes Python's per-iteration\n"
-        "    interpreter and ctypes overhead.\n\n"
-        "    Parallel scaling is the dramatic axis. The pure-Python loop peaks\n"
-        "    at T=2 (1.96x speedup) and then loses ground as more workers contend\n"
-        "    for the GIL — at T=8 it is essentially T=1 again. The JIT loop, with\n"
-        "    nogil=True and a cross-platform monotonic clock bound from libc\n"
-        "    (POSIX) or kernel32.dll (Windows) instead of time.monotonic_ns,\n"
-        "    scales monotonically to ~2.4x at T=8. The remaining gap to ideal 8x\n"
-        "    is from DuckDB-internal locking and shared-memory contention, not\n"
-        "    GIL contention — that is the point of the example."
+        f"    Per-event latency: the JIT loop runs at ~{jit_eps:,.0f} events/sec\n"
+        f"    versus ~{py_eps:,.0f} events/sec for the pure-Python loop — about\n"
+        f"    {lat_ratio:.1f}x lower median latency ({jit_p50:.0f}µs vs {py_p50:.0f}µs at p50).\n"
+        "    The win is modest because every iteration still pays for a real\n"
+        "    DuckDB execute + chunk fetch + chunk destroy + result destroy; the\n"
+        "    JIT only removes Python's per-iteration interpreter and ctypes\n"
+        "    overhead.\n\n"
+        "    Parallel scaling is the dramatic axis. The pure-Python loop is\n"
+        f"    GIL-bound: across T=1..{max_T} its speedup never exceeds {best_py_speedup:.2f}x\n"
+        f"    (best at T={best_py_T}) because the interpreter serializes every\n"
+        "    iteration. The JIT loop, with nogil=True and a cross-platform\n"
+        "    monotonic clock bound from libc (POSIX) or kernel32.dll (Windows)\n"
+        f"    instead of time.monotonic_ns, scales to ~{jit_max_speedup:.2f}x at T={max_T}.\n"
+        "    The remaining gap to ideal is from DuckDB-internal locking and\n"
+        "    shared-memory contention, not GIL contention — that is the point of\n"
+        "    the example."
     )
 
     db.close()
