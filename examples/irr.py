@@ -216,8 +216,8 @@ def irr_bisect(cashflows, periods, n, investment, target_npv):
 # under a bare try/except. A Python exception escaping an @njit impl invoked from
 # a @cfunc is swallowed at the C boundary: numba prints it, returns the zero/void
 # default WITHOUT unwinding into DuckDB (a silent wrong result), and -- when the
-# raise crosses a nested-call boundary (which every raise point here does:
-# borrow_structref, vector_push/extend, irr_bisect) -- skips the scope-exit
+# raise crosses a nested-call boundary (which the guarded operations do:
+# vector_push/extend, irr_bisect) -- skips the scope-exit
 # decref of the borrowed structref still live at that point (an NRT meminfo
 # leak). Catching the exception in-frame runs that decref and lets
 # the callback write a defined sentinel instead. The guard must be try/except,
