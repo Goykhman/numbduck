@@ -5107,7 +5107,7 @@ def test_haversine_udf_null_aggregation_divergence():
     < 50 and NULL < 50 both exclude the row), but under sum() the NaN poisons the
     JIT aggregate while hv_py skips the NULL -- the NaN sentinel round-trips as
     NULL only under predicates that exclude the row (DuckDB orders NaN as the
-    largest DOUBLE, so dist >= X, negations, and ORDER BY retain it)."""
+    largest DOUBLE, so dist >= X and negations retain it)."""
     hv = _import_example("haversine")
     conn = duckdb.connect()
     conn.create_function("hv_py", hv.haversine_py, ["DOUBLE"] * 4, "DOUBLE")

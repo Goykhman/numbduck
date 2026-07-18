@@ -64,12 +64,6 @@ PY_MAX_N = 10_000
 # NULL/unknown transaction. Only column-borne NULLs reach the callback: DuckDB
 # constant-folds a constant NULL argument to a SQL NULL projection upstream, so
 # those rows are answered as SQL NULL directly and the sentinel never appears.
-# This sentinel is NOT SQL NULL: the reference fr_py/fr_arrow variants yield SQL
-# NULL for a NULL-input row (which sum() skips), whereas sum(fr_jit(...)) folds
-# each -1 into the total. So the three variants are interchangeable ONLY on
-# non-NULL input -- which this benchmark generates; a caller with real (column)
-# NULLs must filter the sentinel (or the NULL rows) before aggregating. See
-# test_fraud_score_udf_null_divergence for the exact contract.
 NULL_SCORE = -1
 
 
@@ -254,9 +248,11 @@ def run_one(conn, n):
     conn.execute(sql_arrow).fetchone()
     conn.execute(sql_jit).fetchone()
 
-    # The three variants agree only on non-NULL input (setup_data generates
-    # none); on a NULL row fr_jit's -1 sentinel would diverge from the
-    # references' SQL NULL under sum(). See the NULL_SCORE note above.
+    # fr_jit's -1 sentinel is NOT SQL NULL: fr_py/fr_arrow yield SQL NULL for a NULL
+    # row (which sum() skips) whereas sum(fr_jit(...)) folds each -1 into the total,
+    # so the three variants are interchangeable only on non-NULL input -- which
+    # setup_data generates. A caller with real column NULLs must filter the sentinel
+    # before aggregating. See test_fraud_score_udf_null_divergence for the contract.
     r_arrow = conn.execute(sql_arrow).fetchone()[0]
     r_jit = conn.execute(sql_jit).fetchone()[0]
     if run_py:

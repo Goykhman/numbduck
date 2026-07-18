@@ -127,6 +127,10 @@ def _haversine_chunk_impl(info, chunk, output):
     d_lat2 = ducklib.duckdb_vector_get_data(v_lat2)
     d_lon2 = ducklib.duckdb_vector_get_data(v_lon2)
     d_out = ducklib.duckdb_vector_get_data(output)
+    # A NULL row's data slot holds stale bytes, so consult each input's validity
+    # mask and emit the NaN sentinel rather than folding a garbage coordinate
+    # into the distance. A zero validity pointer means the vector has no NULLs.
+    # NaN is not SQL NULL; see test_haversine_udf_null_aggregation_divergence.
     val_lat1 = ducklib.duckdb_vector_get_validity(v_lat1)
     val_lon1 = ducklib.duckdb_vector_get_validity(v_lon1)
     val_lat2 = ducklib.duckdb_vector_get_validity(v_lat2)
@@ -137,23 +141,9 @@ def _haversine_chunk_impl(info, chunk, output):
     a_lon2 = carray(_cast_int_to_void_p(d_lon2), (n,), dtype=numpy.float64)
     a_out = carray(_cast_int_to_void_p(d_out), (n,), dtype=numpy.float64)
     R = 6371.0
-    # No structref is borrowed and nothing in this loop can raise (math.* return
-    # NaN out-of-domain rather than raising, and the C calls return status/data,
-    # never exceptions), so this scalar callback needs no exception guard -- same
-    # as fraud_score.
+    # No structref is borrowed and nothing here raises as written (math.* return
+    # NaN out-of-domain), so this scalar callback needs no exception guard.
     for i in range(n):
-        # DuckDB can hand this callback rows whose inputs are NULL, and the
-        # data slot of a NULL row holds stale bytes. Consult each input's
-        # validity mask and emit the same NaN sentinel rather than folding a
-        # garbage coordinate into the distance. A zero validity pointer means
-        # the vector carries no NULLs, so the per-row check is skipped.
-        # This NaN equals the references' SQL NULL only under a predicate that
-        # excludes the row: NaN < 50 and NULL < 50 both drop it, as in this
-        # demo's WHERE dist < 50 count. DuckDB orders NaN as the largest DOUBLE,
-        # so dist >= X, negated predicates, and ORDER BY keep the sentinel row
-        # where SQL NULL would drop out -- and under sum/avg/max the NaN
-        # poisons the aggregate while SQL NULL is skipped. Inputs here are
-        # non-NULL, so this path is defensive.
         null_in = (
             (val_lat1 != 0 and not ducklib.duckdb_validity_row_is_valid(val_lat1, i))
             or (val_lon1 != 0 and not ducklib.duckdb_validity_row_is_valid(val_lon1, i))
