@@ -11,6 +11,8 @@ import pytest
 from numba import njit, cfunc, carray
 from numba import types as nb_types
 from numba.experimental import structref
+from numbox.core.vector.vector import vector_push
+from numbox.utils.highlevel import make_structref
 from numbox.utils.lowlevel import get_unicode_data_p
 from numbox.utils.meminfo import (
     borrow_structref, export_meminfo, _incref_meminfo,
@@ -4429,3 +4431,969 @@ def test_load_duckdb_non_darwin_message(monkeypatch, env_configured):
         assert bad_path in message
     else:
         assert "NUMBDUCK_LIBDUCKDB=" in message
+
+
+def _import_irr_example():
+    """Import the IRR UDAF example module (examples/irr.py).
+
+    The module is imported as ``irr`` (the name examples/run_irr.py also uses),
+    keeping ``IRRStateType.__module__`` stable so numba type inference matches.
+    Importing it also compiles every @cfunc/@njit callback, exercising that the
+    finalize -> irr_bisect chain still builds under numba.
+    """
+    examples_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+    if examples_dir not in sys.path:
+        sys.path.insert(0, examples_dir)
+    import irr
+    return irr
+
+
+def test_irr_bisect_large_magnitude_converges():
+    """IRR is scale-invariant, so scaling the sparse single-cashflow case by
+    1000 (10,000,000 investment / 13,000,000 cashflow at period 12) must yield
+    the same monthly rate as the 10,000 / 13,000 case, and a finite value.
+
+    The pre-fix solver only exited on a fixed absolute NPV tolerance, which the
+    residual at the true root cannot reach at large magnitude, so it returned
+    NaN despite full convergence. The bracket-width exit returns the converged
+    rate at every scale.
+    """
+    irr = _import_irr_example()
+    periods = numpy.array([12.0], dtype=numpy.float64)
+    expected = (13000.0 / 10000.0) ** (1.0 / 12.0) - 1.0
+
+    small = irr.irr_bisect(
+        numpy.array([13000.0], dtype=numpy.float64), periods, 1, 10000.0, 0.0)
+    large = irr.irr_bisect(
+        numpy.array([13000000.0], dtype=numpy.float64), periods, 1,
+        10000000.0, 0.0)
+
+    assert math.isfinite(small), small
+    assert math.isfinite(large), large
+    assert abs(small - expected) < 1e-9, (small, expected)
+    assert abs(large - expected) < 1e-9, (large, expected)
+    assert abs(large - small) < 1e-12, (large, small)
+
+
+def test_irr_bisect_out_of_bracket_sentinel():
+    """A root outside [-0.99, 10.0] leaves NPV the same sign at both bracket
+    ends; the solver returns the IRR_NO_BRACKET sentinel (+inf), which is
+    distinct from the NaN the finalize step emits for an empty group.
+    """
+    irr = _import_irr_example()
+
+    # Root near r=999 (monthly return far above the 10.0 bracket top):
+    # NPV(r) = -1 + 1000 / (1 + r) is positive at both r=-0.99 and r=10.
+    high = irr.irr_bisect(
+        numpy.array([1000.0], dtype=numpy.float64),
+        numpy.array([1.0], dtype=numpy.float64), 1, 1.0, 0.0)
+    assert high == irr.IRR_NO_BRACKET
+    assert not math.isnan(high)
+
+    # Near-total loss, root below -0.99: NPV negative at both bracket ends.
+    low = irr.irr_bisect(
+        numpy.array([1.0], dtype=numpy.float64),
+        numpy.array([1.0], dtype=numpy.float64), 1, 1000.0, 0.0)
+    assert low == irr.IRR_NO_BRACKET
+    assert not math.isnan(low)
+
+
+def test_irr_bisect_financing_direction_converges():
+    """A financing-direction stream -- cash received up front, repaid later --
+    makes NPV increase in r (npv_lo < 0 < npv_hi) instead of decrease, yet it
+    still changes sign exactly once inside the bracket. The solver must follow
+    the sign change to that root rather than walk the bracket the wrong way to
+    an endpoint (which would fabricate a ~10.0 rate).
+    """
+    irr = _import_irr_example()
+    # Receive 1000 now (investment = -1000), repay 1300 at month 12:
+    # NPV(r) = 1000 - 1300 / (1 + r)^12 -- negative at r=-0.99, positive at
+    # r=10, with its single root at (1300/1000)^(1/12) - 1.
+    rate = irr.irr_bisect(
+        numpy.array([-1300.0], dtype=numpy.float64),
+        numpy.array([12.0], dtype=numpy.float64), 1, -1000.0, 0.0)
+    expected = (1300.0 / 1000.0) ** (1.0 / 12.0) - 1.0
+    assert math.isfinite(rate), rate
+    assert rate != irr.IRR_NO_BRACKET
+    assert abs(rate - expected) < 1e-9, (rate, expected)
+
+
+def test_irr_bisect_large_period_converges():
+    """At r=-0.99 the discount factor (1+r)**period underflows to 0.0 for
+    period >= ~162; numba's default 'python' error model would raise
+    ZeroDivisionError on the divide, which finalize turns into the empty-group
+    NaN -- misreporting a valid group as "no data". error_model="numpy" yields
+    +inf there instead, so the solver still converges on the true rate.
+    """
+    irr = _import_irr_example()
+    rate = irr.irr_bisect(
+        numpy.array([13000.0], dtype=numpy.float64),
+        numpy.array([200.0], dtype=numpy.float64), 1, 10000.0, 0.0)
+    expected = (13000.0 / 10000.0) ** (1.0 / 200.0) - 1.0
+    assert math.isfinite(rate), rate
+    assert abs(rate - expected) < 1e-9, (rate, expected)
+
+
+def test_irr_bisect_nan_input_returns_nan():
+    """A NaN cashflow is a legal DOUBLE (not SQL NULL), so it reaches the solver
+    and makes an endpoint NaN. It must return the empty-group NaN, not the +inf
+    out-of-bracket sentinel a caller reads as "root above the bracket".
+    """
+    irr = _import_irr_example()
+    rate = irr.irr_bisect(
+        numpy.array([math.nan], dtype=numpy.float64),
+        numpy.array([12.0], dtype=numpy.float64), 1, 10000.0, 0.0)
+    assert math.isnan(rate), rate
+
+
+def test_irr_bisect_zero_cashflow_far_period_matches():
+    """A zero cashflow at a far period (>= 162) contributes nothing to NPV at
+    any rate, so a fully valid group plus one such row must return the SAME root
+    as the group without it. A raw NPV at r=-0.99 instead evaluates 0.0 * inf =
+    NaN there (the discount factor underflows to 0.0 for period >= ~162), so the
+    old solver misreported the valid group as the empty-group NaN.
+    """
+    irr = _import_irr_example()
+    with_zero = irr.irr_bisect(
+        numpy.array([13000.0, 0.0], dtype=numpy.float64),
+        numpy.array([12.0, 200.0], dtype=numpy.float64), 2, 10000.0, 0.0)
+    without_zero = irr.irr_bisect(
+        numpy.array([13000.0], dtype=numpy.float64),
+        numpy.array([12.0], dtype=numpy.float64), 1, 10000.0, 0.0)
+    expected = (13000.0 / 10000.0) ** (1.0 / 12.0) - 1.0
+    assert math.isfinite(with_zero), with_zero
+    assert with_zero == without_zero, (with_zero, without_zero)
+    assert abs(with_zero - expected) < 1e-9, (with_zero, expected)
+
+
+def test_irr_bisect_mixed_sign_far_period_converges():
+    """A mixed-sign stream whose opposite-sign cashflows both sit at far periods
+    (>= 162) makes a raw NPV at r=-0.99 evaluate inf + -inf = NaN, which the old
+    solver misreported as the empty-group NaN. The overflow-free sign evaluation
+    keeps both endpoint signs correct, so the single in-bracket root is found.
+    Cross-checked against an exact-rational bisection over the same bracket --
+    Fraction arithmetic never underflows, so it is independent of the solver's
+    floating-point sign trick.
+    """
+    from fractions import Fraction
+    irr = _import_irr_example()
+    cashflows = [150.0, -1.0, 1.0]
+    periods = [1.0, 200.0, 201.0]
+    rate = irr.irr_bisect(
+        numpy.array(cashflows, dtype=numpy.float64),
+        numpy.array(periods, dtype=numpy.float64), 3, 100.0, 0.0)
+
+    def npv_sign(r):
+        total = Fraction(-100)
+        for c, p in zip(cashflows, periods):
+            total += Fraction(c) / (1 + r) ** int(p)
+        return (total > 0) - (total < 0)
+
+    lo, hi = Fraction(-99, 100), Fraction(10)
+    lo_pos = npv_sign(lo) > 0
+    for _ in range(200):
+        if hi - lo < Fraction(1, 10 ** 15):
+            break
+        mid = (lo + hi) / 2
+        if (npv_sign(mid) > 0) == lo_pos:
+            lo = mid
+        else:
+            hi = mid
+    ref = float((lo + hi) / 2)
+    assert math.isfinite(rate), rate
+    assert abs(rate - ref) < 1e-9, (rate, ref)
+
+
+# --- @cfunc exception-guard coverage for structref-backed UDAF callbacks ---
+#
+# A Python exception raised from an @njit impl invoked through a @cfunc is
+# swallowed at the C boundary: numba prints it and returns the zero/void default
+# without unwinding into DuckDB. When the raise originates in a nested call while
+# a borrowed structref is still live, numba also skips that borrow's scope-exit
+# decref -- an NRT meminfo leak. A bare try/except inside the impl catches the
+# exception in-frame so the decref runs. These tests pin both halves: an
+# unguarded raise leaks, the guarded form does not.
+
+
+@njit
+def _cfunc_guard_raise(x):
+    """Raise from a nested njit call while the caller holds a live borrow.
+
+    Models vector_push -> numpy.empty raising on allocation failure: the raise
+    crosses a call boundary, which is what skips the borrow's decref on an
+    unguarded path (a direct in-frame raise still runs the decref).
+    """
+    if x > 0.5:
+        raise ValueError("induced failure inside a UDAF callback")
+    return x
+
+
+@njit
+def _welford_update_raise_unguarded_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        s = borrow_structref(welford_type, slot[0])
+        welford_update(s, _cfunc_guard_raise(in_vals[i]))
+
+
+@njit
+def _welford_update_raise_guarded_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        # Borrow inside the guard so a raise in the nested call releases it.
+        try:
+            s = borrow_structref(welford_type, slot[0])
+            welford_update(s, _cfunc_guard_raise(in_vals[i]))
+        except Exception:
+            pass
+
+
+@functools.cache
+def _welford_raise_callbacks():
+    """Compile the raising-update @cfunc probes on first use, keeping their eager
+    compilation out of module import so collection cost stays near base."""
+
+    @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+    def unguarded_cb(info, chunk, states):
+        _welford_update_raise_unguarded_impl(info, chunk, states)
+
+    @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+    def guarded_cb(info, chunk, states):
+        _welford_update_raise_guarded_impl(info, chunk, states)
+
+    return unguarded_cb, guarded_cb
+
+
+def _register_raising_welford(conn, name, update_cb):
+    """Register a Welford UDAF that reuses the shared init/combine/finalize/
+    destroy callbacks but swaps in a raising update callback."""
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn_p = extract_connection_ptr(conn)
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(func_p, get_unicode_data_p(name))
+    dbl = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_DOUBLE)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, dbl)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, dbl)
+    tb = numpy.array([dbl], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(tb.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, _welford_state_size_cb.address, _welford_init_cb.address,
+        update_cb.address, _welford_combine_cb.address,
+        _welford_finalize_cb.address)
+    ducklib.duckdb_aggregate_function_set_destructor(
+        func_p, _welford_destroy_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    fb = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(fb.ctypes.data)
+
+
+def _run_raising_udaf_nrt_delta(update_cb):
+    """Register a Welford UDAF whose update raises via a nested call, drive it
+    over a non-empty table, and return the NRT (alloc - free) delta across the
+    query. The raise is swallowed at the @cfunc boundary, so the query reports
+    success regardless of whether a leak occurred."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
+    from numba.core.runtime.nrt import rtsys
+
+    conn = duckdb.connect()
+    _register_raising_welford(conn, "wraise", update_cb)
+    conn.execute("CREATE TABLE t_raise AS SELECT 1.0 AS v FROM range(8)")
+    before = rtsys.get_allocation_stats()
+    row = conn.execute("SELECT wraise(v) FROM t_raise").fetchone()
+    after = rtsys.get_allocation_stats()
+    conn.close()
+    delta = (after.alloc - before.alloc) - (after.free - before.free)
+    return delta, row[0]
+
+
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnraisableExceptionWarning")
+def test_udaf_cfunc_unguarded_raise_leaks_borrowed_state():
+    """Control: without the guard, a raise from a nested call while a borrowed
+    structref is live leaks the borrow's incref -- the C boundary swallows the
+    exception and skips the scope-exit decref. This establishes that the raise
+    is real and consequential, so the guarded assertion below is meaningful.
+
+    The swallow makes numba print the ignored exception, which pytest surfaces
+    as an unraisable-exception warning; it is expected here and filtered."""
+    unguarded_cb, _ = _welford_raise_callbacks()
+    leak, _ = _run_raising_udaf_nrt_delta(unguarded_cb)
+    assert leak > 0, f"expected an NRT leak without the guard, got delta {leak}"
+
+
+def test_udaf_cfunc_guarded_raise_no_leak():
+    """A bare try/except around the borrow and its nested raising call catches
+    the exception in-frame, so numba runs the borrow's decref: NRT alloc == free
+    even though every row's update raises. This is the guard the example
+    aggregate callbacks use."""
+    _, guarded_cb = _welford_raise_callbacks()
+    leak, value = _run_raising_udaf_nrt_delta(guarded_cb)
+    assert leak == 0, f"guarded raise must not leak, got NRT delta {leak}"
+    # Every row's update raised, so the guard dropped them all: the Welford
+    # finalize sees an empty state and yields no real number. This pins that the
+    # induced raise actually fired -- otherwise the result would be a stddev.
+    assert value is None or math.isnan(value), value
+
+
+# ---- Merge-counter UDAF: proves DuckDB invokes the C-API combine callback ----
+
+@structref.register
+class _MergeStateType(nb_types.StructRef):
+    pass
+
+
+_merge_state_fields = [("total", nb_types.float64), ("merges", nb_types.int64)]
+# cache=False keeps numbox's generated structref constructor out of numba's
+# on-disk cache. That cache is keyed by struct name + fields only and resolves
+# _MergeStateType through the module name it was first compiled under, so once it
+# is warm, importing this file under any other qualified name fails type
+# inference (examples/irr.py documents the same trap for IRRState). Disabling the
+# cache has no measurable cost here and keeps the module importable under any name.
+_MergeState = make_structref(
+    "_MergeState", dict(_merge_state_fields), _MergeStateType,
+    jit_options={"cache": False})
+merge_state_type = _MergeStateType(_merge_state_fields)
+
+
+@njit
+def _merge_state_size_impl(info):
+    return numpy.uint64(8)
+
+
+@njit
+def _merge_init_impl(info, state):
+    s = _MergeState(0.0, 0)
+    slot = carray(_cast_int_to_void_p(state), (1,), dtype=numpy.intp)
+    slot[0] = export_meminfo(s)
+
+
+@njit
+def _merge_update_impl(info, chunk, states):
+    n = ducklib.duckdb_data_chunk_get_size(chunk)
+    vec = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
+    in_data = ducklib.duckdb_vector_get_data(vec)
+    state_slots = carray(
+        _cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+    in_vals = carray(
+        _cast_int_to_void_p(in_data), (n,), dtype=numpy.float64)
+    for i in range(n):
+        slot = carray(
+            _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        s = borrow_structref(merge_state_type, slot[0])
+        s.total += in_vals[i]
+
+
+@njit
+def _merge_combine_impl(info, source, target, count):
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    tgt_slots = carray(
+        _cast_int_to_void_p(target), (count,), dtype=numpy.intp)
+    for i in range(count):
+        iu = numpy.uint64(i)
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
+        tgt_slot = carray(
+            _cast_int_to_void_p(tgt_slots[iu]), (1,), dtype=numpy.intp)
+        src = borrow_structref(merge_state_type, src_slot[0])
+        tgt = borrow_structref(merge_state_type, tgt_slot[0])
+        tgt.total += src.total
+        # Count each merged partial so finalize can surface whether combine ran.
+        tgt.merges += src.merges + 1
+
+
+@njit
+def _merge_finalize_impl(info, source, result, count, offset):
+    out_data = ducklib.duckdb_vector_get_data(result)
+    src_slots = carray(
+        _cast_int_to_void_p(source), (count,), dtype=numpy.intp)
+    out_vals = carray(
+        _cast_int_to_void_p(out_data), (offset + count,),
+        dtype=numpy.float64)
+    for i in range(count):
+        iu = numpy.uint64(i)
+        src_slot = carray(
+            _cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
+        s = borrow_structref(merge_state_type, src_slot[0])
+        out_vals[numpy.uint64(offset + iu)] = numpy.float64(s.merges)
+
+
+@njit
+def _merge_destroy_impl(states, count):
+    state_slots = carray(
+        _cast_int_to_void_p(states), (count,), dtype=numpy.intp)
+    for i in range(count):
+        iu = numpy.uint64(i)
+        slot = carray(
+            _cast_int_to_void_p(state_slots[iu]), (1,), dtype=numpy.intp)
+        release_meminfo(slot[0])
+
+
+@functools.cache
+def _merge_probe_callbacks():
+    """Compile the merge-counter UDAF @cfunc callbacks on first use, keeping their
+    eager compilation out of module import so collection cost stays near base.
+    Returns the six callbacks in DuckDB's callback order."""
+
+    @cfunc(nb_types.uint64(nb_types.intp))
+    def state_size_cb(info):
+        return _merge_state_size_impl(info)
+
+    @cfunc(nb_types.void(nb_types.intp, nb_types.intp))
+    def init_cb(info, state):
+        _merge_init_impl(info, state)
+
+    @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+    def update_cb(info, chunk, states):
+        _merge_update_impl(info, chunk, states)
+
+    @cfunc(nb_types.void(nb_types.intp, nb_types.intp,
+                         nb_types.intp, nb_types.uint64))
+    def combine_cb(info, source, target, count):
+        _merge_combine_impl(info, source, target, count)
+
+    @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp,
+                         nb_types.uint64, nb_types.uint64))
+    def finalize_cb(info, source, result, count, offset):
+        _merge_finalize_impl(info, source, result, count, offset)
+
+    @cfunc(nb_types.void(nb_types.intp, nb_types.uint64))
+    def destroy_cb(states, count):
+        _merge_destroy_impl(states, count)
+
+    return state_size_cb, init_cb, update_cb, combine_cb, finalize_cb, destroy_cb
+
+
+def _register_merge_probe(conn):
+    from numbduck.pybridge import extract_connection_ptr
+
+    (state_size_cb, init_cb, update_cb, combine_cb, finalize_cb,
+     destroy_cb) = _merge_probe_callbacks()
+    conn_p = extract_connection_ptr(conn)
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(
+        func_p, get_unicode_data_p("merge_probe"))
+    dbl = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_DOUBLE)
+    ducklib.duckdb_aggregate_function_add_parameter(func_p, dbl)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, dbl)
+    tb = numpy.array([dbl], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(tb.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, state_size_cb.address, init_cb.address,
+        update_cb.address, combine_cb.address,
+        finalize_cb.address)
+    ducklib.duckdb_aggregate_function_set_destructor(
+        func_p, destroy_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    fb = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(fb.ctypes.data)
+
+
+def test_irr_example_combine_path_nrt_balanced():
+    """Drive the irr example UDAF under forced parallelism so DuckDB produces
+    multiple partial states and invokes the C-API combine callback, inside an
+    NRT alloc==free region, and assert the aggregate is still correct. A sibling
+    merge-counter UDAF proves that this configuration actually triggers combine
+    on this DuckDB build -- correctness alone cannot, since a single-partition
+    plan would be correct too."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
+    from numba.core.runtime.nrt import rtsys
+
+    irr = _import_irr_example()
+
+    conn = duckdb.connect()
+    # PRAGMA verify_parallelism forces the parallel aggregate path even for tiny
+    # inputs on duckdb 1.5.4, deterministically exercising combine. (SET
+    # verify_parallelism=true is not a recognized parameter -- only the PRAGMA.)
+    conn.execute("PRAGMA verify_parallelism")
+
+    _register_merge_probe(conn)
+    conn.execute(
+        "CREATE TABLE t_probe AS SELECT (range % 3)::INTEGER AS g, 1.0 AS v "
+        "FROM range(96)")
+    before = rtsys.get_allocation_stats()
+    probe_rows = conn.execute(
+        "SELECT g, merge_probe(v) FROM t_probe GROUP BY g ORDER BY g"
+    ).fetchall()
+    after = rtsys.get_allocation_stats()
+    max_merges = max(int(r[1]) for r in probe_rows)
+    assert max_merges > 0, (
+        f"combine never ran under verify_parallelism: {probe_rows}")
+    assert after.alloc - before.alloc == after.free - before.free, (
+        "combine borrow/release imbalance in the merge probe")
+
+    irr.register_irr(conn)
+    conn.execute(
+        "CREATE TABLE t_irr AS SELECT (range + 1)::DOUBLE AS period, "
+        "1000.0 AS cashflow, 10000.0 AS investment, 0.0 AS target_npv "
+        "FROM range(12)")
+    before = rtsys.get_allocation_stats()
+    irr_val = conn.execute(
+        "SELECT irr(cashflow, period, investment, target_npv) "
+        "FROM t_irr").fetchone()[0]
+    after = rtsys.get_allocation_stats()
+    conn.close()
+
+    npv = -10000.0
+    for t in range(1, 13):
+        npv += 1000.0 / (1.0 + irr_val) ** t
+    assert abs(npv) < 1e-6, f"irr wrong under forced parallelism: npv={npv}"
+    assert after.alloc - before.alloc == after.free - before.free, (
+        "irr example combine-path NRT leak under forced parallelism")
+
+
+def _load_examples_common():
+    """Import examples/_common.py (the shared example utilities), using the same
+    examples/ sys.path insertion as _import_irr_example."""
+    examples_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+    if examples_dir not in sys.path:
+        sys.path.insert(0, examples_dir)
+    import _common
+    return _common
+
+
+def test_assert_results_match_both_nan_equal():
+    """Variants that all legitimately produce NaN agree; NaN != NaN under
+    IEEE-754 must not be reported as a spurious mismatch."""
+    common = _load_examples_common()
+    common.assert_results_match(math.nan, math.nan, label="both nan")
+
+
+def test_assert_results_match_nan_vs_number_fails():
+    """A NaN against a real value is a genuine disagreement and still fails."""
+    common = _load_examples_common()
+    with pytest.raises(AssertionError):
+        common.assert_results_match(math.nan, 1.0, label="nan vs number")
+
+
+def test_format_table_wrong_width_row_raises():
+    """A row whose cell count differs from the header count is rejected up front,
+    both when it is too long (would IndexError) and too short (would truncate)."""
+    common = _load_examples_common()
+    headers = ["A", "B"]
+    alignments = ["<", "<"]
+    with pytest.raises(ValueError):
+        common.format_table(headers, [["1", "2", "3"]], alignments)
+    with pytest.raises(ValueError):
+        common.format_table(headers, [["1"]], alignments)
+
+
+def test_format_table_renders():
+    """A well-formed table renders one line per header row and data row."""
+    common = _load_examples_common()
+    out = common.format_table(
+        ["Variant", "Time"],
+        [["Python", "1.000s"], ["JIT", "0.010s"]],
+        ["<", ">"],
+    )
+    lines = out.splitlines()
+    assert len(lines) == 3
+    assert "Variant" in lines[0] and "Time" in lines[0]
+    assert "Python" in lines[1]
+    assert "JIT" in lines[2]
+
+
+# ---- Example UDF/UDAF integration coverage (NULL handling, sentinels, errors) ----
+
+def _import_example(name):
+    """Import an examples/ module by name via the same examples/ sys.path
+    insertion the example launchers use."""
+    examples_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+    if examples_dir not in sys.path:
+        sys.path.insert(0, examples_dir)
+    return __import__(name)
+
+
+def test_haversine_udf_nulls_and_antipodal():
+    """hv_jit emits the NaN sentinel for a NULL-input row (validity gating) and
+    clamps a genuine ~2-ULP antipodal overshoot to the half-circumference
+    (~pi*R km) instead of returning NaN from an asin domain overshoot. The
+    per-row Python/Arrow/JIT variants agree on the antipodal and overshoot rows
+    (aligned s*s form); a NaN coordinate surfaces as NaN from hv_jit/hv_arrow
+    and as SQL NULL from hv_py (the scalar-UDF bridge maps its NaN return)."""
+    hv = _import_example("haversine")
+    conn = duckdb.connect()
+    conn.create_function("hv_py", hv.haversine_py, ["DOUBLE"] * 4, "DOUBLE")
+    variants = ["hv_py", "hv_jit"]
+    try:
+        # haversine_arrow imports pyarrow lazily at call time, so probe it
+        # eagerly here: without this, registration succeeds on a pyarrow-less
+        # host and the ImportError surfaces mid-query as a _duckdb.Error.
+        import pyarrow.compute  # noqa: F401
+        conn.create_function(
+            "hv_arrow", hv.haversine_arrow, ["DOUBLE"] * 4, "DOUBLE",
+            type="arrow")
+        variants.insert(1, "hv_arrow")
+    except ImportError:
+        pass
+    hv.register_jit_udf(conn)
+    # Row 3 is a real finite near-antipodal pair whose float64 `a` overshoots 1.0
+    # by ~2 ULP: unclamped, math.asin(sqrt(a)) raises (hv_py) or yields NaN
+    # (hv_jit). Read the UDFs directly off the VALUES relation (no intervening
+    # TABLE): a materialized NULL DOUBLE decodes to NaN, but the VALUES vector
+    # leaves the NULL row's data slot as finite zero-page bytes, so an ungated
+    # read would fold them into a real distance -- that is what makes the
+    # validity gate observable here rather than coinciding with a stored NaN.
+    pts = (
+        "(VALUES "
+        "(0, 0.0, 0.0, 0.0, 0.0), "
+        "(1, 0.0, 0.0, 0.0, 180.0), "
+        "(2, 58.1876182035592, 101.86801103432617, "
+        "-58.187618203558735, -78.13198896566404), "
+        "(3, CAST(NULL AS DOUBLE), 0.0, 10.0, 20.0), "
+        "(4, CAST('nan' AS DOUBLE), 0.0, 10.0, 20.0)) "
+        "AS t(rid, lat1, lon1, lat2, lon2)")
+    cols = ", ".join(f"{v}(lat1, lon1, lat2, lon2)" for v in variants)
+    # ORDER BY an explicit row id so the positional unpack below is independent
+    # of VALUES scan order (mirrors the sibling divergence/sentinel tests).
+    same, antipode, overshoot, null_row, nan_row = conn.execute(
+        f"SELECT {cols} FROM {pts} ORDER BY rid").fetchall()
+    conn.close()
+    jit = variants.index("hv_jit")
+    half = math.pi * 6371.0
+    for v in same:
+        assert v is not None and abs(v) < 1e-6, same
+    # Exact antipode and the 2-ULP overshoot both clamp to the half-circumference
+    # and the variants agree there (a would otherwise diverge near the asin
+    # singularity if the formula forms were not aligned).
+    for label, row in (("antipode", antipode), ("overshoot", overshoot)):
+        assert all(v is not None and math.isfinite(v) for v in row), (label, row)
+        assert abs(row[jit] - half) < 1.0, (label, row)
+        assert max(row) - min(row) < 1e-6, (label, row)
+    # NULL-input row: hv_jit writes the NaN sentinel; hv_py/hv_arrow yield NULL.
+    assert null_row[jit] is not None and math.isnan(null_row[jit]), null_row
+    for i, v in enumerate(variants):
+        if v != "hv_jit":
+            assert null_row[i] is None, (v, null_row)
+    # NaN-coordinate row: every variant computes through the NaN. hv_jit and
+    # hv_arrow surface it as NaN -- pinning the Arrow clamp's if_else form,
+    # since a min-based clamp would collapse the NaN `a` to 1.0 and fabricate
+    # the antipodal distance -- while DuckDB's scalar-UDF bridge maps hv_py's
+    # NaN return to SQL NULL.
+    assert nan_row[jit] is not None and math.isnan(nan_row[jit]), nan_row
+    assert nan_row[variants.index("hv_py")] is None, nan_row
+    if "hv_arrow" in variants:
+        arrow = variants.index("hv_arrow")
+        assert nan_row[arrow] is not None and math.isnan(nan_row[arrow]), nan_row
+
+
+def test_haversine_udf_null_aggregation_divergence():
+    """hv_jit emits NaN for a NULL-input row while the reference hv_py yields SQL
+    NULL. Under the demo's filtering count (WHERE dist < 50) the two agree (NaN
+    < 50 and NULL < 50 both exclude the row), but under sum() the NaN poisons the
+    JIT aggregate while hv_py skips the NULL -- the NaN sentinel round-trips as
+    NULL only under predicates that exclude the row (DuckDB orders NaN as the
+    largest DOUBLE, so dist >= X and negations retain it)."""
+    hv = _import_example("haversine")
+    conn = duckdb.connect()
+    conn.create_function("hv_py", hv.haversine_py, ["DOUBLE"] * 4, "DOUBLE")
+    hv.register_jit_udf(conn)
+    # Query straight off VALUES (not a stored TABLE): a materialized NULL DOUBLE
+    # decodes to NaN bytes, which would mask the validity gate, whereas the
+    # VALUES vector leaves the NULL row's data slot as finite zero-page bytes --
+    # so without the gate hv_jit folds a real distance in and the sum assertion
+    # below (isnan) would fail instead of passing vacuously.
+    pts = (
+        "(VALUES "
+        "(0.0, 0.0, 0.0, 0.0), "
+        "(0.0, 0.0, 89.0, 179.0), "
+        "(CAST(NULL AS DOUBLE), 0.0, 10.0, 20.0)) AS t(lat1, lon1, lat2, lon2)")
+    args = "lat1, lon1, lat2, lon2"
+    c_py = conn.execute(
+        f"SELECT count(*) FROM {pts} WHERE hv_py({args}) < 50").fetchone()[0]
+    c_jit = conn.execute(
+        f"SELECT count(*) FROM {pts} WHERE hv_jit({args}) < 50").fetchone()[0]
+    assert c_py == c_jit == 1, (c_py, c_jit)
+    s_py = conn.execute(f"SELECT sum(hv_py({args})) FROM {pts}").fetchone()[0]
+    s_jit = conn.execute(f"SELECT sum(hv_jit({args})) FROM {pts}").fetchone()[0]
+    conn.close()
+    assert s_py is not None and math.isfinite(s_py), s_py
+    assert s_jit is not None and math.isnan(s_jit), s_jit
+
+
+def test_fraud_score_udf_null_sentinel():
+    """fr_jit scores a normal row with its positive rule sum and any NULL-input
+    row with the -1 sentinel (a scalar UDF cannot write SQL NULL here)."""
+    fr = _import_example("fraud_score")
+    conn = duckdb.connect()
+    fr.register_jit_udf(conn)
+    conn.execute(
+        "CREATE TABLE tx AS SELECT * FROM (VALUES "
+        "(5000.0, CAST(1 AS TINYINT), CAST(2 AS TINYINT), CAST(3 AS TINYINT), "
+        "CAST(4 AS TINYINT), CAST(20 AS INTEGER)), "
+        "(CAST(NULL AS DOUBLE), CAST(1 AS TINYINT), CAST(1 AS TINYINT), "
+        "CAST(12 AS TINYINT), CAST(0 AS TINYINT), CAST(0 AS INTEGER))) "
+        "AS t(amount, country, home_country, hour, risk_tier, recent_txns)")
+    rows = conn.execute(
+        "SELECT fr_jit(amount, country, home_country, hour, risk_tier, "
+        "recent_txns) FROM tx ORDER BY amount NULLS LAST").fetchall()
+    conn.close()
+    assert rows[0][0] > 0, rows[0]              # valid row (amount = 5000)
+    assert rows[1][0] == fr.NULL_SCORE, rows[1]  # NULL-amount row sorts last
+
+
+def test_fraud_score_udf_null_divergence():
+    """The JIT variant cannot emit SQL NULL, so on a NULL-input row it writes the
+    -1 sentinel while the reference fr_py yields SQL NULL. A naive sum() therefore
+    diverges (fr_py skips NULLs, fr_jit folds in -1); filtering the sentinel
+    restores agreement -- the contract the NULL_SCORE comment documents."""
+    fr = _import_example("fraud_score")
+    types = ["DOUBLE", "TINYINT", "TINYINT", "TINYINT", "TINYINT", "INTEGER"]
+    conn = duckdb.connect()
+    conn.create_function("fr_py", fr.fraud_score_py, types, "INTEGER")
+    fr.register_jit_udf(conn)
+    conn.execute(
+        "CREATE TABLE tx AS SELECT * FROM (VALUES "
+        "(1500.0, CAST(1 AS TINYINT), CAST(2 AS TINYINT), CAST(3 AS TINYINT), "
+        "CAST(4 AS TINYINT), CAST(20 AS INTEGER)), "
+        "(CAST(NULL AS DOUBLE), CAST(1 AS TINYINT), CAST(1 AS TINYINT), "
+        "CAST(12 AS TINYINT), CAST(0 AS TINYINT), CAST(0 AS INTEGER))) "
+        "AS t(amount, country, home_country, hour, risk_tier, recent_txns)")
+    cols = "amount, country, home_country, hour, risk_tier, recent_txns"
+    per_row = conn.execute(
+        f"SELECT fr_py({cols}), fr_jit({cols}) FROM tx ORDER BY amount NULLS LAST"
+    ).fetchall()
+    assert per_row[0] == (17, 17), per_row[0]
+    assert per_row[1][0] is None, per_row[1]           # fr_py -> SQL NULL
+    assert per_row[1][1] == fr.NULL_SCORE, per_row[1]  # fr_jit -> -1 sentinel
+    s_py, s_jit = conn.execute(
+        f"SELECT sum(fr_py({cols})), sum(fr_jit({cols})) FROM tx").fetchone()
+    assert s_py == 17, s_py            # SQL sum skips the NULL row
+    assert s_jit == 16, s_jit          # -1 sentinel folded into the total
+    s_jit_filtered = conn.execute(
+        f"SELECT sum(s) FROM (SELECT fr_jit({cols}) AS s FROM tx) q "
+        f"WHERE s <> {fr.NULL_SCORE}").fetchone()[0]
+    conn.close()
+    assert s_jit_filtered == s_py, s_jit_filtered
+
+
+def test_fraud_score_udf_all_valid_fast_path():
+    """With no NULL inputs every validity pointer is zero, so fr_jit runs the
+    check-free fast loop; its per-row scores must still match fr_py exactly."""
+    fr = _import_example("fraud_score")
+    types = ["DOUBLE", "TINYINT", "TINYINT", "TINYINT", "TINYINT", "INTEGER"]
+    conn = duckdb.connect()
+    conn.create_function("fr_py", fr.fraud_score_py, types, "INTEGER")
+    fr.register_jit_udf(conn)
+    fr.setup_data(conn, 5000)
+    cols = "amount, country, home_country, hour, risk_tier, recent_txns"
+    mism = conn.execute(
+        f"SELECT count(*) FROM transactions "
+        f"WHERE fr_py({cols}) IS DISTINCT FROM fr_jit({cols})").fetchone()[0]
+    conn.close()
+    assert mism == 0, mism
+
+
+def test_online_scoring_missing_key_raises():
+    """score_jit's point lookup matches exactly one feature row; a missing id
+    makes duckdb_fetch_chunk return a NULL chunk (chunk_p == 0), which the loop's
+    null-pointer guard turns into a RuntimeError instead of dereferencing it. The
+    companion ``size == 0`` half of that guard is defensive: this missing-key path
+    reaches the null-pointer half, not the empty-chunk half."""
+    osc = _import_example("online_scoring")
+    conn = duckdb.connect()
+    osc.setup_features(conn, 8)
+    ids = numpy.array([0, 999999], dtype=numpy.int64)
+    x = numpy.zeros((2, 4), dtype=numpy.float64)
+    with pytest.raises(RuntimeError):
+        osc.score_jit(conn, ids, x)
+    conn.close()
+
+
+def test_online_scoring_null_feature_raises():
+    """A NULL feature value for a matched id would be read as stale storage and
+    silently mis-scored; the JIT loop reads the validity mask and raises, matching
+    the pure-Python reference (which raises on None*float)."""
+    osc = _import_example("online_scoring")
+    conn = duckdb.connect()
+    osc.setup_features(conn, 8)
+    conn.execute("UPDATE features SET w2 = NULL WHERE id = 3")
+    ids = numpy.array([3], dtype=numpy.int64)
+    x = numpy.ones((1, 4), dtype=numpy.float64)
+    with pytest.raises(TypeError):
+        osc.score_python(conn, ids, x)
+    with pytest.raises(RuntimeError):
+        osc.score_jit(conn, ids, x)
+    conn.close()
+
+
+def test_online_scoring_big_knob_scales_workload():
+    """NUMBDUCK_BENCH_BIG must enlarge the actually-scored workload, not just the
+    allocated dataset: the latency/scaling sample sizes are derived from the
+    dataset size, so a 10x-bigger dataset scores proportionally more events while
+    the default sizes stay put (and scaling always scores fewer than latency)."""
+    osc = _import_example("online_scoring")
+    assert osc.sample_sizes(50_000) == (5_000, 2_000)
+    lat_big, scale_big = osc.sample_sizes(500_000)
+    assert lat_big > 5_000 and scale_big > 2_000
+    assert scale_big < lat_big
+
+
+def test_irr_udaf_group_sentinels():
+    """Through the real irr aggregate under GROUP BY: an all-NULL group yields
+    NaN (no data), an out-of-bracket group yields +inf, and a normal group
+    yields a finite rate -- pinning the finalize sentinel distinctions."""
+    irr = _import_example("irr")
+    conn = duckdb.connect()
+    irr.register_irr(conn)
+    conn.execute(
+        "CREATE TABLE cf AS SELECT * FROM (VALUES "
+        "(1, -10000.0, 0.0, 0.0, 0.0), "
+        "(1, 13000.0, 12.0, 0.0, 0.0), "
+        "(2, 1000.0, 1.0, 1.0, 0.0), "
+        "(3, CAST(NULL AS DOUBLE), 12.0, 10000.0, 0.0)) "
+        "AS t(g, cashflow, period, investment, target_npv)")
+    res = dict(conn.execute(
+        "SELECT g, irr(cashflow, period, investment, target_npv) "
+        "FROM cf GROUP BY g ORDER BY g").fetchall())
+    conn.close()
+    expected = (13000.0 / 10000.0) ** (1.0 / 12.0) - 1.0
+    assert math.isfinite(res[1]) and abs(res[1] - expected) < 1e-9, res[1]
+    assert res[2] == math.inf, res[2]
+    assert math.isnan(res[3]), res[3]
+
+
+# irr raising-update harness: pins that update rolls a mid-row push failure back
+# to the row boundary so cashflows/periods stay paired (not just truncated).
+# Built lazily so importing the irr example and compiling this probe stay out of
+# module import; the first test that needs it pays the cost.
+@functools.cache
+def _irr_rollback_probe():
+    irr = _import_example("irr")
+    irr_state_type = irr.irr_state_type
+
+    @njit
+    def probe_impl(info, chunk, states):
+        n = ducklib.duckdb_data_chunk_get_size(chunk)
+        cf = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(
+            ducklib.duckdb_data_chunk_get_vector(chunk, 0))), (n,), dtype=numpy.float64)
+        pd = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(
+            ducklib.duckdb_data_chunk_get_vector(chunk, 1))), (n,), dtype=numpy.float64)
+        inv = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(
+            ducklib.duckdb_data_chunk_get_vector(chunk, 2))), (n,), dtype=numpy.float64)
+        tgt = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(
+            ducklib.duckdb_data_chunk_get_vector(chunk, 3))), (n,), dtype=numpy.float64)
+        slots = carray(_cast_int_to_void_p(states), (n,), dtype=numpy.intp)
+        for i in range(n):
+            slot = carray(_cast_int_to_void_p(slots[i]), (1,), dtype=numpy.intp)
+            if slot[0] == 0:
+                continue
+            s = borrow_structref(irr_state_type, slot[0])
+            n0 = s.cashflows.size
+            try:
+                vector_push(s.cashflows, cf[i])
+                vector_push(s.periods, pd[i])
+                # A negative period marks the poison row: raise via a nested call
+                # AFTER both pushes have grown the vectors, so the except path
+                # must reset BOTH lengths to the row boundary -- exercising both
+                # rollback lines rather than leaving the periods reset a no-op.
+                if pd[i] < 0.0:
+                    _cfunc_guard_raise(1.0)
+                if s.initialized == 0:
+                    s.investment = inv[i]
+                    s.target_npv = tgt[i]
+                    s.initialized = 1
+            except Exception:
+                s.cashflows.size = n0
+                s.periods.size = n0
+
+    @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
+    def probe_cb(info, chunk, states):
+        probe_impl(info, chunk, states)
+
+    return irr, probe_cb
+
+
+def _register_irr_with_update(conn, name, update_cb):
+    from numbduck.pybridge import extract_connection_ptr
+
+    irr = _import_example("irr")
+    conn_p = extract_connection_ptr(conn)
+    func_p = ducklib.duckdb_create_aggregate_function()
+    ducklib.duckdb_aggregate_function_set_name(func_p, get_unicode_data_p(name))
+    dbl = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_DOUBLE)
+    for _ in range(4):
+        ducklib.duckdb_aggregate_function_add_parameter(func_p, dbl)
+    ducklib.duckdb_aggregate_function_set_return_type(func_p, dbl)
+    tb = numpy.array([dbl], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(tb.ctypes.data)
+    ducklib.duckdb_aggregate_function_set_functions(
+        func_p, irr._irr_state_size_cb.address,
+        irr._irr_init_cb.address, update_cb.address,
+        irr._irr_combine_cb.address,
+        irr._irr_finalize_cb.address)
+    ducklib.duckdb_aggregate_function_set_destructor(
+        func_p, irr._irr_destroy_cb.address)
+    rc = ducklib.duckdb_register_aggregate_function(conn_p, func_p)
+    assert rc == ducklib.DuckDBSuccess
+    fb = numpy.array([func_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_aggregate_function(fb.ctypes.data)
+
+
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnraisableExceptionWarning")
+def test_irr_update_rollback_drops_poison_row_cleanly():
+    """Validate the update-callback rollback LOGIC via a structural stand-in.
+
+    The real _irr_update_cb rollback (examples/irr.py) fires only on an actual
+    vector_push allocation failure mid-row, which SQL input cannot trigger, so
+    it is not directly reachable from a test. _irr_rollback_probe builds a copy
+    of that rollback logic with an injected raise on a poison row (period < 0)
+    placed AFTER both pushes have grown the vectors, so the except path must
+    reset both lengths -- both rollback lines are required here. The failure
+    is rolled back to the row boundary so the group's cashflows/periods stay
+    paired, the aggregate equals the same group without the poison row, and NRT
+    stays balanced. This pins the rollback logic but does NOT by itself guard the
+    example's real callback against regression -- they share source, not this
+    registration. The example's real finalize and combine except guards share
+    this coverage gap: they defend against faults SQL input cannot trigger
+    (finalize confirmed undrivable across an adversarial input battery; combine
+    can fault only on a vector-allocation failure), so no test drives their
+    except branch -- they are pinned by inspection, not execution."""
+    from numba.core.runtime import _nrt_python as _nrt
+    _nrt.memsys_enable_stats()
+    from numba.core.runtime.nrt import rtsys
+
+    _, probe_cb = _irr_rollback_probe()
+    conn = duckdb.connect()
+    _register_irr_with_update(conn, "irr_probe", probe_cb)
+    conn.execute(
+        "CREATE TABLE cfp AS SELECT * FROM (VALUES "
+        "(-10000.0, 0.0, 0.0, 0.0), "
+        "(99999.0, -5.0, 0.0, 0.0), "
+        "(13000.0, 12.0, 0.0, 0.0)) "
+        "AS t(cashflow, period, investment, target_npv)")
+    before = rtsys.get_allocation_stats()
+    rate = conn.execute(
+        "SELECT irr_probe(cashflow, period, investment, target_npv) "
+        "FROM cfp").fetchone()[0]
+    after = rtsys.get_allocation_stats()
+    conn.close()
+    leak = (after.alloc - before.alloc) - (after.free - before.free)
+    expected = (13000.0 / 10000.0) ** (1.0 / 12.0) - 1.0
+    assert leak == 0, f"rollback path leaked NRT delta {leak}"
+    assert rate is not None and abs(rate - expected) < 1e-9, rate

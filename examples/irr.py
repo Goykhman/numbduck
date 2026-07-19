@@ -13,7 +13,12 @@ SQL usage:
     SELECT irr(cashflow, period, investment, target_npv) FROM monthly_data;
 
 NULL handling: rows where any of the four input columns is NULL are
-skipped. If all rows are skipped, the result is NaN.
+skipped. If all rows are skipped, the result is NaN. If a group has data
+but its IRR lies outside the solver's [-0.99, 10.0] monthly-rate bracket,
+the result is +inf (see ``irr_bisect``), kept distinct from the
+empty-group NaN so callers can tell "no root in range" from "no data".
+NaN is also returned when an input value is itself a NaN DOUBLE (a legal
+value the NULL gate does not skip), so NaN broadly means "no usable rate".
 
 Input contract: ``investment`` and ``target_npv`` are treated as
 per-group constants. The aggregate captures the value from the first
@@ -25,7 +30,11 @@ Run via ``python examples/run_irr.py``. This module must be imported
 (not executed as ``__main__``) so ``IRRStateType`` has a stable
 ``__module__`` across processes; otherwise numba's warm cache fails
 type inference with ``No conversion from numba.IRRStateType(...) to
-numba.IRRStateType(...)``.
+numba.IRRStateType(...)``. Import it only under the name ``irr`` (as
+run_irr.py and the tests do): the generated structref's numba disk cache is
+keyed without the importer's module name, so importing it under a different
+qualified name (e.g. ``examples.irr``) after the cache was warmed as ``irr``
+fails with a bare ModuleNotFoundError from numba's cache unpickler.
 """
 import math
 import sys
@@ -74,24 +83,126 @@ irr_state_type = IRRStateType(_irr_state_fields)
 
 
 # ---- Bisection solver ----
+#
+# Monthly IRR is the rate r that zeroes the group's NPV. The solver assumes a
+# single sign change of NPV(r) inside the fixed bracket [-0.99, 10.0] — true
+# when the cashflow stream changes sign once (an up-front investment followed
+# by positive cashflows), in which case NPV is monotonically decreasing in r.
+# Convergence is on the width of the rate bracket, not on the residual NPV:
+# the achievable NPV residual at the true root scales with the cashflow
+# magnitude (|dNPV/dr| * ulp(r)), so a fixed absolute NPV tolerance cannot be
+# met for large amounts even after r has resolved to machine precision. A
+# rate-width test is scale-invariant and always terminates with the converged
+# rate.
+
+IRR_NO_BRACKET = math.inf
+
+
+@njit
+def _irr_npv_sign(cashflows, periods, n, investment, target_npv, r):
+    # Return a value with the SAME SIGN as NPV(r), evaluated in log space so no
+    # term can overflow or divide by zero. Bisection converges on the width of
+    # the rate bracket and only ever needs the sign of NPV at a probe rate, so an
+    # overflow-free sign is all that is required.
+    #
+    #   NPV(r) = -investment - target_npv + sum_i cashflows[i] * (1+r)**(-p_i)
+    #          = -investment - target_npv + sum_i cashflows[i] * exp(-p_i * L)
+    #
+    # with L = log1p(r). Factoring out the largest exponent M over the nonzero
+    # terms (the -investment-target_npv constant sits at period 0, exponent 0):
+    #   sign(NPV(r)) == sign( sum_i c_i * exp(-p_i*L - M) )
+    # because exp(M) > 0. Every scaled term then has magnitude <= |c_i|, so the
+    # sum cannot overflow and the r=-0.99 far-period underflow (1+r)**p -> 0 that
+    # produced 0*inf -> NaN and inf + -inf -> NaN in a raw NPV can no longer
+    # arise. Zero cashflows are skipped: they contribute nothing at any rate but
+    # would otherwise inflate M (a zero flow at a far period) and underflow the
+    # real terms to a spurious 0. A NaN input still propagates into the sum, so
+    # the caller's isnan check keeps detecting a NaN DOUBLE; an exactly-0.0
+    # result carries no sign information.
+    log1p_r = math.log1p(r)
+    const = -investment - target_npv
+    have_term = const != 0.0
+    max_exp = 0.0
+    for i in range(n):
+        if cashflows[i] == 0.0:
+            continue
+        e = -periods[i] * log1p_r
+        if not have_term or e > max_exp:
+            max_exp = e
+            have_term = True
+    if not have_term:
+        return 0.0
+    scaled = 0.0
+    if const != 0.0:
+        scaled += const * math.exp(-max_exp)
+    for i in range(n):
+        if cashflows[i] == 0.0:
+            continue
+        scaled += cashflows[i] * math.exp(-periods[i] * log1p_r - max_exp)
+    return scaled
+
 
 @njit
 def irr_bisect(cashflows, periods, n, investment, target_npv):
+    """Solve for the monthly IRR by bisection on the rate bracket [-0.99, 10.0].
+
+    Returns the converged rate (the final bracket midpoint) once the bracket
+    width in r falls below ``rate_tol``; the midpoint is then within
+    ``rate_tol / 2`` of the true root, regardless of cashflow magnitude.
+
+    Assumes NPV(r) changes sign exactly once inside the bracket -- true for a
+    conventional stream with a single sign change (an outlay followed by
+    returns). The only guard is on the two bracket endpoints: when they share
+    NPV sign the solver returns the ``IRR_NO_BRACKET`` sentinel (+inf). That
+    covers a root outside [-0.99, 10.0] (a monthly return above 1000% or a
+    near-total loss below -99%) and any EVEN number of in-bracket roots. The
+    sentinel is deliberately distinct from the NaN the finalize step emits for
+    an empty group, so callers can distinguish "no single root in the bracket"
+    from "no data".
+
+    A non-conventional stream with an ODD number of in-bracket sign changes
+    (multiple IRRs) has opposite-sign endpoints, so the endpoint guard does not
+    fire: bisection converges to ONE of the roots and returns it WITHOUT
+    signalling that the single-IRR assumption was violated. Pass only
+    conventional (single-sign-change) streams where a well-defined IRR matters.
+    """
     r_lo = -0.99
     r_hi = 10.0
+    sign_lo = _irr_npv_sign(cashflows, periods, n, investment, target_npv, r_lo)
+    sign_hi = _irr_npv_sign(cashflows, periods, n, investment, target_npv, r_hi)
+    if math.isnan(sign_lo) or math.isnan(sign_hi):
+        # A NaN cashflow/period/investment/target is a legal DOUBLE (not SQL
+        # NULL, so the validity gate never skipped it) and propagates into the
+        # sign sum. Return the empty-group NaN rather than misreport it as the
+        # +inf out-of-bracket sentinel, which callers read as "root above the
+        # bracket". The overflow-free sign evaluation cannot manufacture this NaN
+        # from a finite far-period stream, so an endpoint NaN now means only a
+        # NaN DOUBLE input -- never a valid group.
+        return math.nan
+    if (sign_lo > 0.0) == (sign_hi > 0.0):
+        # Endpoints share a sign, OR one carries no sign information (an
+        # exactly-0.0 sign sum -- e.g. an all-zero-cashflow group): no single
+        # sign change straddles the bracket. Return the IRR_NO_BRACKET sentinel,
+        # kept distinct from the empty-group NaN so a fully valid group is never
+        # read as "no data". This covers a root outside [-0.99, 10.0] and any
+        # EVEN number of in-bracket roots.
+        return IRR_NO_BRACKET
+    # Keep the half that still straddles the sign change. NPV can either fall
+    # (conventional: pay first, receive later -> sign_lo > 0) or rise
+    # (financing: receive first, repay later -> sign_lo < 0) across the bracket,
+    # so bisect against sign_lo's sign rather than assuming a fixed orientation.
+    lo_positive = sign_lo > 0.0
+    rate_tol = 1e-12
     for _ in range(100):
+        if (r_hi - r_lo) < rate_tol:
+            break
         r_mid = (r_lo + r_hi) / 2.0
-        npv = -investment - target_npv
-        for i in range(n):
-            iu = numpy.uint64(i)
-            npv += cashflows[iu] / (1.0 + r_mid) ** periods[iu]
-        if abs(npv) < 1e-9:
-            return r_mid
-        if npv > 0.0:
+        sign_mid = _irr_npv_sign(cashflows, periods, n, investment, target_npv, r_mid)
+        if (sign_mid > 0.0) == lo_positive:
             r_lo = r_mid
         else:
             r_hi = r_mid
-    return math.nan
+    return (r_lo + r_hi) / 2.0
 
 
 # ---- DuckDB aggregate callbacks ----
@@ -100,9 +211,24 @@ def irr_bisect(cashflows, periods, n, investment, target_npv):
 # combine (parallel merge) -> finalize -> destroy.
 # Each receives raw pointers; we use the bridge intrinsics to
 # reconstruct the structref from the state slot.
+#
+# The callbacks that borrow a structref (update/combine/finalize) run their body
+# under a bare try/except. A Python exception escaping an @njit impl invoked from
+# a @cfunc is swallowed at the C boundary: numba prints it, returns the zero/void
+# default WITHOUT unwinding into DuckDB (a silent wrong result), and -- when the
+# raise crosses a nested-call boundary (which the guarded operations do:
+# vector_push/extend, irr_bisect) -- skips the scope-exit
+# decref of the borrowed structref still live at that point (an NRT meminfo
+# leak). Catching the exception in-frame runs that decref and lets
+# the callback write a defined sentinel instead. The guard must be try/except,
+# not try/finally -- try/finally re-raises on numba 0.65.1, reintroducing both
+# the swallow and the leak. state_size and destroy borrow nothing and their
+# bodies cannot raise, so they carry no guard.
 
 @njit
 def _irr_state_size_impl(info):
+    # One meminfo pointer per group: 8 bytes. No allocation or borrow here and
+    # a constant return cannot raise, so this callback needs no exception guard.
     return numpy.uint64(8)
 
 
@@ -113,12 +239,16 @@ def _irr_state_size_cb(info):
 
 @njit
 def _irr_init_impl(info, state):
-    cfs = Float64Vector(64)
-    pds = Float64Vector(64)
-    s = IRRState(cfs, pds, 0.0, 0.0, 0)
-    p = export_meminfo(s)
     slot = carray(_cast_int_to_void_p(state), (1,), dtype=numpy.intp)
-    slot[0] = p
+    # Sentinel on failure: a null state pointer, which every later callback
+    # (update/combine/finalize/destroy) skips rather than deref.
+    try:
+        cfs = Float64Vector(64)
+        pds = Float64Vector(64)
+        s = IRRState(cfs, pds, 0.0, 0.0, 0)
+        slot[0] = export_meminfo(s)
+    except Exception:
+        slot[0] = 0
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp))
@@ -137,10 +267,10 @@ def _irr_update_impl(info, chunk, states):
     pd_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_pd)), (n,), dtype=numpy.float64)
     inv_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_inv)), (n,), dtype=numpy.float64)
     npv_data = carray(_cast_int_to_void_p(ducklib.duckdb_vector_get_data(vec_npv)), (n,), dtype=numpy.float64)
-    val_cf = numpy.intp(ducklib.duckdb_vector_get_validity(vec_cf))
-    val_pd = numpy.intp(ducklib.duckdb_vector_get_validity(vec_pd))
-    val_inv = numpy.intp(ducklib.duckdb_vector_get_validity(vec_inv))
-    val_npv = numpy.intp(ducklib.duckdb_vector_get_validity(vec_npv))
+    val_cf = ducklib.duckdb_vector_get_validity(vec_cf)
+    val_pd = ducklib.duckdb_vector_get_validity(vec_pd)
+    val_inv = ducklib.duckdb_vector_get_validity(vec_inv)
+    val_npv = ducklib.duckdb_vector_get_validity(vec_npv)
     state_slots = carray(_cast_int_to_void_p(states), (n,), dtype=numpy.intp)
     for i in range(n):
         if val_cf != 0 and not ducklib.duckdb_validity_row_is_valid(val_cf, i):
@@ -151,15 +281,29 @@ def _irr_update_impl(info, chunk, states):
             continue
         if val_npv != 0 and not ducklib.duckdb_validity_row_is_valid(val_npv, i):
             continue
-        iu = numpy.uint64(i)
-        slot = carray(_cast_int_to_void_p(state_slots[iu]), (1,), dtype=numpy.intp)
+        slot = carray(_cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        # A failed init leaves a null slot; borrowing it would deref a null
+        # meminfo (a segfault the try/except cannot catch), so skip it.
+        if slot[0] == 0:
+            continue
         s = borrow_structref(irr_state_type, slot[0])
-        vector_push(s.cashflows, cf_data[iu])
-        vector_push(s.periods, pd_data[iu])
-        if s.initialized == 0:
-            s.investment = inv_data[iu]
-            s.target_npv = npv_data[iu]
-            s.initialized = 1
+        n0 = s.cashflows.size
+        # Any exception escaping this impl is swallowed at the @cfunc boundary
+        # (see the module note above), which skips the borrow's scope-exit
+        # decref; catching it in-frame runs that decref. If a push fails mid-row
+        # (e.g. an oversize buffer regrow), roll both vectors back to the row
+        # boundary so cashflows and periods stay paired -- the row is dropped,
+        # not left misaligned for every subsequent pairing.
+        try:
+            vector_push(s.cashflows, cf_data[i])
+            vector_push(s.periods, pd_data[i])
+            if s.initialized == 0:
+                s.investment = inv_data[i]
+                s.target_npv = npv_data[i]
+                s.initialized = 1
+        except Exception:
+            s.cashflows.size = n0
+            s.periods.size = n0
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
@@ -172,17 +316,29 @@ def _irr_combine_impl(info, source, target, count):
     src_slots = carray(_cast_int_to_void_p(source), (count,), dtype=numpy.intp)
     tgt_slots = carray(_cast_int_to_void_p(target), (count,), dtype=numpy.intp)
     for i in range(count):
-        iu = numpy.uint64(i)
-        src_slot = carray(_cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
-        tgt_slot = carray(_cast_int_to_void_p(tgt_slots[iu]), (1,), dtype=numpy.intp)
+        src_slot = carray(_cast_int_to_void_p(src_slots[i]), (1,), dtype=numpy.intp)
+        tgt_slot = carray(_cast_int_to_void_p(tgt_slots[i]), (1,), dtype=numpy.intp)
+        # Skip if either side's init failed (null slot) -- borrowing a null
+        # meminfo would segfault past the try/except.
+        if src_slot[0] == 0 or tgt_slot[0] == 0:
+            continue
         src = borrow_structref(irr_state_type, src_slot[0])
         tgt = borrow_structref(irr_state_type, tgt_slot[0])
-        vector_extend(tgt.cashflows, src.cashflows)
-        vector_extend(tgt.periods, src.periods)
-        if tgt.initialized == 0:
-            tgt.investment = src.investment
-            tgt.target_npv = src.target_npv
-            tgt.initialized = src.initialized
+        n0 = tgt.cashflows.size
+        # An exception escaping this impl is swallowed at the @cfunc boundary,
+        # skipping the borrows' scope-exit decref; catching it in-frame releases
+        # source and target. If the second extend fails after the first grew
+        # tgt.cashflows, roll tgt back to n0 so its two vectors stay paired.
+        try:
+            vector_extend(tgt.cashflows, src.cashflows)
+            vector_extend(tgt.periods, src.periods)
+            if tgt.initialized == 0:
+                tgt.investment = src.investment
+                tgt.target_npv = src.target_npv
+                tgt.initialized = src.initialized
+        except Exception:
+            tgt.cashflows.size = n0
+            tgt.periods.size = n0
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp, nb_types.uint64))
@@ -196,14 +352,28 @@ def _irr_finalize_impl(info, source, result, count, offset):
     src_slots = carray(_cast_int_to_void_p(source), (count,), dtype=numpy.intp)
     out_vals = carray(_cast_int_to_void_p(out_data), (offset + count,), dtype=numpy.float64)
     for i in range(count):
-        iu = numpy.uint64(i)
-        src_slot = carray(_cast_int_to_void_p(src_slots[iu]), (1,), dtype=numpy.intp)
-        s = borrow_structref(irr_state_type, src_slot[0])
-        n = len(s.cashflows)
-        if n == 0:
-            out_vals[numpy.uint64(offset + iu)] = math.nan
-            continue
-        out_vals[numpy.uint64(offset + iu)] = irr_bisect(s.cashflows, s.periods, n, s.investment, s.target_npv)
+        # Sentinel on failure: NaN, matching the empty-group output below. The
+        # borrow lives inside the guard so an exception escaping this impl --
+        # swallowed at the @cfunc boundary -- releases it instead of leaking.
+        try:
+            src_slot = carray(_cast_int_to_void_p(src_slots[i]), (1,), dtype=numpy.intp)
+            # A failed init leaves a null slot; emit the empty-group NaN rather
+            # than deref a null meminfo (an uncatchable segfault).
+            if src_slot[0] == 0:
+                out_vals[offset + i] = math.nan
+                continue
+            s = borrow_structref(irr_state_type, src_slot[0])
+            # update/combine roll back on a mid-row failure, so the two vectors
+            # are always paired; take the shorter length anyway as a cheap read
+            # bound so _irr_npv_sign can never index past either.
+            n = min(len(s.cashflows), len(s.periods))
+            if n == 0:
+                out_vals[offset + i] = math.nan
+            else:
+                out_vals[offset + i] = irr_bisect(
+                    s.cashflows, s.periods, n, s.investment, s.target_npv)
+        except Exception:
+            out_vals[offset + i] = math.nan
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp, nb_types.uint64, nb_types.uint64))
@@ -215,9 +385,11 @@ def _irr_finalize_cb(info, source, result, count, offset):
 def _irr_destroy_impl(states, count):
     state_slots = carray(_cast_int_to_void_p(states), (count,), dtype=numpy.intp)
     for i in range(count):
-        iu = numpy.uint64(i)
-        slot = carray(_cast_int_to_void_p(state_slots[iu]), (1,), dtype=numpy.intp)
-        release_meminfo(slot[0])
+        slot = carray(_cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
+        # Skip the null sentinel a failed init leaves behind. release_meminfo is
+        # a direct NRT decref that cannot raise, so no exception guard is needed.
+        if slot[0] != 0:
+            release_meminfo(slot[0])
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.uint64))

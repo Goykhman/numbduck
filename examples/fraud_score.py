@@ -40,7 +40,6 @@ import sys
 
 import duckdb
 import numpy
-import pyarrow.compute as pc
 from numba import carray, cfunc, njit
 from numba import types as nb_types
 from numbox.utils.lowlevel import _cast_int_to_void_p, get_unicode_data_p
@@ -57,6 +56,15 @@ if os.environ.get("NUMBDUCK_BENCH_BIG") == "1":
 if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
     ROW_COUNTS = [1_000]
 PY_MAX_N = 10_000
+# A @cfunc scalar callback cannot emit SQL NULL (ducklib binds no validity-write
+# helper) and cannot raise either -- an exception escaping the C boundary is
+# swallowed, not propagated -- so a NULL input that reaches the callback must be
+# written as some in-band value. We use an out-of-range sentinel: every rule adds
+# non-negative points, so a real score is always >= 0 and -1 unambiguously flags a
+# NULL/unknown transaction. Only column-borne NULLs reach the callback: DuckDB
+# constant-folds a constant NULL argument to a SQL NULL projection upstream, so
+# those rows are answered as SQL NULL directly and the sentinel never appears.
+NULL_SCORE = -1
 
 
 def fraud_score_py(amount, country, home_country, hour, risk_tier, recent_txns):
@@ -79,6 +87,9 @@ def fraud_score_py(amount, country, home_country, hour, risk_tier, recent_txns):
 
 
 def fraud_score_arrow(amount, country, home_country, hour, risk_tier, recent_txns):
+    # Lazy import: only the Arrow cross-check variant needs pyarrow, so importing
+    # this module for the JIT path (or a test) does not require it.
+    import pyarrow.compute as pc
     s_amt = pc.if_else(
         pc.greater(amount, 1000.0),
         3,
@@ -99,6 +110,26 @@ def fraud_score_arrow(amount, country, home_country, hour, risk_tier, recent_txn
     return pc.cast(total, "int32")
 
 
+@njit(inline="always")
+def _score_row(amt, co, hco, hr, rt, rx):
+    s = 0
+    if amt > 1000.0:
+        s += 3
+    elif amt > 200.0:
+        s += 1
+    if co != hco:
+        s += 4
+    if hr < 6 or hr >= 23:
+        s += 2
+    if rt >= 3:
+        s += 5
+    elif rt == 2:
+        s += 2
+    if rx > 10:
+        s += 3
+    return s
+
+
 @njit
 def _fraud_chunk_impl(info, chunk, output):
     n = ducklib.duckdb_data_chunk_get_size(chunk)
@@ -115,6 +146,12 @@ def _fraud_chunk_impl(info, chunk, output):
     d_rt = ducklib.duckdb_vector_get_data(v_rt)
     d_rx = ducklib.duckdb_vector_get_data(v_rx)
     d_out = ducklib.duckdb_vector_get_data(output)
+    val_amt = ducklib.duckdb_vector_get_validity(v_amt)
+    val_co = ducklib.duckdb_vector_get_validity(v_co)
+    val_hco = ducklib.duckdb_vector_get_validity(v_hco)
+    val_hr = ducklib.duckdb_vector_get_validity(v_hr)
+    val_rt = ducklib.duckdb_vector_get_validity(v_rt)
+    val_rx = ducklib.duckdb_vector_get_validity(v_rx)
     a_amt = carray(_cast_int_to_void_p(d_amt), (n,), dtype=numpy.float64)
     a_co = carray(_cast_int_to_void_p(d_co), (n,), dtype=numpy.int8)
     a_hco = carray(_cast_int_to_void_p(d_hco), (n,), dtype=numpy.int8)
@@ -122,26 +159,34 @@ def _fraud_chunk_impl(info, chunk, output):
     a_rt = carray(_cast_int_to_void_p(d_rt), (n,), dtype=numpy.int8)
     a_rx = carray(_cast_int_to_void_p(d_rx), (n,), dtype=numpy.int32)
     a_out = carray(_cast_int_to_void_p(d_out), (n,), dtype=numpy.int32)
+    # DuckDB returns a zero validity pointer for a vector with no NULLs. When all
+    # six inputs are fully valid (the common case, and all this benchmark feeds),
+    # run a check-free tight loop so the per-row validity probe cannot throttle the
+    # hot path; fall back to the guarded loop only when some vector carries NULLs.
+    any_validity = (
+        val_amt != 0 or val_co != 0 or val_hco != 0
+        or val_hr != 0 or val_rt != 0 or val_rx != 0
+    )
+    if not any_validity:
+        for i in range(n):
+            a_out[i] = _score_row(a_amt[i], a_co[i], a_hco[i], a_hr[i], a_rt[i], a_rx[i])
+        return
     for i in range(n):
-        s = 0
-        amt = a_amt[i]
-        if amt > 1000.0:
-            s += 3
-        elif amt > 200.0:
-            s += 1
-        if a_co[i] != a_hco[i]:
-            s += 4
-        h = a_hr[i]
-        if h < 6 or h >= 23:
-            s += 2
-        rt = a_rt[i]
-        if rt >= 3:
-            s += 5
-        elif rt == 2:
-            s += 2
-        if a_rx[i] > 10:
-            s += 3
-        a_out[i] = s
+        # A NULL row's data slot holds stale bytes. Read each input's validity mask
+        # and score any NULL-bearing row with the sentinel instead of folding
+        # garbage into the total.
+        null_in = (
+            (val_amt != 0 and not ducklib.duckdb_validity_row_is_valid(val_amt, i))
+            or (val_co != 0 and not ducklib.duckdb_validity_row_is_valid(val_co, i))
+            or (val_hco != 0 and not ducklib.duckdb_validity_row_is_valid(val_hco, i))
+            or (val_hr != 0 and not ducklib.duckdb_validity_row_is_valid(val_hr, i))
+            or (val_rt != 0 and not ducklib.duckdb_validity_row_is_valid(val_rt, i))
+            or (val_rx != 0 and not ducklib.duckdb_validity_row_is_valid(val_rx, i))
+        )
+        if null_in:
+            a_out[i] = NULL_SCORE
+            continue
+        a_out[i] = _score_row(a_amt[i], a_co[i], a_hco[i], a_hr[i], a_rt[i], a_rx[i])
 
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
@@ -168,9 +213,11 @@ def register_jit_udf(conn):
         ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
     ducklib.duckdb_scalar_function_set_function(func_p, _fraud_chunk_cb.address)
     rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
-    assert rc == ducklib.DuckDBSuccess
+    # Registration never takes ownership of func_p, so destroy it on both the
+    # success and failure paths — i.e. before asserting on the return code.
     func_buf = numpy.array([func_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
+    assert rc == ducklib.DuckDBSuccess
 
 
 def setup_data(conn, n):
@@ -201,6 +248,11 @@ def run_one(conn, n):
     conn.execute(sql_arrow).fetchone()
     conn.execute(sql_jit).fetchone()
 
+    # fr_jit's -1 sentinel is NOT SQL NULL: fr_py/fr_arrow yield SQL NULL for a NULL
+    # row (which sum() skips) whereas sum(fr_jit(...)) folds each -1 into the total,
+    # so the three variants are interchangeable only on non-NULL input -- which
+    # setup_data generates. A caller with real column NULLs must filter the sentinel
+    # before aggregating. See test_fraud_score_udf_null_divergence for the contract.
     r_arrow = conn.execute(sql_arrow).fetchone()[0]
     r_jit = conn.execute(sql_jit).fetchone()[0]
     if run_py:
@@ -234,9 +286,10 @@ def main():
     register_jit_udf(conn)
 
     rows = []
-    arr_jit_ratios = []
+    timings = []
     for n in ROW_COUNTS:
         t_py, t_arrow, t_jit = run_one(conn, n)
+        timings.append((n, t_py, t_arrow, t_jit))
         py_str = f"{t_py*1000:.2f}ms" if t_py is not None else "n/a"
         py_ratio = f"{t_py/t_jit:.0f}x" if t_py is not None else "n/a"
         rows.append([
@@ -247,7 +300,6 @@ def main():
             py_ratio,
             f"{t_arrow/t_jit:.1f}x",
         ])
-        arr_jit_ratios.append(t_arrow / t_jit)
 
     print(format_table(
         headers=["Rows", "Python", "Arrow", "JIT", "Py/JIT", "Arr/JIT"],
@@ -255,7 +307,12 @@ def main():
         alignments=[">", ">", ">", ">", ">", ">"],
     ))
     print()
-    largest_ratio = arr_jit_ratios[-1]
+    # Interpolate every ratio straight from the measurements above so the prose can
+    # never contradict the printed table (only the qualitative story is fixed). The
+    # first tier runs all three variants; the last is the widest N.
+    n0, t_py0, t_arrow0, t_jit0 = timings[0]
+    nL, _, t_arrowL, t_jitL = timings[-1]
+    largest_ratio = t_arrowL / t_jitL
     print(f"  Largest-tier Arrow/JIT ratio: {largest_ratio:.2f}x")
     print(
         "  DECISION: < 2x means this example does not motivate switching tools.\n"
@@ -265,17 +322,18 @@ def main():
     print(
         "  Discussion:\n"
         "    Arrow does the right vectorized work and beats the per-row Python\n"
-        "    scalar UDF by ~60x at 10K rows — pyarrow's chained pc.if_else is the\n"
-        "    correct stock-DuckDB tool for branchy logic, full credit. The JIT\n"
-        "    chunk callback then beats Arrow by ~16x at 10K, ~67x at 100K, and\n"
-        "    ~1750x at 1M rows. The growing gap is *partly* an artifact: each\n"
-        "    Arrow UDF chunk crosses the Python boundary and allocates a fresh\n"
-        "    intermediate array for every pc.if_else step, while the JIT computes\n"
-        "    the whole ruleset in registers with no allocations. Even discounting\n"
-        "    the chunk-crossing overhead, the JIT path is comfortably above the\n"
-        "    spec's 2x decision threshold and the example earns its place. The\n"
-        "    case for numbduck strengthens further when the branchy work is\n"
-        "    inside a JIT loop calling other DuckDB functions (see online_scoring)."
+        f"    scalar UDF by ~{t_py0 / t_arrow0:.0f}x at {n0:,d} rows — pyarrow's chained\n"
+        "    pc.if_else is the correct stock-DuckDB tool for branchy logic, full\n"
+        f"    credit. The JIT chunk callback then beats Arrow by ~{t_arrow0 / t_jit0:.0f}x\n"
+        f"    at {n0:,d} rows, widening to ~{t_arrowL / t_jitL:.0f}x at {nL:,d} rows. The\n"
+        "    growing gap is *partly* an artifact: each Arrow UDF chunk crosses the\n"
+        "    Python boundary and allocates a fresh intermediate array for every\n"
+        "    pc.if_else step, while the JIT computes the whole ruleset in registers\n"
+        "    with no allocations. Even discounting the chunk-crossing overhead, the\n"
+        "    JIT path is comfortably above the spec's 2x decision threshold and the\n"
+        "    example earns its place. The case for numbduck strengthens further when\n"
+        "    the branchy work is inside a JIT loop calling other DuckDB functions\n"
+        "    (see online_scoring)."
     )
     conn.close()
 
