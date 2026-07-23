@@ -537,7 +537,7 @@ def duckdb_create_map_type(key_type_p, value_type_p):
     return _call_lib_func("duckdb_create_map_type", (key_type_p, value_type_p))
 
 
-@proxy(signatures.get("duckdb_create_map_value"), jit_options=jit_options)
+@proxy_if_available(duckdb_lib, signatures.get("duckdb_create_map_value"), jit_options=jit_options)
 def duckdb_create_map_value(map_type_p, keys_p, values_p, entry_count):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_map_value """
     return _call_lib_func("duckdb_create_map_value", (map_type_p, keys_p, values_p, entry_count))
@@ -591,7 +591,7 @@ def duckdb_create_union_type(member_types_p, member_names_p, member_count):
     return _call_lib_func("duckdb_create_union_type", (member_types_p, member_names_p, member_count))
 
 
-@proxy(signatures.get("duckdb_create_union_value"), jit_options=jit_options)
+@proxy_if_available(duckdb_lib, signatures.get("duckdb_create_union_value"), jit_options=jit_options)
 def duckdb_create_union_value(union_type_p, tag_index, value_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_union_value """
     return _call_lib_func("duckdb_create_union_value", (union_type_p, tag_index, value_p))
@@ -1192,7 +1192,7 @@ def duckdb_validity_row_is_valid(validity_p, row):
     return _call_lib_func("duckdb_validity_row_is_valid", (validity_p, row))
 
 
-@proxy(signatures.get("duckdb_value_to_string"), jit_options=jit_options)
+@proxy_if_available(duckdb_lib, signatures.get("duckdb_value_to_string"), jit_options=jit_options)
 def duckdb_value_to_string(value_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_value_to_string """
     return _call_lib_func("duckdb_value_to_string", (value_p,))
@@ -1252,7 +1252,7 @@ def duckdb_scalar_function_set_function(scalar_function_p, function_p):
     return _call_lib_func("duckdb_scalar_function_set_function", (scalar_function_p, function_p))
 
 
-@proxy(signatures.get("duckdb_scalar_function_set_bind"), jit_options=jit_options)
+@proxy_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_bind"), jit_options=jit_options)
 def duckdb_scalar_function_set_bind(scalar_function_p, bind_p):
     """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_scalar_function_set_bind """
     return _call_lib_func("duckdb_scalar_function_set_bind", (scalar_function_p, bind_p))
