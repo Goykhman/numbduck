@@ -160,7 +160,7 @@ See [`test_array_meminfo_bridge_refcount_ladder`](test_ducklib.py) for a working
 
 ### Stability across numba versions
 
-`removerefctpass` has used the same `_accepted_nrtfns` set and `_legalize` logic since [numba 0.43 (2019)](https://github.com/numba/numba/blob/0.43.0/numba/core/removerefctpass.py). The symmetric stripping is a structural property of the pass, not an implementation accident. If a future numba version changes the pass to strip increfs but not decrefs (or vice versa), both the current approach and a direct-call approach would break — the whole structref-via-raw-pointer pattern depends on the pass being all-or-nothing.
+`removerefctpass` has used the same `_accepted_nrtfns` set and `_legalize` logic since [numba 0.43 (2019)](https://github.com/numba/numba/blob/0.43.0/numba/targets/removerefctpass.py). The symmetric stripping is a structural property of the pass, not an implementation accident. If a future numba version changes the pass to strip increfs but not decrefs (or vice versa), both the current approach and a direct-call approach would break — the whole structref-via-raw-pointer pattern depends on the pass being all-or-nothing.
 
 
 ## Registration: telling DuckDB about the UDAF
