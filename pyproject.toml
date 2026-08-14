@@ -23,7 +23,7 @@ readme = "README.md"
 
 [tool.pytest.ini_options]
 markers = [
-    "benchmark: slow benchmarks, run only locally (deselected in CI)",
+    "benchmark: slow benchmarks; skipped by default, run with -m benchmark",
 ]
 
 [tool.setuptools.dynamic]
