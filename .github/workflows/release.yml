@@ -20,15 +20,19 @@ jobs:
 
       - name: Determine version
         id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          if [ "${{ github.ref_type }}" == "tag" ]; then
-            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+          if [ "${REF_TYPE}" == "tag" ]; then
+            echo "VERSION=${REF_NAME}" >> $GITHUB_ENV
           else
-            BUILD_VERSION="0.0.${{ github.run_number }}"
+            BUILD_VERSION="0.0.${RUN_NUMBER}"
             echo "VERSION=${BUILD_VERSION}" >> $GITHUB_ENV
           fi
       - name: Write version to __init__.py
-        run: echo "__version__ = '${{ env.VERSION }}'" > numbduck/__init__.py
+        run: echo "__version__ = '${VERSION}'" > numbduck/__init__.py
 
       - name: Build release distributions
         run: |
@@ -63,4 +67,4 @@ jobs:
           path: dist/
 
       - name: Publish release distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
