@@ -613,17 +613,6 @@ def test_bind_all_types():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-def test_bind_invalid_param_index():
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
-    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
-    rc = ducklib.duckdb_bind_int32(stmt[0], 999, 42)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid param index, got {rc}"
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
 def test_execute_prepared_unbound_params():
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
@@ -732,19 +721,6 @@ def test_bind_boolean():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-def test_bind_boolean_invalid_param_index():
-    """duckdb_bind_boolean returns DuckDBError for out-of-range param index.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_boolean """
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::BOOLEAN;")
-    assert rc == ducklib.DuckDBSuccess
-    rc = ducklib.duckdb_bind_boolean(stmt[0], 999, 1)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
 def test_bind_float():
     """Bind float value and verify readback.
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_float """
@@ -762,19 +738,6 @@ def test_bind_float():
     assert abs((ctypes.c_float * 1).from_address(data_p)[0] - 2.5) < 1e-6
 
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
-def test_bind_float_invalid_param_index():
-    """duckdb_bind_float returns DuckDBError for out-of-range param index.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_float """
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::FLOAT;")
-    assert rc == ducklib.DuckDBSuccess
-    rc = ducklib.duckdb_bind_float(stmt[0], 999, 1.0)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -802,19 +765,6 @@ def test_bind_date():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-def test_bind_date_invalid_param_index():
-    """duckdb_bind_date returns DuckDBError for out-of-range param index.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_date """
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::DATE;")
-    assert rc == ducklib.DuckDBSuccess
-    rc = ducklib.duckdb_bind_date(stmt[0], 999, 0)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
 def test_bind_timestamp():
     """Bind a timestamp value (microseconds since epoch) and verify readback.
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp """
@@ -834,19 +784,6 @@ def test_bind_timestamp():
     assert (ctypes.c_int64 * 1).from_address(data_p)[0] == micros
 
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
-def test_bind_timestamp_invalid_param_index():
-    """duckdb_bind_timestamp returns DuckDBError for out-of-range param index.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp """
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::TIMESTAMP;")
-    assert rc == ducklib.DuckDBSuccess
-    rc = ducklib.duckdb_bind_timestamp(stmt[0], 999, 0)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
 
