@@ -1143,6 +1143,30 @@ def test_bind_decimal_wide_upper64():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+def test_bind_value_success_roundtrip():
+    """duckdb_bind_value's only other coverage is the invalid-index sweep, whose
+    DuckDBError assertion a completely broken binding would also satisfy. Bind a
+    real value handle at a valid index and read the result back so the success
+    path, handle marshaling included, is pinned."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::BIGINT;")
+    assert rc == ducklib.DuckDBSuccess
+    val_p = ducklib.duckdb_create_int64(-654321)
+    assert val_p != 0
+    rc = ducklib.duckdb_bind_value(stmt[0], 1, val_p)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    stored = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert stored == -654321
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_value(val_p)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 _INVALID_INDEX_VARCHAR = ctypes.c_char_p(b"x")
 _INVALID_INDEX_VARCHAR_P = ctypes.c_void_p.from_buffer(_INVALID_INDEX_VARCHAR).value
 _INVALID_INDEX_BLOB = ctypes.create_string_buffer(b"\x00\x01\x02\x03", 4)
@@ -1222,18 +1246,19 @@ def test_invalid_param_index_sweep_covers_every_indexed_bind():
     duckdb_bind_* wrappers that take a parameter index, reading the set off
     ducklib itself.
 
-    Two exclusions. duckdb_bind_parameter_index resolves a name to an index
-    rather than binding at one. Wrappers whose C symbol is absent from the loaded
-    libduckdb are version-gated stubs that raise NotImplementedError when called,
-    so demanding them here would force a hard failure into the sweep on exactly
-    the duckdb versions that cannot run them."""
+    One exclusion. duckdb_bind_parameter_index resolves a name to an index
+    rather than binding at one. There is deliberately no symbol-presence filter:
+    every bind wrapper is a plain @proxy binding, so a missing C symbol aborts
+    the ducklib import outright rather than producing a callable stub, and a
+    presence filter would let a future version-gated bind wrapper drop out of
+    both sides of this comparison silently. If one ever appears, this test
+    should fail and force it into the table with its own gating."""
     swept = {name for name, _ in _INVALID_INDEX_BINDS}
     expected = {
         name for name in dir(ducklib)
         if name.startswith("duckdb_bind_")
         and name in ducklib.signatures
         and name != "duckdb_bind_parameter_index"
-        and hasattr(ducklib.duckdb_lib, name)
     }
     assert swept == expected, (
         f"uncovered: {sorted(expected - swept)}, stale: {sorted(swept - expected)}")
@@ -2152,6 +2177,7 @@ def test_create_array_value():
     # its logical type instead: id, fixed size, and element type. Do not destroy
     # array_type_p; duckdb_get_value_type returns the value handle itself.
     array_type_p = ducklib.duckdb_get_value_type(av)
+    assert array_type_p == av
     assert ducklib.duckdb_get_type_id(array_type_p) == ducklib.DUCKDB_TYPE_ARRAY
     assert ducklib.duckdb_array_type_array_size(array_type_p) == 3
     child_type_p = ducklib.duckdb_array_type_child_type(array_type_p)
@@ -2209,8 +2235,10 @@ def test_get_value_type():
     type_p = ducklib.duckdb_get_value_type(val_p)
     assert type_p != 0
     assert ducklib.duckdb_get_type_id(type_p) == ducklib.DUCKDB_TYPE_INTEGER
-    # duckdb_get_value_type returns the same handle as the value for
-    # scalar types — do NOT destroy both (double-free)
+    # duckdb_get_value_type returns the value handle itself; assert the
+    # aliasing so the do-not-destroy rule stays pinned by a check the call
+    # can actually fail (destroying both would double-free).
+    assert type_p == val_p
     aux_destroy_value(val_p)
 
 
@@ -2886,10 +2914,10 @@ def test_aggregate_function_round_trip():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-
-
-
-
+# The compiled callback below captures _INIT_CB_FIRED_ADDR at import time, so
+# any reset must write through the existing buffer in place; rebinding
+# _INIT_CB_FIRED to a fresh array would leave the callback writing freed
+# memory from a DuckDB worker thread.
 _INIT_CB_FIRED = numpy.zeros(1, dtype=numpy.int64)
 _INIT_CB_FIRED_ADDR = _INIT_CB_FIRED.ctypes.data
 
@@ -2921,7 +2949,7 @@ def test_scalar_function_set_init():
     constant projection happens to give exactly one today."""
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
-    _INIT_CB_FIRED[0] = 0
+    _INIT_CB_FIRED[0] = 0  # reset in place; see the note above _INIT_CB_FIRED
 
     func_p = ducklib.duckdb_create_scalar_function()
     ducklib.duckdb_scalar_function_set_name(
@@ -5667,9 +5695,13 @@ def test_irr_update_rollback_drops_poison_row_cleanly():
 
 def _wrapper_name_triples(source):
     """For every ``_call_lib_func`` wrapper defined at module level in `source`,
-    yield ``(def_name, decorator_key, body_literal)`` where ``decorator_key`` is
-    the string passed to ``signatures.get(...)`` in the wrapper's decorator and
-    ``body_literal`` is the string passed to ``_call_lib_func(...)`` in the body.
+    yield ``(def_name, decorator_key, body_literal, param_names, call_arg_names)``
+    where ``decorator_key`` is the string passed to ``signatures.get(...)`` in the
+    wrapper's decorator, ``body_literal`` is the string passed to
+    ``_call_lib_func(...)`` in the body, ``param_names`` is the def's parameter
+    list, and ``call_arg_names`` is the names inside the ``_call_lib_func``
+    argument tuple (None when that argument is not a plain tuple of names, so the
+    caller fails loudly instead of skipping the wrapper).
     """
     tree = ast.parse(source)
     for node in tree.body:
@@ -5682,6 +5714,12 @@ def _wrapper_name_triples(source):
             continue
         first = ret.value.args[0]
         body_literal = first.value if isinstance(first, ast.Constant) else None
+        call_arg_names = None
+        if len(ret.value.args) > 1 and isinstance(ret.value.args[1], ast.Tuple):
+            elts = ret.value.args[1].elts
+            if all(isinstance(e, ast.Name) for e in elts):
+                call_arg_names = [e.id for e in elts]
+        param_names = [a.arg for a in node.args.args]
         decorator_key = None
         for dec in node.decorator_list:
             args = list(getattr(dec, "args", []))
@@ -5693,7 +5731,7 @@ def _wrapper_name_triples(source):
                         and arg.func.value.id == "signatures"
                         and arg.args and isinstance(arg.args[0], ast.Constant)):
                     decorator_key = arg.args[0].value
-        yield node.name, decorator_key, body_literal
+        yield node.name, decorator_key, body_literal, param_names, call_arg_names
 
 
 def _proxy_decorated_names(source):
@@ -5717,7 +5755,12 @@ def test_wrapper_name_integrity():
     ``signatures.get`` key, the ``def`` name, and the ``_call_lib_func`` literal);
     a typo in any one that happens to match another registered key would compile
     against the wrong signature silently. Assert all three agree and resolve to a
-    registered signatures key, parsing the source so a future drift fails here.
+    registered signatures key. Names alone are not enough: numbox uses the
+    registered signature only for the return type, so a wrapper that forwards the
+    wrong arguments (one dropped, two swapped) still emits a native call and
+    passes garbage at runtime. Assert arity and order too: the ``_call_lib_func``
+    tuple must forward exactly the def's parameters, and their count must match
+    the registered signature's.
     """
     with open(ducklib.__file__, encoding="utf-8") as f:
         source = f.read()
@@ -5728,12 +5771,15 @@ def test_wrapper_name_integrity():
     # statement, or switches to one of the struct-by-value call helpers drops out
     # of the integrity check silently; comparing the two sets makes that a
     # failure that names the wrapper.
-    seen = {name for name, _, _ in triples}
+    seen = {triple[0] for triple in triples}
     assert seen == _proxy_decorated_names(source), {
         "unchecked": sorted(_proxy_decorated_names(source) - seen),
         "unexpected": sorted(seen - _proxy_decorated_names(source)),
     }
-    for name, decorator_key, body_literal in triples:
+    for name, decorator_key, body_literal, param_names, call_arg_names in triples:
         assert body_literal == name, (name, body_literal)
         assert decorator_key == name, (name, decorator_key)
         assert name in ducklib.signatures, name
+        assert call_arg_names == param_names, (name, param_names, call_arg_names)
+        assert len(param_names) == len(ducklib.signatures[name].args), (
+            name, param_names, str(ducklib.signatures[name]))
