@@ -19,18 +19,14 @@ jobs:
           python-version: "3.12"
 
       - name: Determine version
-        id: version
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          RUN_NUMBER: ${{ github.run_number }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          if [ "${REF_TYPE}" == "tag" ]; then
-            echo "VERSION=${REF_NAME}" >> $GITHUB_ENV
-          else
-            BUILD_VERSION="0.0.${RUN_NUMBER}"
-            echo "VERSION=${BUILD_VERSION}" >> $GITHUB_ENV
+          if [ -z "${TAG_NAME}" ]; then
+            echo "release event delivered an empty tag_name" >&2
+            exit 1
           fi
+          printf 'VERSION=%s\n' "${TAG_NAME}" >> "$GITHUB_ENV"
       - name: Write version to __init__.py
         run: |
           python - <<'PY'
@@ -38,7 +34,7 @@ jobs:
           import pathlib
 
           pathlib.Path("numbduck/__init__.py").write_text(
-              f"__version__ = {os.environ['VERSION']!r}\n")
+              f"__version__ = {os.environ['VERSION']!r}\n", encoding="utf-8")
           PY
 
       - name: Build release distributions
