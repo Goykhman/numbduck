@@ -479,11 +479,10 @@ def aux_read_column_data(chunk_p, col_idx):
 
 
 def aux_read_inline_string(data_p):
-    """Read a DuckDB inline string (4-byte uint32 length + char data).
+    """Read a DuckDB string_t vector entry as text, the text-returning
+    counterpart of aux_read_string_t below, which handles both layouts.
     https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365 """
-    str_len = ctypes.c_uint32.from_address(data_p).value
-    raw = (ctypes.c_char * str_len).from_address(data_p + 4)
-    return raw[:].decode()
+    return aux_read_string_t(data_p).decode()
 
 
 def aux_read_string_t(data_p):
