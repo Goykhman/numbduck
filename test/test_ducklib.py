@@ -1171,40 +1171,43 @@ _INVALID_INDEX_VARCHAR_P = ctypes.c_void_p.from_buffer(_INVALID_INDEX_VARCHAR).v
 _INVALID_INDEX_BLOB = ctypes.create_string_buffer(b"\x00\x01\x02\x03", 4)
 _INVALID_INDEX_BLOB_P = ctypes.cast(_INVALID_INDEX_BLOB, ctypes.c_void_p).value
 
-# Every duckdb_bind_* wrapper that takes a parameter index, paired with a call
-# that passes an out-of-range one (999) plus a well-formed value of the right
-# shape. Pass real values, not null: duckdb builds the bound value before it
-# checks the index for at least duckdb_bind_blob, where a null data pointer
-# aborts the process (std::logic_error, "construction from null is not valid")
-# rather than returning DuckDBError. duckdb_bind_parameter_index is excluded
-# deliberately: its second argument is an out-pointer for a looked-up index, not
-# an index to bind at.
+# Every duckdb_bind_* wrapper that takes a parameter index, paired with the
+# trailing arguments to call it with after an out-of-range index (999). The
+# wrapper itself is resolved from the name in the first column, so each binding
+# is named exactly once here and a row cannot drift into calling something other
+# than what it is labelled. Pass real values, not null: duckdb builds the bound
+# value before it checks the index for at least duckdb_bind_blob, where a null
+# data pointer aborts the process (std::logic_error, "construction from null is
+# not valid") rather than returning DuckDBError. duckdb_bind_parameter_index is
+# excluded deliberately: its second argument is an out-pointer for a looked-up
+# index, not an index to bind at.
 _INVALID_INDEX_BINDS = [
-    ("duckdb_bind_boolean", lambda s: ducklib.duckdb_bind_boolean(s, 999, 1)),
-    ("duckdb_bind_int8", lambda s: ducklib.duckdb_bind_int8(s, 999, 1)),
-    ("duckdb_bind_int16", lambda s: ducklib.duckdb_bind_int16(s, 999, 1)),
-    ("duckdb_bind_int32", lambda s: ducklib.duckdb_bind_int32(s, 999, 1)),
-    ("duckdb_bind_int64", lambda s: ducklib.duckdb_bind_int64(s, 999, 1)),
-    ("duckdb_bind_uint8", lambda s: ducklib.duckdb_bind_uint8(s, 999, 1)),
-    ("duckdb_bind_uint16", lambda s: ducklib.duckdb_bind_uint16(s, 999, 1)),
-    ("duckdb_bind_uint32", lambda s: ducklib.duckdb_bind_uint32(s, 999, 1)),
-    ("duckdb_bind_uint64", lambda s: ducklib.duckdb_bind_uint64(s, 999, 1)),
-    ("duckdb_bind_float", lambda s: ducklib.duckdb_bind_float(s, 999, 1.0)),
-    ("duckdb_bind_double", lambda s: ducklib.duckdb_bind_double(s, 999, 1.0)),
-    ("duckdb_bind_date", lambda s: ducklib.duckdb_bind_date(s, 999, 0)),
-    ("duckdb_bind_time", lambda s: ducklib.duckdb_bind_time(s, 999, 0)),
-    ("duckdb_bind_timestamp", lambda s: ducklib.duckdb_bind_timestamp(s, 999, 0)),
-    ("duckdb_bind_timestamp_tz", lambda s: ducklib.duckdb_bind_timestamp_tz(s, 999, 0)),
-    ("duckdb_bind_null", lambda s: ducklib.duckdb_bind_null(s, 999)),
-    ("duckdb_bind_varchar", lambda s: ducklib.duckdb_bind_varchar(s, 999, _INVALID_INDEX_VARCHAR_P)),
-    ("duckdb_bind_varchar_length",
-     lambda s: ducklib.duckdb_bind_varchar_length(s, 999, _INVALID_INDEX_VARCHAR_P, 1)),
-    ("duckdb_bind_blob", lambda s: ducklib.duckdb_bind_blob(s, 999, _INVALID_INDEX_BLOB_P, 4)),
-    ("duckdb_bind_hugeint", lambda s: ducklib.duckdb_bind_hugeint(s, 999, (42, 0))),
-    ("duckdb_bind_uhugeint", lambda s: ducklib.duckdb_bind_uhugeint(s, 999, (100, 0))),
-    ("duckdb_bind_interval", lambda s: ducklib.duckdb_bind_interval(s, 999, (1, 2, 3))),
-    ("duckdb_bind_decimal", lambda s: ducklib.duckdb_bind_decimal(s, 999, (10, 2, 12345, 0))),
-    ("duckdb_bind_value", lambda s: aux_bind_value_out_of_range(s)),
+    ("duckdb_bind_boolean", (1,)),
+    ("duckdb_bind_int8", (1,)),
+    ("duckdb_bind_int16", (1,)),
+    ("duckdb_bind_int32", (1,)),
+    ("duckdb_bind_int64", (1,)),
+    ("duckdb_bind_uint8", (1,)),
+    ("duckdb_bind_uint16", (1,)),
+    ("duckdb_bind_uint32", (1,)),
+    ("duckdb_bind_uint64", (1,)),
+    ("duckdb_bind_float", (1.0,)),
+    ("duckdb_bind_double", (1.0,)),
+    ("duckdb_bind_date", (0,)),
+    ("duckdb_bind_time", (0,)),
+    ("duckdb_bind_timestamp", (0,)),
+    ("duckdb_bind_timestamp_tz", (0,)),
+    ("duckdb_bind_null", ()),
+    ("duckdb_bind_varchar", (_INVALID_INDEX_VARCHAR_P,)),
+    ("duckdb_bind_varchar_length", (_INVALID_INDEX_VARCHAR_P, 1)),
+    ("duckdb_bind_blob", (_INVALID_INDEX_BLOB_P, 4)),
+    ("duckdb_bind_hugeint", ((42, 0),)),
+    ("duckdb_bind_uhugeint", ((100, 0),)),
+    ("duckdb_bind_interval", ((1, 2, 3),)),
+    ("duckdb_bind_decimal", ((10, 2, 12345, 0),)),
+    # duckdb_bind_value needs a duckdb_value handle created and destroyed around
+    # the call, so it carries None and is dispatched to its own helper below.
+    ("duckdb_bind_value", None),
 ]
 
 
@@ -1221,9 +1224,9 @@ def aux_bind_value_out_of_range(stmt_p):
         aux_destroy_value(val_p)
 
 
-@pytest.mark.parametrize("name,call", _INVALID_INDEX_BINDS,
+@pytest.mark.parametrize("name,args", _INVALID_INDEX_BINDS,
                          ids=[entry[0] for entry in _INVALID_INDEX_BINDS])
-def test_bind_family_invalid_param_index(name, call):
+def test_bind_family_invalid_param_index(name, args):
     """Every duckdb_bind_* wrapper that takes a parameter index returns
     DuckDBError (not a crash) for an out-of-range one. Verified on duckdb 1.5.4:
     all of them, including the struct-by-value binds
@@ -1233,7 +1236,10 @@ def test_bind_family_invalid_param_index(name, call):
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
     assert rc == ducklib.DuckDBSuccess
-    rc = call(stmt[0])
+    if args is None:
+        rc = aux_bind_value_out_of_range(stmt[0])
+    else:
+        rc = getattr(ducklib, name)(stmt[0], 999, *args)
     assert rc == ducklib.DuckDBError, f"{name}: expected DuckDBError, got {rc}"
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
@@ -1243,7 +1249,9 @@ def test_invalid_param_index_sweep_covers_every_indexed_bind():
     """The sweep table above is hand-written, so a binding added later would
     silently go uncovered. Assert the table names exactly the prepared-statement
     duckdb_bind_* wrappers that take a parameter index, reading the set off
-    ducklib itself.
+    ducklib itself. Because the sweep resolves each wrapper from the same name
+    this test compares, matching name sets certify that every one of those
+    wrappers was actually called, not merely listed.
 
     One exclusion. duckdb_bind_parameter_index resolves a name to an index
     rather than binding at one. There is deliberately no symbol-presence filter:
