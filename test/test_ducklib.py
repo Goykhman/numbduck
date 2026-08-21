@@ -2070,6 +2070,10 @@ def test_create_varchar_length():
     aux_destroy_value(val_p)
 
 
+@pytest.mark.skipif(
+    not hasattr(ducklib.duckdb_lib, 'duckdb_value_to_string'),
+    reason="duckdb_value_to_string not available",
+)
 def test_value_to_string():
     val_p = ducklib.duckdb_create_int32(42)
     assert val_p != 0
@@ -2133,6 +2137,10 @@ def test_create_get_list_value_empty():
     ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
 
 
+@pytest.mark.skipif(
+    not hasattr(ducklib.duckdb_lib, 'duckdb_create_map_value'),
+    reason="duckdb_create_map_value not available",
+)
 def test_create_get_map_value():
     key_type = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
     val_type = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
