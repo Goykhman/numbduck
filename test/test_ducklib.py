@@ -1,3 +1,4 @@
+import ast
 import ctypes
 import functools
 import math
@@ -10,7 +11,10 @@ import numpy
 import pytest
 from numba import njit, cfunc, carray
 from numba import types as nb_types
+from numba.core.errors import TypingError
 from numba.experimental import structref
+from numbox.core.bindings.call import _call_lib_func
+from numbox.core.proxy.proxy import proxy_if_available
 from numbox.core.vector.vector import vector_push
 from numbox.utils.highlevel import make_structref
 from numbox.utils.lowlevel import get_unicode_data_p
@@ -71,6 +75,11 @@ LOGICAL_TYPE_FAMILY = _HandleFamily(
     "logical_type",
     {"duckdb_create_logical_type": _acquired_by_return},
     ("duckdb_destroy_logical_type",),
+)
+SCALAR_FUNCTION_FAMILY = _HandleFamily(
+    "scalar_function",
+    {"duckdb_create_scalar_function": _acquired_by_return},
+    ("duckdb_destroy_scalar_function",),
 )
 
 
@@ -398,6 +407,48 @@ def test_handle_balance_detects_missing_destroy():
     aux_destroy_value(leaked_p)
 
 
+def test_handle_balance_scalar_function_family():
+    """Create and destroy scalar-function handles in a long loop under the
+    balance harness, so a leaked (never-destroyed) function handle surfaces as
+    an acquire/release imbalance."""
+    with handle_balance(SCALAR_FUNCTION_FAMILY):
+        for _ in range(50):
+            fn_p = ducklib.duckdb_create_scalar_function()
+            assert fn_p != 0
+            fn_buf = numpy.zeros(1, dtype=numpy.intp)
+            fn_buf[0] = fn_p
+            ducklib.duckdb_destroy_scalar_function(fn_buf.ctypes.data)
+            assert fn_buf[0] == 0
+
+
+def test_destroy_zeroes_handle_slots():
+    """duckdb_destroy_* nulls the caller's handle slot for the value,
+    logical-type, and scalar/aggregate-function families, exactly as it does
+    for the database/connection/prepared/data-chunk handles. This is the only
+    direct proof that destroy actually ran for these largest handle families."""
+    buf = numpy.zeros(1, dtype=numpy.intp)
+
+    buf[0] = ducklib.duckdb_create_int64(7)
+    assert buf[0] != 0
+    ducklib.duckdb_destroy_value(buf.ctypes.data)
+    assert buf[0] == 0, "duckdb_destroy_value did not null the handle slot"
+
+    buf[0] = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_INTEGER)
+    assert buf[0] != 0
+    ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
+    assert buf[0] == 0, "duckdb_destroy_logical_type did not null the slot"
+
+    buf[0] = ducklib.duckdb_create_scalar_function()
+    assert buf[0] != 0
+    ducklib.duckdb_destroy_scalar_function(buf.ctypes.data)
+    assert buf[0] == 0, "duckdb_destroy_scalar_function did not null the slot"
+
+    buf[0] = ducklib.duckdb_create_aggregate_function()
+    assert buf[0] != 0
+    ducklib.duckdb_destroy_aggregate_function(buf.ctypes.data)
+    assert buf[0] == 0, "duckdb_destroy_aggregate_function did not null the slot"
+
+
 # --- Prepared Statements ---
 
 def aux_prepare(connection_p, sql):
@@ -428,11 +479,24 @@ def aux_read_column_data(chunk_p, col_idx):
 
 
 def aux_read_inline_string(data_p):
-    """Read a DuckDB inline string (4-byte uint32 length + char data).
+    """Read a DuckDB string_t vector entry as text, the text-returning
+    counterpart of aux_read_string_t below, which handles both layouts.
     https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365 """
-    str_len = ctypes.c_uint32.from_address(data_p).value
-    raw = (ctypes.c_char * str_len).from_address(data_p + 4)
-    return raw[:].decode()
+    return aux_read_string_t(data_p).decode()
+
+
+def aux_read_string_t(data_p):
+    """Read a DuckDB string_t vector entry as raw bytes, handling both layouts:
+    inline (length <= 12, chars at data_p + 4) and out-of-line (length > 12,
+    4-byte prefix at data_p + 4 and an 8-byte data pointer at data_p + 8).
+    https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365 """
+    length = ctypes.c_uint32.from_address(data_p).value
+    if length <= 12:
+        raw = (ctypes.c_char * length).from_address(data_p + 4)
+    else:
+        out_p = ctypes.c_uint64.from_address(data_p + 8).value
+        raw = (ctypes.c_char * length).from_address(out_p)
+    return raw[:]
 
 
 def aux_destroy_prepared(stmt):
@@ -548,17 +612,6 @@ def test_bind_all_types():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-def test_bind_invalid_param_index():
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
-    assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
-    rc = ducklib.duckdb_bind_int32(stmt[0], 999, 42)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError for invalid param index, got {rc}"
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
 def test_execute_prepared_unbound_params():
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
@@ -667,19 +720,6 @@ def test_bind_boolean():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-def test_bind_boolean_invalid_param_index():
-    """duckdb_bind_boolean returns DuckDBError for out-of-range param index.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_boolean """
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::BOOLEAN;")
-    assert rc == ducklib.DuckDBSuccess
-    rc = ducklib.duckdb_bind_boolean(stmt[0], 999, 1)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
 def test_bind_float():
     """Bind float value and verify readback.
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_float """
@@ -697,19 +737,6 @@ def test_bind_float():
     assert abs((ctypes.c_float * 1).from_address(data_p)[0] - 2.5) < 1e-6
 
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
-def test_bind_float_invalid_param_index():
-    """duckdb_bind_float returns DuckDBError for out-of-range param index.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_float """
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::FLOAT;")
-    assert rc == ducklib.DuckDBSuccess
-    rc = ducklib.duckdb_bind_float(stmt[0], 999, 1.0)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -737,19 +764,6 @@ def test_bind_date():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-def test_bind_date_invalid_param_index():
-    """duckdb_bind_date returns DuckDBError for out-of-range param index.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_date """
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::DATE;")
-    assert rc == ducklib.DuckDBSuccess
-    rc = ducklib.duckdb_bind_date(stmt[0], 999, 0)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
 def test_bind_timestamp():
     """Bind a timestamp value (microseconds since epoch) and verify readback.
     https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp """
@@ -769,19 +783,6 @@ def test_bind_timestamp():
     assert (ctypes.c_int64 * 1).from_address(data_p)[0] == micros
 
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
-    aux_destroy_prepared(stmt)
-    aux_close_db(duckdb_database, duckdb_connection)
-
-
-def test_bind_timestamp_invalid_param_index():
-    """duckdb_bind_timestamp returns DuckDBError for out-of-range param index.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp """
-    duckdb_database, duckdb_connection = aux_connect_db()
-    connection_p = duckdb_connection[0]
-    stmt, rc = aux_prepare(connection_p, "SELECT $1::TIMESTAMP;")
-    assert rc == ducklib.DuckDBSuccess
-    rc = ducklib.duckdb_bind_timestamp(stmt[0], 999, 0)
-    assert rc == ducklib.DuckDBError, f"Expected DuckDBError, got {rc}"
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
 
@@ -948,6 +949,53 @@ def test_bind_blob():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
+def test_bind_varchar_long_out_of_line():
+    """A > 12-character VARCHAR uses the out-of-line string_t layout (4-byte
+    length, 4-byte prefix, 8-byte data pointer) rather than inlined chars. The
+    other string tests only ever exercise the <= 12-byte inline layout."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::VARCHAR;")
+    assert rc == ducklib.DuckDBSuccess
+    text = "abcdefghijklmnopqrstuvwxyz0123456789"
+    assert len(text) > 12
+    val_bytes = ctypes.c_char_p(text.encode())
+    val_p = ctypes.c_void_p.from_buffer(val_bytes).value
+    rc = ducklib.duckdb_bind_varchar(stmt[0], 1, val_p)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert ctypes.c_uint32.from_address(data_p).value == len(text)
+    assert aux_read_string_t(data_p).decode() == text
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_blob_long_out_of_line():
+    """A > 12-byte BLOB uses the same out-of-line string_t layout; the existing
+    blob test only covers the 4-byte inline case."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::BLOB;")
+    assert rc == ducklib.DuckDBSuccess
+    payload = bytes(range(20))
+    assert len(payload) > 12
+    blob_data = ctypes.create_string_buffer(payload, len(payload))
+    blob_p = ctypes.cast(blob_data, ctypes.c_void_p).value
+    rc = ducklib.duckdb_bind_blob(stmt[0], 1, blob_p, len(payload))
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    assert ctypes.c_uint32.from_address(data_p).value == len(payload)
+    assert aux_read_string_t(data_p) == payload
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
 def test_bind_int8_negative():
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
@@ -1064,6 +1112,7 @@ def test_bind_decimal():
     # The stored value is the unscaled integer: 12345 represents 123.45
     stored = (ctypes.c_int64 * 1).from_address(data_p)[0]
     assert stored == 12345
+    aux_destroy_data_chunk(chunk_p)
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
@@ -1091,6 +1140,135 @@ def test_bind_decimal_wide_upper64():
     ducklib.duckdb_destroy_result(out_result.ctypes.data)
     aux_destroy_prepared(stmt)
     aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_bind_value_success_roundtrip():
+    """duckdb_bind_value's only other coverage is the invalid-index sweep, whose
+    DuckDBError assertion a completely broken binding would also satisfy. Bind a
+    real value handle at a valid index and read the result back so the success
+    path, handle marshaling included, is pinned."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::BIGINT;")
+    assert rc == ducklib.DuckDBSuccess
+    val_p = ducklib.duckdb_create_int64(-654321)
+    assert val_p != 0
+    rc = ducklib.duckdb_bind_value(stmt[0], 1, val_p)
+    assert rc == ducklib.DuckDBSuccess
+    out_result, chunk_p = aux_execute_prepared(stmt[0])
+    data_p = aux_read_column_data(chunk_p, 0)
+    stored = (ctypes.c_int64 * 1).from_address(data_p)[0]
+    assert stored == -654321
+    aux_destroy_data_chunk(chunk_p)
+    ducklib.duckdb_destroy_result(out_result.ctypes.data)
+    aux_destroy_value(val_p)
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+_INVALID_INDEX_VARCHAR = ctypes.c_char_p(b"x")
+_INVALID_INDEX_VARCHAR_P = ctypes.c_void_p.from_buffer(_INVALID_INDEX_VARCHAR).value
+_INVALID_INDEX_BLOB = ctypes.create_string_buffer(b"\x00\x01\x02\x03", 4)
+_INVALID_INDEX_BLOB_P = ctypes.cast(_INVALID_INDEX_BLOB, ctypes.c_void_p).value
+
+# Every duckdb_bind_* wrapper that takes a parameter index, paired with the
+# trailing arguments to call it with after an out-of-range index (999). The
+# wrapper itself is resolved from the name in the first column, so each binding
+# is named exactly once here and a row cannot drift into calling something other
+# than what it is labelled. Pass real values, not null: duckdb builds the bound
+# value before it checks the index for at least duckdb_bind_blob, where a null
+# data pointer aborts the process (std::logic_error, "construction from null is
+# not valid") rather than returning DuckDBError. duckdb_bind_parameter_index is
+# excluded deliberately: its second argument is an out-pointer for a looked-up
+# index, not an index to bind at.
+_INVALID_INDEX_BINDS = [
+    ("duckdb_bind_boolean", (1,)),
+    ("duckdb_bind_int8", (1,)),
+    ("duckdb_bind_int16", (1,)),
+    ("duckdb_bind_int32", (1,)),
+    ("duckdb_bind_int64", (1,)),
+    ("duckdb_bind_uint8", (1,)),
+    ("duckdb_bind_uint16", (1,)),
+    ("duckdb_bind_uint32", (1,)),
+    ("duckdb_bind_uint64", (1,)),
+    ("duckdb_bind_float", (1.0,)),
+    ("duckdb_bind_double", (1.0,)),
+    ("duckdb_bind_date", (0,)),
+    ("duckdb_bind_time", (0,)),
+    ("duckdb_bind_timestamp", (0,)),
+    ("duckdb_bind_timestamp_tz", (0,)),
+    ("duckdb_bind_null", ()),
+    ("duckdb_bind_varchar", (_INVALID_INDEX_VARCHAR_P,)),
+    ("duckdb_bind_varchar_length", (_INVALID_INDEX_VARCHAR_P, 1)),
+    ("duckdb_bind_blob", (_INVALID_INDEX_BLOB_P, 4)),
+    ("duckdb_bind_hugeint", ((42, 0),)),
+    ("duckdb_bind_uhugeint", ((100, 0),)),
+    ("duckdb_bind_interval", ((1, 2, 3),)),
+    ("duckdb_bind_decimal", ((10, 2, 12345, 0),)),
+    # duckdb_bind_value needs a duckdb_value handle created and destroyed around
+    # the call, so it carries None and is dispatched to its own helper below.
+    ("duckdb_bind_value", None),
+]
+
+
+def aux_bind_value_out_of_range(stmt_p):
+    """duckdb_bind_value takes a duckdb_value handle rather than a plain scalar,
+    so the sweep's dummy has to be created and destroyed around the call. A null
+    handle happens to return DuckDBError at an out-of-range index, but it
+    segfaults at a valid one, so it is not worth relying on."""
+    val_p = ducklib.duckdb_create_int64(1)
+    assert val_p != 0
+    try:
+        return ducklib.duckdb_bind_value(stmt_p, 999, val_p)
+    finally:
+        aux_destroy_value(val_p)
+
+
+@pytest.mark.parametrize("name,args", _INVALID_INDEX_BINDS,
+                         ids=[entry[0] for entry in _INVALID_INDEX_BINDS])
+def test_bind_family_invalid_param_index(name, args):
+    """Every duckdb_bind_* wrapper that takes a parameter index returns
+    DuckDBError (not a crash) for an out-of-range one. Verified on duckdb 1.5.4:
+    all of them, including the struct-by-value binds
+    (hugeint/uhugeint/interval/decimal), return DuckDBError; none segfault, so
+    none are excluded."""
+    duckdb_database, duckdb_connection = aux_connect_db()
+    connection_p = duckdb_connection[0]
+    stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
+    assert rc == ducklib.DuckDBSuccess
+    if args is None:
+        rc = aux_bind_value_out_of_range(stmt[0])
+    else:
+        rc = getattr(ducklib, name)(stmt[0], 999, *args)
+    assert rc == ducklib.DuckDBError, f"{name}: expected DuckDBError, got {rc}"
+    aux_destroy_prepared(stmt)
+    aux_close_db(duckdb_database, duckdb_connection)
+
+
+def test_invalid_param_index_sweep_covers_every_indexed_bind():
+    """The sweep table above is hand-written, so a binding added later would
+    silently go uncovered. Assert the table names exactly the prepared-statement
+    duckdb_bind_* wrappers that take a parameter index, reading the set off
+    ducklib itself. Because the sweep resolves each wrapper from the same name
+    this test compares, matching name sets certify that every one of those
+    wrappers was actually called, not merely listed.
+
+    One exclusion. duckdb_bind_parameter_index resolves a name to an index
+    rather than binding at one. There is deliberately no symbol-presence filter:
+    every bind wrapper is a plain @proxy binding, so a missing C symbol aborts
+    the ducklib import outright rather than producing a callable stub, and a
+    presence filter would let a future version-gated bind wrapper drop out of
+    both sides of this comparison silently. If one ever appears, this test
+    should fail and force it into the table with its own gating."""
+    swept = {name for name, _ in _INVALID_INDEX_BINDS}
+    expected = {
+        name for name in dir(ducklib)
+        if name.startswith("duckdb_bind_")
+        and name in ducklib.signatures
+        and name != "duckdb_bind_parameter_index"
+    }
+    assert swept == expected, (
+        f"uncovered: {sorted(expected - swept)}, stale: {sorted(swept - expected)}")
 
 
 # --- Result Metadata ---
@@ -1123,6 +1301,7 @@ def test_column_logical_type():
     out_result_p = out_result.ctypes.data
     logical_type_p = ducklib.duckdb_column_logical_type(out_result_p, 0)
     assert logical_type_p != 0, "Expected valid logical type pointer"
+    assert ducklib.duckdb_get_type_id(logical_type_p) == ducklib.DUCKDB_TYPE_INTEGER
     lt_buf = numpy.zeros(1, dtype=numpy.intp)
     lt_buf[0] = logical_type_p
     ducklib.duckdb_destroy_logical_type(lt_buf.ctypes.data)
@@ -1330,6 +1509,42 @@ def test_jit_connect_query_disconnect():
     assert conn_p != 0, f"expected valid connection pointer, got {conn_p}"
     assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
     assert conn_after == 0, f"expected null after disconnect, got {conn_after}"
+
+
+@njit
+def jit_query_invalid_sql():
+    db = create_duckdb_database()
+    conn = create_duckdb_connection()
+    open_rc = ducklib.duckdb_open(0, array_data_p(db))
+    connect_rc = ducklib.duckdb_connect(db[0], array_data_p(conn))
+    conn_p = conn[0]
+    out = create_duckdb_result()
+    rc = ducklib.duckdb_query(
+        conn_p, get_unicode_data_p('NOT VALID SQL;'), array_data_p(out))
+    detected = 0
+    if rc == ducklib.DuckDBError:
+        detected = 1
+    ducklib.duckdb_destroy_result(array_data_p(out))
+    ducklib.duckdb_disconnect(array_data_p(conn))
+    ducklib.duckdb_close(array_data_p(db))
+    return open_rc, connect_rc, conn_p, rc, detected
+
+
+def test_jit_query_invalid_sql():
+    """A DuckDBError return code is produced and branched on entirely inside
+    compiled @njit code (the native LLVM call path), not just via the
+    Python-called dispatcher path every other error test uses.
+
+    Open and connect are asserted first. duckdb_query checks the query string
+    before the connection, so on a null connection it segfaults rather than
+    returning DuckDBError, and a crash inside compiled code takes the session
+    down with no traceback."""
+    open_rc, connect_rc, conn_p, rc, detected = jit_query_invalid_sql()
+    assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
+    assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
+    assert conn_p != 0, "expected a valid connection pointer"
+    assert rc == ducklib.DuckDBError, f"expected DuckDBError, got {rc}"
+    assert detected == 1, "in-JIT DuckDBError comparison did not observe the error"
 
 
 # --- JIT: Prepared Statements ---
@@ -1631,6 +1846,55 @@ def test_create_get_varint():
     aux_destroy_value(val_p)
 
 
+def test_gated_binding_missing_symbol_raises_clear_njit_error():
+    """A version-gated binding whose C symbol is absent from libduckdb raises a
+    clear, named error at @njit typing time, not an opaque numba TypingError.
+
+    The absent-symbol path is simulated with a lib object that lacks the
+    attribute, so this holds whether or not the loaded libduckdb has it."""
+
+    class _NoSymLib:
+        pass
+
+    @proxy_if_available(
+        _NoSymLib(), ducklib.signatures.get("duckdb_create_varint"),
+        jit_options=ducklib.jit_options)
+    def duckdb_create_varint(val):
+        return _call_lib_func("duckdb_create_varint", (val,))
+
+    @njit
+    def use_gated(x):
+        return duckdb_create_varint(x)
+
+    with pytest.raises(TypingError) as excinfo:
+        use_gated(0)
+    message = str(excinfo.value)
+    assert "duckdb_create_varint" in message
+    assert "not available" in message
+    assert "C symbol missing" in message
+
+
+@pytest.mark.skipif(
+    hasattr(ducklib.duckdb_lib, 'duckdb_create_varint'),
+    reason="duckdb_create_varint present in this libduckdb; absent-symbol path not exercised",
+)
+def test_gated_binding_unavailable_real_name_njit_error():
+    """The actual version-gated ducklib binding, when absent from the loaded
+    libduckdb, raises a clear named error at @njit typing time rather than an
+    opaque numba TypingError. Complements the simulated case above by covering
+    the binding as ducklib actually built it."""
+
+    @njit
+    def use_varint(val):
+        return ducklib.duckdb_create_varint(val)
+
+    with pytest.raises(TypingError) as excinfo:
+        use_varint((0, 0, 0))
+    message = str(excinfo.value)
+    assert "duckdb_create_varint" in message
+    assert "not available" in message
+
+
 def test_create_get_bit():
     data_bytes = ctypes.create_string_buffer(b"\x05\xA0", 2)
     data_p = ctypes.cast(data_bytes, ctypes.c_void_p).value
@@ -1638,6 +1902,8 @@ def test_create_get_bit():
     assert val_p != 0
     result = ducklib.duckdb_get_bit(val_p)
     assert result[1] == 2
+    raw = (ctypes.c_char * result[1]).from_address(result[0])
+    assert raw[:] == b"\x05\xA0"
     ducklib.duckdb_free(result[0])
     aux_destroy_value(val_p)
 
@@ -1914,6 +2180,17 @@ def test_create_array_value():
     vals = numpy.array([v1, v2, v3], dtype=numpy.intp)
     av = ducklib.duckdb_create_array_value(int_type, vals.ctypes.data, 3)
     assert av != 0
+    # duckdb_get_list_* reject an ARRAY-typed value, so check the array through
+    # its logical type instead: id, fixed size, and element type. Do not destroy
+    # array_type_p; duckdb_get_value_type returns the value handle itself.
+    array_type_p = ducklib.duckdb_get_value_type(av)
+    assert array_type_p == av
+    assert ducklib.duckdb_get_type_id(array_type_p) == ducklib.DUCKDB_TYPE_ARRAY
+    assert ducklib.duckdb_array_type_array_size(array_type_p) == 3
+    child_type_p = ducklib.duckdb_array_type_child_type(array_type_p)
+    assert ducklib.duckdb_get_type_id(child_type_p) == ducklib.DUCKDB_TYPE_INTEGER
+    child_buf = numpy.array([child_type_p], dtype=numpy.intp)
+    ducklib.duckdb_destroy_logical_type(child_buf.ctypes.data)
     aux_destroy_value(av)
     aux_destroy_value(v1)
     aux_destroy_value(v2)
@@ -1964,8 +2241,11 @@ def test_get_value_type():
     assert val_p != 0
     type_p = ducklib.duckdb_get_value_type(val_p)
     assert type_p != 0
-    # duckdb_get_value_type returns the same handle as the value for
-    # scalar types — do NOT destroy both (double-free)
+    assert ducklib.duckdb_get_type_id(type_p) == ducklib.DUCKDB_TYPE_INTEGER
+    # duckdb_get_value_type returns the value handle itself; assert the
+    # aliasing so the do-not-destroy rule stays pinned by a check the call
+    # can actually fail (destroying both would double-free).
+    assert type_p == val_p
     aux_destroy_value(val_p)
 
 
@@ -2641,13 +2921,19 @@ def test_aggregate_function_round_trip():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-
-
+# The compiled callback below captures _INIT_CB_FIRED_ADDR at import time, so
+# any reset must write through the existing buffer in place; rebinding
+# _INIT_CB_FIRED to a fresh array would leave the callback writing freed
+# memory from a DuckDB worker thread.
+_INIT_CB_FIRED = numpy.zeros(1, dtype=numpy.int64)
+_INIT_CB_FIRED_ADDR = _INIT_CB_FIRED.ctypes.data
 
 
 @njit
 def _init_cb_impl(info):
-    pass
+    marker = carray(
+        _cast_int_to_void_p(_INIT_CB_FIRED_ADDR), (1,), dtype=numpy.int64)
+    marker[0] += 1
 
 
 @cfunc(nb_types.void(nb_types.intp))
@@ -2660,9 +2946,17 @@ def _init_cb(info):
     reason="duckdb_scalar_function_set_init not available",
 )
 def test_scalar_function_set_init():
-    """Verify set_init callback is accepted (v1.5+ only)."""
+    """Verify the set_init callback (v1.5+) is not just accepted but actually
+    invoked: the init impl increments an observable marker, asserted after the
+    query. A binding that silently dropped the init pointer would leave it 0.
+
+    The assertion is >= 1, not == 1. duckdb.h documents the scalar init callback
+    as running once per worker thread that executes the function, so the count is
+    a property of the query plan rather than of the binding; a single-row
+    constant projection happens to give exactly one today."""
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
+    _INIT_CB_FIRED[0] = 0  # reset in place; see the note above _INIT_CB_FIRED
 
     func_p = ducklib.duckdb_create_scalar_function()
     ducklib.duckdb_scalar_function_set_name(
@@ -2699,6 +2993,8 @@ def test_scalar_function_set_init():
     data_p = ducklib.duckdb_vector_get_data(vec_p)
     val = (ctypes.c_int32 * 1).from_address(data_p)[0]
     assert val == 43, f"Expected 43, got {val}"
+    assert _INIT_CB_FIRED[0] >= 1, \
+        f"init callback never fired, marker={_INIT_CB_FIRED[0]}"
 
     chunk_buf = numpy.array([chunk_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_data_chunk(chunk_buf.ctypes.data)
@@ -3610,7 +3906,7 @@ def test_welford_numba_only():
         for x in xs_b:
             welford_update(sb, x)
         welford_combine(sa, sb)
-        return welford_finalize(sb)
+        return welford_finalize(sb), sb.mean
 
     xs = numpy.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
     expected = float(numpy.std(xs, ddof=1))
@@ -3619,9 +3915,12 @@ def test_welford_numba_only():
     assert abs(serial - expected) < 1e-10, (
         f"serial: got {serial}, expected {expected}")
 
-    combined = _compute_combined(xs[:3], xs[3:])
+    combined, combined_mean = _compute_combined(xs[:3], xs[3:])
     assert abs(combined - expected) < 1e-10, (
         f"combined: got {combined}, expected {expected}")
+    expected_mean = float(numpy.mean(xs))
+    assert abs(combined_mean - expected_mean) < 1e-10, (
+        f"combined mean: got {combined_mean}, expected {expected_mean}")
 
     single = _compute_serial(numpy.array([42.0]))
     assert math.isnan(single), f"expected NaN for count<2, got {single}"
@@ -5397,3 +5696,97 @@ def test_irr_update_rollback_drops_poison_row_cleanly():
     expected = (13000.0 / 10000.0) ** (1.0 / 12.0) - 1.0
     assert leak == 0, f"rollback path leaked NRT delta {leak}"
     assert rate is not None and abs(rate - expected) < 1e-9, rate
+
+
+# --- Binding source integrity ---
+
+def _wrapper_name_triples(source):
+    """For every ``_call_lib_func`` wrapper defined at module level in `source`,
+    yield ``(def_name, decorator_key, body_literal, param_names, call_arg_names)``
+    where ``decorator_key`` is the string passed to ``signatures.get(...)`` in the
+    wrapper's decorator, ``body_literal`` is the string passed to
+    ``_call_lib_func(...)`` in the body, ``param_names`` is the def's parameter
+    list, and ``call_arg_names`` is the names inside the ``_call_lib_func``
+    argument tuple (None when that argument is not a plain tuple of names, so the
+    caller fails loudly instead of skipping the wrapper).
+    """
+    tree = ast.parse(source)
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        ret = node.body[-1]
+        if not (isinstance(ret, ast.Return) and isinstance(ret.value, ast.Call)
+                and isinstance(ret.value.func, ast.Name)
+                and ret.value.func.id == "_call_lib_func"):
+            continue
+        first = ret.value.args[0]
+        body_literal = first.value if isinstance(first, ast.Constant) else None
+        call_arg_names = None
+        if len(ret.value.args) > 1 and isinstance(ret.value.args[1], ast.Tuple):
+            elts = ret.value.args[1].elts
+            if all(isinstance(e, ast.Name) for e in elts):
+                call_arg_names = [e.id for e in elts]
+        param_names = [a.arg for a in node.args.args]
+        decorator_key = None
+        for dec in node.decorator_list:
+            args = list(getattr(dec, "args", []))
+            args += [kw.value for kw in getattr(dec, "keywords", [])]
+            for arg in args:
+                if (isinstance(arg, ast.Call) and isinstance(arg.func, ast.Attribute)
+                        and arg.func.attr == "get"
+                        and isinstance(arg.func.value, ast.Name)
+                        and arg.func.value.id == "signatures"
+                        and arg.args and isinstance(arg.args[0], ast.Constant)):
+                    decorator_key = arg.args[0].value
+        yield node.name, decorator_key, body_literal, param_names, call_arg_names
+
+
+def _proxy_decorated_names(source):
+    """Names of the module-level functions carrying a proxy decorator, which is
+    every binding wrapper. Used to pin how many wrappers the triple walk above is
+    expected to see, so one dropping out of its shape is a failure rather than a
+    silently smaller set."""
+    names = set()
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for dec in node.decorator_list:
+            func = dec.func if isinstance(dec, ast.Call) else dec
+            if isinstance(func, ast.Name) and func.id in ("proxy", "proxy_if_available"):
+                names.add(node.name)
+    return names
+
+
+def test_wrapper_name_integrity():
+    """Every binding names its C function three times by hand (the decorator's
+    ``signatures.get`` key, the ``def`` name, and the ``_call_lib_func`` literal);
+    a typo in any one that happens to match another registered key would compile
+    against the wrong signature silently. Assert all three agree and resolve to a
+    registered signatures key. Names alone are not enough: numbox uses the
+    registered signature only for the return type, so a wrapper that forwards the
+    wrong arguments (one dropped, two swapped) still emits a native call and
+    passes garbage at runtime. Assert arity and order too: the ``_call_lib_func``
+    tuple must forward exactly the def's parameters, and their count must match
+    the registered signature's.
+    """
+    with open(ducklib.__file__, encoding="utf-8") as f:
+        source = f.read()
+    triples = list(_wrapper_name_triples(source))
+    # Pin the count against the proxy-decorated set rather than a floor. The walk
+    # only recognises a module-level def whose last statement returns
+    # _call_lib_func, so a wrapper that moves under an if/try, gains a trailing
+    # statement, or switches to one of the struct-by-value call helpers drops out
+    # of the integrity check silently; comparing the two sets makes that a
+    # failure that names the wrapper.
+    seen = {triple[0] for triple in triples}
+    assert seen == _proxy_decorated_names(source), {
+        "unchecked": sorted(_proxy_decorated_names(source) - seen),
+        "unexpected": sorted(seen - _proxy_decorated_names(source)),
+    }
+    for name, decorator_key, body_literal, param_names, call_arg_names in triples:
+        assert body_literal == name, (name, body_literal)
+        assert decorator_key == name, (name, decorator_key)
+        assert name in ducklib.signatures, name
+        assert call_arg_names == param_names, (name, param_names, call_arg_names)
+        assert len(param_names) == len(ducklib.signatures[name].args), (
+            name, param_names, str(ducklib.signatures[name]))
