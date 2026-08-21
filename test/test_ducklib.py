@@ -488,13 +488,13 @@ def aux_read_inline_string(data_p):
 def aux_read_string_t(data_p):
     """Read a DuckDB string_t vector entry as raw bytes, handling both layouts:
     inline (length <= 12, chars at data_p + 4) and out-of-line (length > 12,
-    4-byte prefix at data_p + 4 and an 8-byte data pointer at data_p + 8).
+    4-byte prefix at data_p + 4 and a pointer at data_p + 8).
     https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365 """
     length = ctypes.c_uint32.from_address(data_p).value
     if length <= 12:
         raw = (ctypes.c_char * length).from_address(data_p + 4)
     else:
-        out_p = ctypes.c_uint64.from_address(data_p + 8).value
+        out_p = ctypes.c_void_p.from_address(data_p + 8).value
         raw = (ctypes.c_char * length).from_address(out_p)
     return raw[:]
 
