@@ -11,6 +11,7 @@ import numpy
 import pytest
 from numba import njit, cfunc, carray
 from numba import types as nb_types
+from numba.core.caching import FunctionCache, NullCache
 from numba.core.errors import TypingError
 from numba.experimental import structref
 from numbox.core.bindings.call import _call_lib_func
@@ -1854,12 +1855,17 @@ def test_bignum_bindings_are_not_disk_cached():
     """numba's cache key hashes bytecode and closure cells only, so the symbol
     the bignum pair resolves at import reaches neither. A cached object built
     against one spelling is served to a process needing the other, and importing
-    ducklib aborts with LLVM ERROR: Symbol not found."""
+    ducklib aborts with LLVM ERROR: Symbol not found.
+
+    The check reads each dispatcher's cache object rather than the cache
+    directory: the pair compiles at import, so a directory listing taken here
+    cannot tell a fresh write from files left behind by an earlier build, and it
+    sees nothing at all when NUMBA_CACHE_DIR points elsewhere. duckdb_create_uuid
+    is the control, a sibling that does cache."""
     assert "cache" not in ducklib._bignum_jit_options
-    cache_dir = os.path.join(os.path.dirname(ducklib.__file__), "__pycache__")
-    names = os.listdir(cache_dir) if os.path.isdir(cache_dir) else []
-    cached = [n for n in names if "bignum" in n and n.endswith((".nbi", ".nbc"))]
-    assert not cached, cached
+    for name in ("duckdb_create_bignum", "duckdb_get_bignum"):
+        assert isinstance(getattr(ducklib, name)._cache, NullCache), name
+    assert isinstance(ducklib.duckdb_create_uuid._cache, FunctionCache)
 
 
 def test_bignum_binds_the_spelling_this_libduckdb_exports():
