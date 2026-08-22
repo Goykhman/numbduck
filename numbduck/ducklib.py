@@ -55,9 +55,10 @@ DUCKDB_TYPE_TIMESTAMP_TZ = 31
 DUCKDB_TYPE_UHUGEINT = 32
 DUCKDB_TYPE_ARRAY = 33
 DUCKDB_TYPE_ANY = 34
-# VARINT (duckdb ≤1.4) and BIGNUM (duckdb ≥1.5) are the same type —
+# VARINT (duckdb ≤1.3) and BIGNUM (duckdb ≥1.4) are the same type:
 # same enum value, same struct layout ({byte_ptr, size, is_negative}).
-# Both names are defined for cross-version portability.
+# duckdb renamed the type and its value functions in 1.4.0. Both enum
+# names are defined for cross-version portability.
 DUCKDB_TYPE_VARINT = 35
 DUCKDB_TYPE_BIGNUM = 35
 DUCKDB_TYPE_SQLNULL = 36
@@ -72,7 +73,41 @@ duckdb_interval_ty = Tuple((int32, int32, int64))
 duckdb_decimal_ty = Tuple((uint8, uint8, uint64, int64))
 duckdb_blob_ty = Tuple((intp, uint64))
 duckdb_bit_ty = Tuple((intp, uint64))
-duckdb_varint_ty = Tuple((intp, uint64, int8))
+duckdb_bignum_ty = Tuple((intp, uint64, int8))
+
+
+# duckdb renamed duckdb_create_varint/duckdb_get_varint to duckdb_create_bignum/
+# duckdb_get_bignum in 1.4.0: same enum value, same struct, same signature, and
+# no C-level alias either way. Only the bignum spelling is bound; the binding
+# calls whichever symbol the loaded libduckdb exports, so it works across the
+# whole supported duckdb range.
+_BIGNUM_CREATE = next(
+    (name for name in ("duckdb_create_bignum", "duckdb_create_varint")
+     if hasattr(duckdb_lib, name)), None)
+_BIGNUM_GET = next(
+    (name for name in ("duckdb_get_bignum", "duckdb_get_varint")
+     if hasattr(duckdb_lib, name)), None)
+
+
+# numba's cache key hashes bytecode and closure cells only, so the symbol chosen
+# above reaches it by neither route: a cached object built against one spelling
+# would be served to a process needing the other and abort at import. Upgrading
+# duckdb across 1.4.0 with a warm cache is enough, so keep these two off the disk
+# cache. Every other binding still caches.
+_bignum_jit_options = {name: value for name, value in jit_options.items() if name != "cache"}
+
+
+def _bignum_proxy(sym, bignum_name):
+    """Proxy decorator for a bignum binding that calls the C symbol ``sym``.
+
+    ``sym`` is the spelling the loaded libduckdb exports. When it is None the
+    library exports neither, and the binding degrades to the version-gated stub
+    that raises a clear, named error from Python and at ``@njit`` typing time.
+    """
+    if sym is None:
+        return proxy_if_available(duckdb_lib, signatures.get(bignum_name),
+                                  jit_options=_bignum_jit_options)
+    return proxy(signatures.get(sym), jit_options=_bignum_jit_options)
 
 
 signatures["duckdb_array_type_array_size"] = uint64(intp)
@@ -150,7 +185,10 @@ signatures["duckdb_create_uint64"] = intp(uint64)
 signatures["duckdb_create_union_type"] = intp(intp, intp, uint64)
 signatures["duckdb_create_union_value"] = intp(intp, uint64, intp)
 signatures["duckdb_create_uuid"] = intp(duckdb_uhugeint_ty)
-signatures["duckdb_create_varint"] = intp(duckdb_varint_ty)
+# Both spellings stay registered: the binding calls whichever one the loaded
+# libduckdb exports, and _call_lib_func resolves the signature by C symbol name.
+signatures["duckdb_create_bignum"] = intp(duckdb_bignum_ty)
+signatures["duckdb_create_varint"] = intp(duckdb_bignum_ty)
 signatures["duckdb_create_varchar"] = intp(intp)
 signatures["duckdb_create_varchar_length"] = intp(intp, uint64)
 signatures["duckdb_data_chunk_get_column_count"] = uint64(intp)
@@ -207,7 +245,8 @@ signatures["duckdb_get_uint64"] = uint64(intp)
 signatures["duckdb_get_uuid"] = duckdb_uhugeint_ty(intp)
 signatures["duckdb_get_value_type"] = intp(intp)
 signatures["duckdb_get_varchar"] = intp(intp)
-signatures["duckdb_get_varint"] = duckdb_varint_ty(intp)
+signatures["duckdb_get_bignum"] = duckdb_bignum_ty(intp)
+signatures["duckdb_get_varint"] = duckdb_bignum_ty(intp)
 signatures["duckdb_is_null_value"] = int8(intp)
 signatures["duckdb_list_type_child_type"] = intp(intp)
 signatures["duckdb_logical_type_get_alias"] = intp(intp)
@@ -723,10 +762,10 @@ def duckdb_create_uuid(val):
     return _call_lib_func("duckdb_create_uuid", (val,))
 
 
-@proxy_if_available(duckdb_lib, signatures.get("duckdb_create_varint"), jit_options=jit_options)
-def duckdb_create_varint(val):
-    """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_create_varint """
-    return _call_lib_func("duckdb_create_varint", (val,))
+@_bignum_proxy(_BIGNUM_CREATE, "duckdb_create_bignum")
+def duckdb_create_bignum(val):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_create_bignum """
+    return _call_lib_func(_BIGNUM_CREATE, (val,))
 
 
 @proxy(signatures.get("duckdb_data_chunk_get_vector"), jit_options=jit_options)
@@ -1048,10 +1087,10 @@ def duckdb_get_uuid(val_p):
     return _call_lib_func("duckdb_get_uuid", (val_p,))
 
 
-@proxy_if_available(duckdb_lib, signatures.get("duckdb_get_varint"), jit_options=jit_options)
-def duckdb_get_varint(val_p):
-    """ https://duckdb.org/docs/1.3/clients/c/api#duckdb_get_varint """
-    return _call_lib_func("duckdb_get_varint", (val_p,))
+@_bignum_proxy(_BIGNUM_GET, "duckdb_get_bignum")
+def duckdb_get_bignum(val_p):
+    """ https://duckdb.org/docs/stable/clients/c/api.html#duckdb_get_bignum """
+    return _call_lib_func(_BIGNUM_GET, (val_p,))
 
 
 @proxy(signatures.get("duckdb_list_type_child_type"), jit_options=jit_options)
