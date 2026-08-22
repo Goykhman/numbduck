@@ -5748,8 +5748,7 @@ def test_irr_update_rollback_drops_poison_row_cleanly():
 
 def _called_c_symbol(arg):
     """The C symbol named by ``_call_lib_func``'s first argument: the string
-    itself, or — for a binding whose symbol is resolved at import, like the
-    bignum pair — the value the module global it names resolved to."""
+    itself, or the value that name has in ``ducklib``."""
     if isinstance(arg, ast.Constant):
         return arg.value
     if isinstance(arg, ast.Name):
