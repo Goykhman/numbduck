@@ -1,4 +1,4 @@
-"""IRR (Internal Rate of Return) UDAF — DuckDB aggregate function example.
+"""IRR (Internal Rate of Return) UDAF: DuckDB aggregate function example.
 
 Demonstrates the full DuckDB aggregate lifecycle using numbduck:
   1. Define aggregate state as a numba structref (via numbox make_structref)
@@ -85,7 +85,7 @@ irr_state_type = IRRStateType(_irr_state_fields)
 # ---- Bisection solver ----
 #
 # Monthly IRR is the rate r that zeroes the group's NPV. The solver assumes a
-# single sign change of NPV(r) inside the fixed bracket [-0.99, 10.0] — true
+# single sign change of NPV(r) inside the fixed bracket [-0.99, 10.0], true
 # when the cashflow stream changes sign once (an up-front investment followed
 # by positive cashflows), in which case NPV is monotonically decreasing in r.
 # Convergence is on the width of the rate bracket, not on the residual NPV:
@@ -469,7 +469,7 @@ def main():
     print(f"  IRR (annual):  {(1 + irr_val)**12 - 1:.4f}")
     print(f"  NPV check:     {npv_check:.2e}")
 
-    # Test 2: multi-group — two projects with different patterns
+    # Test 2: multi-group (two projects with different patterns)
     conn.execute("DROP TABLE test_irr")
     conn.execute("""
         CREATE TABLE test_irr AS
@@ -517,7 +517,7 @@ def main():
             npv_check += cf / (1.0 + irr_val) ** t
         assert abs(npv_check) < 1e-6, f"Project {project} NPV check failed: {npv_check}"
 
-    # Test 3: sparse periods — catches the "exponent = i+1" trap
+    # Test 3: sparse periods (catches the "exponent = i+1" trap)
     #   One cashflow at period 12, investment 10,000
     #   Analytic IRR: (13000/10000)^(1/12) - 1
     conn.execute("DROP TABLE test_irr")

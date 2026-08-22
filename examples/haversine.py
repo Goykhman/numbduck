@@ -1,4 +1,4 @@
-"""Haversine distance UDF — throughput axis.
+"""Haversine distance UDF: throughput axis.
 
 Story: a retail analytics question. For each of N synthetic customer
 locations, how far is the customer from a fixed store at (37.7749, -122.4194)?
@@ -6,9 +6,9 @@ The query runs `SELECT count(*) FROM customers WHERE haversine(...) < 50`.
 The bottleneck is the per-row distance computation.
 
 Three variants:
-  1. Python scalar UDF — round-trips through the interpreter per row.
-  2. PyArrow expression UDF — chained pc.sin/pc.cos/pc.atan2/pc.sqrt over chunks.
-  3. numbduck JIT UDF — chunk callback with math.sin/cos/asin/sqrt, registered
+  1. Python scalar UDF: round-trips through the interpreter per row.
+  2. PyArrow expression UDF: chained pc.sin/pc.cos/pc.atan2/pc.sqrt over chunks.
+  3. numbduck JIT UDF: chunk callback with math.sin/cos/asin/sqrt, registered
      via duckdb_register_scalar_function.
 
 Run:
@@ -23,7 +23,7 @@ duckdb 1.5.1, numba 0.64.0:
     100,000     n/a  0.070s  0.005s     n/a      14x
   1,000,000     n/a  1.368s  0.014s     n/a     101x
 
-The Python scalar UDF is only run on the smallest tier — at 100K it would
+The Python scalar UDF is only run on the smallest tier: at 100K it would
 take ~10s and at 1M it would take minutes, which violates the example's
 "finishes in under 30s" budget. Arrow and JIT scale to all three tiers.
 Numbers vary by ±30% across runs due to small absolute timings; the
@@ -195,7 +195,7 @@ def register_jit_udf(conn):
     ducklib.duckdb_scalar_function_set_function(func_p, _haversine_chunk_cb.address)
     rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
     # Registration never takes ownership of func_p, so destroy it on both the
-    # success and failure paths — i.e. before asserting on the return code.
+    # success and failure paths, i.e. before asserting on the return code.
     func_buf = numpy.array([func_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
     assert rc == ducklib.DuckDBSuccess
@@ -242,7 +242,7 @@ def run_one(conn, n):
 
 def main():
     print_env()
-    print(f"  Haversine UDF benchmark — {ROW_COUNTS} rows, radius {RADIUS_KM} km")
+    print(f"  Haversine UDF benchmark: {ROW_COUNTS} rows, radius {RADIUS_KM} km")
     print()
 
     conn = duckdb.connect()
@@ -285,11 +285,11 @@ def main():
         f"    faster than the per-row Python scalar UDF and ~{t_arrow0 / t_jit0:.0f}x\n"
         f"    faster than the PyArrow expression UDF. The gap to Arrow widens with\n"
         f"    N: at {nL:,d} rows the JIT runs in ~{t_jitL * 1000:.0f}ms while the\n"
-        f"    Arrow chain takes ~{t_arrowL:.2f}s — a ~{t_arrowL / t_jitL:.0f}x gap.\n"
+        f"    Arrow chain takes ~{t_arrowL:.2f}s, a ~{t_arrowL / t_jitL:.0f}x gap.\n"
         "    The win comes from no Python crossings per chunk, LLVM-fused math\n"
         "    (sin/cos/asin/sqrt inlined into one tight loop), and no intermediate\n"
         "    Arrow arrays for each pc.* step. Python's per-row interpreter\n"
-        "    round-trip is so expensive at 100K+ that we omit it from the table —\n"
+        "    round-trip is so expensive at 100K+ that we omit it from the table:\n"
         "    extrapolating from the 10K timing, it would dominate the budget."
     )
     conn.close()

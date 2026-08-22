@@ -34,10 +34,10 @@ def extract_connection_ptr(conn):
     the ``SELECT 1`` check below cannot catch.
 
     The pointer is handed out only after four guards: exact-type identity (not
-    ``isinstance`` — a subclass or an object spoofing ``__class__`` would steer
+    ``isinstance``: a subclass or an object spoofing ``__class__`` would steer
     the raw pointer walk through arbitrary memory); runtime coordination (refuse
     when numbduck's JIT libduckdb and the wheel that minted *conn* are different
-    builds — the macOS dual-runtime seam); a null check on each intermediate
+    builds, i.e. the macOS dual-runtime seam); a null check on each intermediate
     pointer (a closed connection nulls its ``unique_ptr<Connection>``); and a
     best-effort ``SELECT 1`` liveness smoke-test.
 
@@ -59,7 +59,7 @@ def extract_connection_ptr(conn):
     The caller must retain *conn*, alive and open, for the entire lifetime of any
     ``@njit`` use of the returned pointer. Using the pointer after
     ``conn.close()`` or after *conn* is garbage-collected dereferences a dangling
-    ``Connection*`` — a use-after-free.
+    ``Connection*``: a use-after-free.
 
     Raises
     ------
@@ -82,7 +82,7 @@ def extract_connection_ptr(conn):
             f"numbduck's JIT bindings resolve libduckdb {jit_version!r}, but the "
             f"Python duckdb module is {duckdb.__version__!r}. Refusing to hand a "
             f"Connection* minted by the duckdb wheel to a different libduckdb "
-            f"runtime — dereferencing it under a mismatched internal layout is "
+            f"runtime. Dereferencing it under a mismatched internal layout is "
             f"undefined behavior. Load a matching libduckdb (set "
             f"NUMBDUCK_LIBDUCKDB to a libduckdb whose version equals "
             f"{duckdb.__version__!r})."

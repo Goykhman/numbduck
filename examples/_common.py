@@ -28,7 +28,7 @@ def print_env() -> None:
 def time_median(fn, repeats: int = 3) -> float:
     """Run fn() `repeats` times under perf_counter; return median wall time in seconds.
 
-    No auto-warmup — caller is responsible. We pick the median, not the min,
+    No auto-warmup: caller is responsible. We pick the median, not the min,
     to dampen the occasional outlier without hiding real variance.
     """
     repeats = int(os.environ.get("NUMBDUCK_BENCH_REPEATS", repeats))

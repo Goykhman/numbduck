@@ -12,13 +12,13 @@ treat the numbers as orders of magnitude, not fixed constants.
 
 ## Scripts
 
-- **[haversine.py](haversine.py)** — *throughput axis.* Per-row great-circle
+- **[haversine.py](haversine.py)**: *throughput axis.* Per-row great-circle
   distance computation over synthetic customer points. Measured on this
   machine: the JIT chunk callback is **~850×** faster than the per-row Python
   scalar UDF (10K rows) and **~36×** faster than the [PyArrow expression UDF](https://duckdb.org/docs/stable/clients/python/function.html)
   at 1M rows.
 
-- **[online_scoring.py](online_scoring.py)** — *latency + GIL-free axis.*
+- **[online_scoring.py](online_scoring.py)**: *latency + GIL-free axis.*
   Per-event feature lookup and dot-product score inside a single
   [`@njit(nogil=True)`](https://numba.readthedocs.io/en/stable/user/jit.html#nogil) loop, with timestamps captured via a cross-platform
   monotonic clock bound inside the JIT loop ([`numbox.utils.clock.monotonic_ns`](https://github.com/Goykhman/numbox/blob/0.6.2/numbox/utils/clock.py)).
@@ -26,22 +26,22 @@ treat the numbers as orders of magnitude, not fixed constants.
   loop, and **monotonic parallel scaling to ~2.7× on 8 threads** while the
   Python loop stays near ~1.5× under GIL contention.
 
-- **[fraud_score.py](fraud_score.py)** — *branchy logic axis.* Per-row
+- **[fraud_score.py](fraud_score.py)**: *branchy logic axis.* Per-row
   business rules with several `if/else` branches over six columns. Arrow's
   [`pc.if_else`](https://arrow.apache.org/docs/python/generated/pyarrow.compute.if_else.html) chain beats the per-row Python scalar UDF by **~85×** at 10K rows
-  (full credit — Arrow is the right stock-DuckDB tool for branchy work). The
+  (full credit: Arrow is the right stock-DuckDB tool for branchy work). The
   JIT chunk callback then beats Arrow by **~25×** at 10K and **~1000×** at 1M
   rows; the growing gap is partly Arrow's per-chunk Python boundary plus
   intermediate-array allocation per [`pc.*`](https://arrow.apache.org/docs/python/api/compute.html) step.
 
-- **[irr.py](irr.py)** (run via **[run_irr.py](run_irr.py)**) — *aggregate
+- **[irr.py](irr.py)** (run via **[run_irr.py](run_irr.py)**): *aggregate
   (UDAF) tutorial.* How to build a DuckDB aggregate function from scratch:
   define state as a numba structref (via numbox's
   [`make_structref`](https://github.com/Goykhman/numbox/blob/0.6.2/numbox/utils/highlevel.py)),
   write the six aggregate lifecycle callbacks, register with the C API, and
   verify against a known answer. Computes the Internal Rate of Return via
   bisection over accumulated `(cashflow, period)` pairs. Unlike the other
-  scripts above, this one has no stock-DuckDB comparison — it's a worked
+  scripts above, this one has no stock-DuckDB comparison. It's a worked
   example of the UDAF pattern. `irr.py` defines the UDAF and is meant to be
   imported, not run directly, so `run_irr.py` is the launcher that runs it.
 
