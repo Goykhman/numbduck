@@ -228,7 +228,7 @@ arr_ty = ctypes.c_int32 * 3
 
 
 def aux_query_1():
-    """ https://duckdb.org/docs/stable/clients/c/query#duckdb_fetch_chunk """
+    """ https://duckdb.org/docs/current/clients/c/query#duckdb_fetch_chunk """
     duckdb_database, duckdb_connection = aux_connect_db()
     duckdb_connection_p = duckdb_connection[0]
 
@@ -631,7 +631,7 @@ def test_execute_prepared_unbound_params():
 
 def test_prepare_error_on_invalid_sql():
     """duckdb_prepare_error returns a non-null pointer with error text after failed prepare.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare_error """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "NOT VALID SQL;")
@@ -646,7 +646,7 @@ def test_prepare_error_on_invalid_sql():
 
 def test_prepare_error_on_valid_sql():
     """duckdb_prepare_error returns null pointer after successful prepare.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare_error """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT 1;")
@@ -659,7 +659,7 @@ def test_prepare_error_on_valid_sql():
 
 def test_result_error_on_invalid_query():
     """duckdb_result_error returns a non-null pointer with error text after failed query.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_error """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("NOT VALID SQL;")
@@ -677,7 +677,7 @@ def test_result_error_on_invalid_query():
 
 def test_result_error_on_valid_query():
     """duckdb_result_error returns null pointer after successful query.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_error """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("SELECT 1;")
@@ -695,7 +695,7 @@ def test_result_error_on_valid_query():
 
 def test_bind_boolean():
     """Bind boolean values and verify readback.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_boolean """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_boolean """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::BOOLEAN, $2::BOOLEAN;")
@@ -723,7 +723,7 @@ def test_bind_boolean():
 
 def test_bind_float():
     """Bind float value and verify readback.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_float """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_float """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::FLOAT;")
@@ -744,7 +744,7 @@ def test_bind_float():
 
 def test_bind_date():
     """Bind a date value (days since 1970-01-01) and verify readback.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_date """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_date """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::DATE;")
@@ -767,7 +767,7 @@ def test_bind_date():
 
 def test_bind_timestamp():
     """Bind a timestamp value (microseconds since epoch) and verify readback.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_timestamp """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::TIMESTAMP;")
@@ -1624,14 +1624,14 @@ def jit_prepare_bind_execute():
 
 def test_jit_prepare_bind_execute():
     """Prepared statement with parameter binding from JIT context.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_nparams
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int32
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int64
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_double
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_null
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_execute_prepared
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_prepare """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_nparams
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int32
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int64
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_double
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_null
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_execute_prepared
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_prepare """
     (open_rc, connect_rc, prepare_rc, nparams,
      bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
      chunk_size, col0, col1, col2, col3_valid) = jit_prepare_bind_execute()
