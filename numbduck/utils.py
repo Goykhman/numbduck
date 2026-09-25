@@ -81,8 +81,8 @@ _wheel_library_version_cache = None
 def _wheel_library_version():
     """Library version the Python ``duckdb`` wheel reports for its own core.
 
-    Read via ``PRAGMA version`` through the Python API — which works even on the
-    macOS wheels that strip the C-API symbols — so it is in the same
+    Read via ``PRAGMA version`` through the Python API (which works even on the
+    macOS wheels that strip the C-API symbols), so it is in the same
     ``vX.Y.Z[-devN]`` scheme as a standalone's ``duckdb_library_version()``. That
     is the right identity to coordinate on: ``duckdb.__version__`` is the Python
     *package* version, which coincides with the library version only for releases
@@ -114,7 +114,7 @@ def _require_coordinated_standalone(lib, source):
     layout and dereferences it. That is only sound when both are the same DuckDB
     build: a different build has a candidate-different struct layout, so the
     dereference is undefined behavior. Coordinate on the library version, which
-    both sides report in the same ``vX.Y.Z[-devN]`` scheme — the wheel's via
+    both sides report in the same ``vX.Y.Z[-devN]`` scheme: the wheel's via
     :func:`_wheel_library_version`, the standalone's via :func:`_library_version`.
     Detect a mismatch and refuse rather than corrupt memory at query time.
     """
@@ -169,7 +169,7 @@ def _find_standalone_libduckdb():
 
     Consulted in a fixed, documented order so the pick is deterministic: an
     explicit ``NUMBDUCK_LIBDUCKDB`` override first, then numbduck's own
-    per-version cache, then the known Homebrew install paths. Pure lookup — it
+    per-version cache, then the known Homebrew install paths. Pure lookup: it
     never mutates the filesystem, so it is safe on the import-time load path and
     testable as a plain discovery function.
     """
@@ -190,7 +190,7 @@ def _consent_to_download(version):
     Pure policy plus, at most, the consent prompt itself: no network, extract,
     or cache I/O happens here. ``NUMBDUCK_LIBDUCKDB_DOWNLOAD=1`` authorizes the
     download unattended; otherwise an interactive TTY is prompted. A closed or
-    redirected stdin (a headless import, CI, a subprocess) is treated as "no" —
+    redirected stdin (a headless import, CI, a subprocess) is treated as "no";
     returning ``False`` lets the caller surface the branded install guidance
     instead of letting ``input`` raise ``EOFError`` out of a bare import.
     """
@@ -357,7 +357,8 @@ def load_duckdb():
     if _has_capi_symbols(lib):
         # Single-runtime invariant: the wheel's own shared object backs both the
         # Python ``duckdb`` module and numbduck's JIT bindings, so any handle is
-        # allocated and consumed by one libduckdb — coordinated by construction.
+        # allocated and consumed by one libduckdb. Coordination holds by
+        # construction.
         _loaded_libduckdb = lib
         return lib
     # Python wheel missing C API symbols (seen on the macOS duckdb wheels that

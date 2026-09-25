@@ -1,9 +1,9 @@
-"""Online event scoring loop — latency + GIL-free axis.
+"""Online event scoring loop: latency + GIL-free axis.
 
 Story: a real-time scoring service. Events arrive one at a time. For each
 event we look up the entity's stored features in a DuckDB table and compute
 a 4-element dot-product score. The metric the operator cares about is
-per-event latency, not throughput — batching events to amortize Python
+per-event latency, not throughput. Batching events to amortize Python
 overhead is exactly what the SLA forbids.
 
 Two variants:
@@ -11,7 +11,7 @@ Two variants:
   2. numbduck @njit(nogil=True) loop calling duckdb_execute_prepared and
      reading the result chunk via the bound C API, with no Python crossings
      between iterations. Per-event latency is captured via a cross-platform
-     monotonic clock bound inside the JIT loop (numbox.utils.clock.monotonic_ns —
+     monotonic clock bound inside the JIT loop (numbox.utils.clock.monotonic_ns:
      clock_gettime on POSIX, QueryPerformanceCounter on Windows).
 
 This example also measures parallel scaling on 1/2/4/8 worker threads. The
@@ -198,7 +198,7 @@ def score_jit(conn, ids, x):
     scores = numpy.empty(n, dtype=numpy.float64)
     latencies = numpy.empty(n, dtype=numpy.int64)
     # duckdb_prepare allocates a statement object even when the prepare fails
-    # (it owns the error message), so it must always be destroyed — hence the
+    # (it owns the error message), so it must always be destroyed. Hence the
     # try/finally, which also covers any exception raised inside the loop.
     try:
         rc = ducklib.duckdb_prepare(conn_ptr, get_unicode_data_p(sql), stmt.ctypes.data)
@@ -275,7 +275,7 @@ def run_scaling_block(conn_factory, ids, x):
 
 def main():
     print_env()
-    print(f"  Online scoring — {N_EVENTS:,d}-event dataset, {N_FEATURES:,d} features")
+    print(f"  Online scoring: {N_EVENTS:,d}-event dataset, {N_FEATURES:,d} features")
     print()
 
     db = duckdb.connect()
@@ -311,7 +311,7 @@ def main():
     print(lat_table)
     print()
 
-    # Parallel scaling — each worker opens its own connection on the same
+    # Parallel scaling: each worker opens its own connection on the same
     # on-disk db.
     scale_fd, scale_db_path = tempfile.mkstemp(suffix=".duckdb", prefix="numbduck_online_scoring_")
     os.close(scale_fd)
@@ -362,7 +362,7 @@ def main():
     print(
         "  Discussion:\n"
         f"    Per-event latency: the JIT loop runs at ~{jit_eps:,.0f} events/sec\n"
-        f"    versus ~{py_eps:,.0f} events/sec for the pure-Python loop — about\n"
+        f"    versus ~{py_eps:,.0f} events/sec for the pure-Python loop, or about\n"
         f"    {lat_ratio:.1f}x lower median latency ({jit_p50:.0f}µs vs {py_p50:.0f}µs at p50).\n"
         "    The win is modest because every iteration still pays for a real\n"
         "    DuckDB execute + chunk fetch + chunk destroy + result destroy; the\n"
@@ -375,7 +375,7 @@ def main():
         "    monotonic clock bound from libc (POSIX) or kernel32.dll (Windows)\n"
         f"    instead of time.monotonic_ns, scales to ~{jit_max_speedup:.2f}x at T={max_T}.\n"
         "    The remaining gap to ideal is from DuckDB-internal locking and\n"
-        "    shared-memory contention, not GIL contention — that is the point of\n"
+        "    shared-memory contention, not GIL contention. That is the point of\n"
         "    the example."
     )
 

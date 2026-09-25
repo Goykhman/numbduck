@@ -26,5 +26,5 @@ Highlights:
 - **Branchy logic** ([fraud_score.py](examples/fraud_score.py)): Arrow's
   `pc.if_else` chain beats the Python scalar UDF by ~60× (Arrow is the right
   stock-DuckDB tool here). The JIT chunk callback then beats Arrow by ~16× at 10K
-  and ~1750× at 1M rows — the gap grows because each Arrow UDF chunk crosses the
+  and ~1750× at 1M rows. The gap grows because each Arrow UDF chunk crosses the
   Python boundary and allocates intermediates, while the JIT computes in registers.

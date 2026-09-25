@@ -228,7 +228,7 @@ arr_ty = ctypes.c_int32 * 3
 
 
 def aux_query_1():
-    """ https://duckdb.org/docs/stable/clients/c/query#duckdb_fetch_chunk """
+    """ https://duckdb.org/docs/current/clients/c/query#duckdb_fetch_chunk """
     duckdb_database, duckdb_connection = aux_connect_db()
     duckdb_connection_p = duckdb_connection[0]
 
@@ -631,7 +631,7 @@ def test_execute_prepared_unbound_params():
 
 def test_prepare_error_on_invalid_sql():
     """duckdb_prepare_error returns a non-null pointer with error text after failed prepare.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare_error """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "NOT VALID SQL;")
@@ -646,7 +646,7 @@ def test_prepare_error_on_invalid_sql():
 
 def test_prepare_error_on_valid_sql():
     """duckdb_prepare_error returns null pointer after successful prepare.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare_error """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT 1;")
@@ -659,7 +659,7 @@ def test_prepare_error_on_valid_sql():
 
 def test_result_error_on_invalid_query():
     """duckdb_result_error returns a non-null pointer with error text after failed query.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_error """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("NOT VALID SQL;")
@@ -677,7 +677,7 @@ def test_result_error_on_invalid_query():
 
 def test_result_error_on_valid_query():
     """duckdb_result_error returns null pointer after successful query.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_result_error """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_error """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("SELECT 1;")
@@ -695,7 +695,7 @@ def test_result_error_on_valid_query():
 
 def test_bind_boolean():
     """Bind boolean values and verify readback.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_boolean """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_boolean """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::BOOLEAN, $2::BOOLEAN;")
@@ -723,7 +723,7 @@ def test_bind_boolean():
 
 def test_bind_float():
     """Bind float value and verify readback.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_float """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_float """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::FLOAT;")
@@ -744,7 +744,7 @@ def test_bind_float():
 
 def test_bind_date():
     """Bind a date value (days since 1970-01-01) and verify readback.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_date """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_date """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::DATE;")
@@ -767,7 +767,7 @@ def test_bind_date():
 
 def test_bind_timestamp():
     """Bind a timestamp value (microseconds since epoch) and verify readback.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_timestamp """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_timestamp """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::TIMESTAMP;")
@@ -1624,14 +1624,14 @@ def jit_prepare_bind_execute():
 
 def test_jit_prepare_bind_execute():
     """Prepared statement with parameter binding from JIT context.
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_prepare
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_nparams
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int32
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_int64
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_double
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_bind_null
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_execute_prepared
-    https://duckdb.org/docs/stable/clients/c/api.html#duckdb_destroy_prepare """
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_nparams
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int32
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int64
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_double
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_null
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_execute_prepared
+    https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_prepare """
     (open_rc, connect_rc, prepare_rc, nparams,
      bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
      chunk_size, col0, col1, col2, col3_valid) = jit_prepare_bind_execute()
@@ -3447,8 +3447,8 @@ def test_udf_benchmark(capsys):
 #
 # It fails because of removerefctpass (numba/core/lowering.py L207-210).
 # That pass checks whether the function's args and return type involve
-# NRT-tracked types. If they don't — and our bridge functions return
-# plain intp, not structrefs — it strips ALL NRT_incref/NRT_decref calls
+# NRT-tracked types. If they don't (and our bridge functions return
+# plain intp, not structrefs), it strips ALL NRT_incref/NRT_decref calls
 # from the function. So by the time this intrinsic reads the refcount,
 # the incref from export_meminfo has already been removed by the pass.
 # The refcount reads 1 (initial allocation), not 2.
@@ -3531,7 +3531,7 @@ welford_type = WelfordStateType(
 def _read_refcount(meminfo_intp):
     """Read NRT MemInfo refcount from Python via ctypes.
 
-    MemInfo.refct is the first field (size_t) — stable since numba 0.50.
+    MemInfo.refct is the first field (size_t), stable since numba 0.50.
     See numba/core/runtime/nrt.cpp.
     """
     return int(ctypes.c_size_t.from_address(meminfo_intp).value)
@@ -3651,7 +3651,7 @@ def test_array_meminfo_bridge_refcount_ladder():
 # of a structref. state_size=16 stores two intp values: meminfo_p (for
 # lifecycle) and data_p (for carray access). The incref is done via the
 # @intrinsic _incref_meminfo directly in the allocating function so it
-# inlines — removerefctpass is already disabled there because numpy.zeros
+# inlines; removerefctpass is already disabled there because numpy.zeros
 # generates NRT_MemInfo_alloc*.
 #
 # State layout: float64 array of 3 elements [sum, sum_sq, count].
@@ -3852,7 +3852,7 @@ def _welford_init_cb(info, state):
     _welford_init_impl(info, state)
 
 
-# NOTE: skips NULL validity checks — test data has no NULLs.
+# NOTE: skips NULL validity checks; test data has no NULLs.
 # Production use must call duckdb_vector_get_validity() and check bits.
 @njit
 def _welford_update_impl(info, chunk, states):
@@ -4582,7 +4582,7 @@ def test_pybridge_closed_connection_raises_runtime_error():
 
 def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
     """A standalone libduckdb whose version cannot be read is refused rather than
-    loaded unverified — otherwise it surfaces later as a confusing 'libduckdb
+    loaded unverified. Otherwise it surfaces later as a confusing 'libduckdb
     None' coordination error. No network.
     """
     from numbduck import utils
@@ -4608,8 +4608,8 @@ def test_load_duckdb_refuses_dev_suffix_same_base(monkeypatch):
     """A standalone dev build is refused even when it shares the release's base.
 
     The coordination check compares the full library version, never a stripped
-    ``X.Y.Z``, so a ``.dev``/``rc`` build — a different commit with a possibly
-    different Connection layout — never passes as the release that shares its
+    ``X.Y.Z``, so a ``.dev``/``rc`` build (a different commit with a possibly
+    different Connection layout) never passes as the release that shares its
     base. Pins that we do not "normalize out" the suffix.
     """
     from numbduck import utils
@@ -4636,8 +4636,8 @@ def test_libraries_coordinated_compares_library_version_not_package(monkeypatch)
     """Coordination compares the wheel's own library version (PRAGMA version),
     not ``duckdb.__version__``. A dev build whose library version matches the
     standalone's is coordinated even though the Python package version uses a
-    different pre-release scheme — the pairing the old package-version compare
-    wrongly refused. A differing library version still fails closed.
+    different pre-release scheme. This is the pairing the old package-version
+    compare wrongly refused. A differing library version still fails closed.
     """
     from numbduck import utils
 
@@ -4651,7 +4651,7 @@ def test_libraries_coordinated_compares_library_version_not_package(monkeypatch)
 
 def test_wheel_library_version_reads_pragma_version():
     """_wheel_library_version reports the wheel's own library version from
-    PRAGMA version (normalized) — the like-for-like counterpart to a standalone's
+    PRAGMA version (normalized): the like-for-like counterpart to a standalone's
     duckdb_library_version().
     """
     from numbduck import utils

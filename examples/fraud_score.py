@@ -1,4 +1,4 @@
-"""Fraud score UDF — branchy logic axis.
+"""Fraud score UDF: branchy logic axis.
 
 Story: a transaction risk service. Each transaction gets an integer fraud
 score based on a small ruleset: amount tier, country mismatch, off-hours,
@@ -6,15 +6,15 @@ merchant risk tier, and recent-txn count. The query sums scores across
 all transactions.
 
 Three variants:
-  1. Python scalar UDF — round-trips through the interpreter per row.
-  2. PyArrow expression UDF — pc.if_else chains over chunks. This is the
+  1. Python scalar UDF: round-trips through the interpreter per row.
+  2. PyArrow expression UDF: pc.if_else chains over chunks. This is the
      idiomatic vectorized-branchy approach in stock duckdb-python.
-  3. numbduck JIT UDF — chunk callback with native if/else, registered
+  3. numbduck JIT UDF: chunk callback with native if/else, registered
      via duckdb_register_scalar_function.
 
 This example exists to test the design hypothesis that numbduck also wins
 in Arrow's wheelhouse (vectorized branchy logic). Per the spec, if the
-measured JIT-vs-Arrow gap is < 2x, the example is dropped — Arrow is the
+measured JIT-vs-Arrow gap is < 2x, the example is dropped: Arrow is the
 right tool for that workload, and we should not pretend otherwise.
 
 Run:
@@ -214,7 +214,7 @@ def register_jit_udf(conn):
     ducklib.duckdb_scalar_function_set_function(func_p, _fraud_chunk_cb.address)
     rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
     # Registration never takes ownership of func_p, so destroy it on both the
-    # success and failure paths — i.e. before asserting on the return code.
+    # success and failure paths, i.e. before asserting on the return code.
     func_buf = numpy.array([func_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
     assert rc == ducklib.DuckDBSuccess
@@ -269,7 +269,7 @@ def run_one(conn, n):
 
 def main():
     print_env()
-    print(f"  Fraud score UDF benchmark — {ROW_COUNTS} rows")
+    print(f"  Fraud score UDF benchmark: {ROW_COUNTS} rows")
     print()
 
     conn = duckdb.connect()
@@ -322,7 +322,7 @@ def main():
     print(
         "  Discussion:\n"
         "    Arrow does the right vectorized work and beats the per-row Python\n"
-        f"    scalar UDF by ~{t_py0 / t_arrow0:.0f}x at {n0:,d} rows — pyarrow's chained\n"
+        f"    scalar UDF by ~{t_py0 / t_arrow0:.0f}x at {n0:,d} rows; pyarrow's chained\n"
         "    pc.if_else is the correct stock-DuckDB tool for branchy logic, full\n"
         f"    credit. The JIT chunk callback then beats Arrow by ~{t_arrow0 / t_jit0:.0f}x\n"
         f"    at {n0:,d} rows, widening to ~{t_arrowL / t_jitL:.0f}x at {nL:,d} rows. The\n"
