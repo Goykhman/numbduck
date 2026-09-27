@@ -1443,7 +1443,65 @@ def test_get_jit_options_rejects_unknown_key(monkeypatch):
 
 def test_get_jit_options_accepts_valid_object(monkeypatch):
     monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": false, "_dbg_optnone": true}')
-    assert get_jit_options() == {"cache": False, "_dbg_optnone": True}
+    assert get_jit_options() == {"cache": False, "nogil": True, "_dbg_optnone": True}
+
+
+def test_get_jit_options_defaults_release_the_gil(monkeypatch):
+    """nogil is on by default, and a NUMBDUCK_JIT_OPTIONS that sets other keys
+    keeps it: the variable overrides individual defaults instead of replacing
+    them all."""
+    monkeypatch.delenv("NUMBDUCK_JIT_OPTIONS", raising=False)
+    assert get_jit_options() == {"cache": True, "nogil": True}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": false}')
+    assert get_jit_options() == {"cache": False, "nogil": True}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"nogil": false}')
+    assert get_jit_options() == {"cache": True, "nogil": False}
+
+
+_GIL_WORKER_SCRIPT = r"""
+import duckdb
+from numbox.utils.lowlevel import get_unicode_data_p
+
+from numbduck import ducklib
+from numbduck.duckdb_utils import create_duckdb_result
+from numbduck.pybridge import extract_connection_ptr
+
+conn = duckdb.connect()
+conn.execute("SET threads = 2")
+conn.execute("SET enable_progress_bar = false")
+conn.execute("CREATE TABLE t AS SELECT range::DOUBLE AS x FROM range(250000)")
+conn.create_function("plus_one", lambda x: x + 1.0, ["DOUBLE"], "DOUBLE")
+conn_p = extract_connection_ptr(conn)
+result = create_duckdb_result()
+sql = "SELECT sum(plus_one(x)) FROM t WHERE x % 64 = 0"
+rc = ducklib.duckdb_query(conn_p, get_unicode_data_p(sql), result.ctypes.data)
+ducklib.duckdb_destroy_result(result.ctypes.data)
+print("QUERY_RC", rc)
+"""
+
+
+def test_binding_called_from_python_lets_duckdb_workers_take_the_gil():
+    """A binding called from Python must release the GIL for the C call. DuckDB
+    runs a query on its worker threads, and a worker that needs the GIL (here a
+    Python UDF on the same connection) waits for it forever if the calling
+    thread keeps it while it waits for the workers. 250000 rows is three row
+    groups, so the workers get some of them, and the filter keeps the UDF to 1
+    row in 64, since a Python UDF costs tens of microseconds a row. Runs in a
+    subprocess so a deadlock is a timeout, not a hung suite."""
+    env = dict(os.environ)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    env.pop("NUMBDUCK_JIT_OPTIONS", None)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _GIL_WORKER_SCRIPT],
+            env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("duckdb_query called from Python never returned: the binding kept the GIL")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "QUERY_RC 0" in proc.stdout, proc.stdout
 
 
 # --- JIT Tests ---
