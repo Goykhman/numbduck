@@ -4580,6 +4580,41 @@ def test_pybridge_closed_connection_raises_runtime_error():
         extract_connection_ptr(conn)
 
 
+def test_extract_connection_ptr_leaves_pending_result_intact():
+    """Extracting the pointer runs nothing on the connection. A query issued
+    through it would close the result the connection is still streaming, and
+    every later fetch of that result would come back short without an error.
+    """
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    try:
+        pending = conn.execute("SELECT * FROM range(5000)")
+        extract_connection_ptr(conn)
+        assert len(pending.fetchall()) == 5000
+    finally:
+        conn.close()
+
+
+def test_extract_connection_ptr_inside_an_aborted_transaction():
+    """A connection whose transaction has failed still holds a valid Connection*,
+    so extraction succeeds there, and the transaction's own error stays the
+    caller's to see.
+    """
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    try:
+        conn.execute("BEGIN")
+        with pytest.raises(duckdb.Error):
+            conn.execute("SELECT error('boom')")
+        assert extract_connection_ptr(conn) != 0
+        with pytest.raises(duckdb.Error, match="aborted"):
+            conn.execute("SELECT 42")
+    finally:
+        conn.close()
+
+
 def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
     """A standalone libduckdb whose version cannot be read is refused rather than
     loaded unverified. Otherwise it surfaces later as a confusing 'libduckdb
