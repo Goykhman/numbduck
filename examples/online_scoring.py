@@ -48,7 +48,7 @@ import numpy
 from numba import carray, njit
 from numba.core.types import intp
 from numbox.utils.clock import monotonic_ns
-from numbox.utils.lowlevel import _cast_int_to_void_p, get_unicode_data_p
+from numbox.utils.lowlevel import _cast_int_to_void_p, array_data_p, get_unicode_data_p
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import assert_results_match, format_table, print_env  # noqa: E402
@@ -112,12 +112,24 @@ def score_python(conn, ids, x):
 
 
 @njit(nogil=True)
+def _release(chunk_buf, result_buf):
+    """Destroy the chunk and the result held in these buffers.
+
+    Takes the buffers, not their addresses. numba frees an array right after its
+    last use and an address keeps nothing alive, so on a raise branch, where the
+    buffers are otherwise dead, a destroy given a bare address reads a freed
+    buffer. Passed in, the caller's buffers stay alive until this returns.
+    """
+    ducklib.duckdb_destroy_data_chunk(array_data_p(chunk_buf))
+    ducklib.duckdb_destroy_result(array_data_p(result_buf))
+
+
+@njit(nogil=True)
 def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
     n = len(ids)
     result_buf = numpy.zeros(6, dtype=numpy.int64)
     chunk_buf = numpy.zeros(1, dtype=numpy.int64)
     result_p = intp(result_buf.ctypes.data)
-    chunk_pp = intp(chunk_buf.ctypes.data)
 
     for i in range(n):
         t0 = monotonic_ns()
@@ -131,7 +143,7 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
         exec_rc = ducklib.duckdb_execute_prepared(stmt_p, result_p)
         if exec_rc != ducklib.DuckDBSuccess:
             # execute_prepared fills an error result even on failure; destroy it.
-            ducklib.duckdb_destroy_result(result_p)
+            _release(chunk_buf, result_buf)
             raise RuntimeError("execute failed in scoring loop")
         result_tup = (
             result_buf[0], result_buf[1], result_buf[2],
@@ -143,8 +155,7 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
         # instead of segfaulting on a NULL chunk inside the nogil loop.
         if chunk_p == 0 or ducklib.duckdb_data_chunk_get_size(chunk_p) == 0:
             chunk_buf[0] = chunk_p
-            ducklib.duckdb_destroy_data_chunk(chunk_pp)
-            ducklib.duckdb_destroy_result(result_p)
+            _release(chunk_buf, result_buf)
             raise RuntimeError("no matching feature row in scoring loop")
 
         v0 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 0)
@@ -165,8 +176,7 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
             or (val3 != 0 and not ducklib.duckdb_validity_row_is_valid(val3, 0))
         ):
             chunk_buf[0] = chunk_p
-            ducklib.duckdb_destroy_data_chunk(chunk_pp)
-            ducklib.duckdb_destroy_result(result_p)
+            _release(chunk_buf, result_buf)
             raise RuntimeError("NULL feature value in scoring loop")
         d0 = ducklib.duckdb_vector_get_data(v0)
         d1 = ducklib.duckdb_vector_get_data(v1)
@@ -182,8 +192,7 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
         )
 
         chunk_buf[0] = chunk_p
-        ducklib.duckdb_destroy_data_chunk(chunk_pp)
-        ducklib.duckdb_destroy_result(result_p)
+        _release(chunk_buf, result_buf)
 
         t1 = monotonic_ns()
         latencies_out[i] = t1 - t0

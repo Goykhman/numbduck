@@ -3,6 +3,7 @@ import ctypes
 import functools
 import math
 import os
+import shutil
 import subprocess
 import sys
 
@@ -1566,6 +1567,13 @@ def test_array_data_p():
         assert array_data_p(arr) == arr.ctypes.data
 
 
+# In the JIT lifecycle tests every buffer is read once more after the call that
+# destroys through it. numba frees an array right after its last use, and the
+# address array_data_p returns keeps nothing alive, so a buffer whose last use is
+# array_data_p(buf) is freed before the destroy call reads the handle out of it
+# and writes NULL back. Reading the slot afterwards keeps the buffer alive across
+# the call, and checks that the destroy nulled it.
+
 @njit
 def jit_open_close():
     db = create_duckdb_database()
@@ -1573,13 +1581,14 @@ def jit_open_close():
         get_unicode_data_p(':memory:'), array_data_p(db))
     db_p = db[0]
     ducklib.duckdb_close(array_data_p(db))
-    return rc, db_p
+    return rc, db_p, db[0]
 
 
 def test_jit_open_close_database():
-    rc, db_p = jit_open_close()
+    rc, db_p, db_after = jit_open_close()
     assert rc == ducklib.DuckDBSuccess, f"open failed, rc={rc}"
     assert db_p != 0, f"expected valid pointer, got {db_p}"
+    assert db_after == 0, f"expected null after close, got {db_after}"
 
 
 @njit
@@ -1599,17 +1608,18 @@ def jit_connect_query_disconnect():
     ducklib.duckdb_disconnect(array_data_p(conn))
     conn_after = conn[0]
     ducklib.duckdb_close(array_data_p(db))
-    return open_rc, db_p, connect_rc, conn_p, query_rc, conn_after
+    return open_rc, db_p, connect_rc, conn_p, query_rc, conn_after, db[0]
 
 
 def test_jit_connect_query_disconnect():
-    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after = jit_connect_query_disconnect()
+    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after, db_after = jit_connect_query_disconnect()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert db_p != 0, f"expected valid db pointer, got {db_p}"
     assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
     assert conn_p != 0, f"expected valid connection pointer, got {conn_p}"
     assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
     assert conn_after == 0, f"expected null after disconnect, got {conn_after}"
+    assert db_after == 0, f"expected null after close, got {db_after}"
 
 
 @njit
@@ -1628,7 +1638,8 @@ def jit_query_invalid_sql():
     ducklib.duckdb_destroy_result(array_data_p(out))
     ducklib.duckdb_disconnect(array_data_p(conn))
     ducklib.duckdb_close(array_data_p(db))
-    return open_rc, connect_rc, conn_p, rc, detected
+    left = numpy.count_nonzero(out) + numpy.count_nonzero(conn) + numpy.count_nonzero(db)
+    return open_rc, connect_rc, conn_p, rc, detected, left
 
 
 def test_jit_query_invalid_sql():
@@ -1640,12 +1651,13 @@ def test_jit_query_invalid_sql():
     before the connection, so on a null connection it segfaults rather than
     returning DuckDBError, and a crash inside compiled code takes the session
     down with no traceback."""
-    open_rc, connect_rc, conn_p, rc, detected = jit_query_invalid_sql()
+    open_rc, connect_rc, conn_p, rc, detected, left = jit_query_invalid_sql()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
     assert conn_p != 0, "expected a valid connection pointer"
     assert rc == ducklib.DuckDBError, f"expected DuckDBError, got {rc}"
     assert detected == 1, "in-JIT DuckDBError comparison did not observe the error"
+    assert left == 0, f"{left} handle words not nulled by the destroy calls"
 
 
 # --- JIT: Prepared Statements ---
@@ -1716,10 +1728,12 @@ def jit_prepare_bind_execute():
     ducklib.duckdb_destroy_prepare(array_data_p(stmt))
     ducklib.duckdb_disconnect(array_data_p(conn))
     ducklib.duckdb_close(array_data_p(db))
+    left = (numpy.count_nonzero(chunk_buf) + numpy.count_nonzero(result) + numpy.count_nonzero(stmt)
+            + numpy.count_nonzero(conn) + numpy.count_nonzero(db))
 
     return (open_rc, connect_rc, prepare_rc, nparams,
             bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
-            chunk_size, col0, col1, col2, col3_valid)
+            chunk_size, col0, col1, col2, col3_valid, left)
 
 
 def test_jit_prepare_bind_execute():
@@ -1734,7 +1748,7 @@ def test_jit_prepare_bind_execute():
     https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_prepare """
     (open_rc, connect_rc, prepare_rc, nparams,
      bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
-     chunk_size, col0, col1, col2, col3_valid) = jit_prepare_bind_execute()
+     chunk_size, col0, col1, col2, col3_valid, left) = jit_prepare_bind_execute()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
     assert prepare_rc == ducklib.DuckDBSuccess, f"prepare failed, rc={prepare_rc}"
@@ -1749,6 +1763,63 @@ def test_jit_prepare_bind_execute():
     assert col1 == 2**40, f"col1: expected 2^40, got {col1}"
     assert abs(col2 - 3.14) < 1e-10, f"col2: expected 3.14, got {col2}"
     assert col3_valid == 0, f"col3: expected NULL, validity={col3_valid}"
+    assert left == 0, f"{left} handle words not nulled by the destroy calls"
+
+
+_POISON_FREE_C = r"""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <malloc.h>
+#include <string.h>
+
+static void (*real_free)(void *) = 0;
+
+void free(void *p) {
+    if (!real_free) real_free = (void (*)(void *))dlsym(RTLD_NEXT, "free");
+    if (p) {
+        size_t n = malloc_usable_size(p);
+        if (n > 0 && n < 4096) memset(p, 0xDE, n);
+    }
+    real_free(p);
+}
+"""
+
+_BUFFER_LIFETIME_TESTS = [
+    "test_jit_open_close_database",
+    "test_jit_connect_query_disconnect",
+    "test_jit_query_invalid_sql",
+    "test_jit_prepare_bind_execute",
+    "test_online_scoring_missing_key_raises",
+    "test_online_scoring_null_feature_raises",
+]
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or shutil.which("gcc") is None,
+    reason="needs Linux and gcc to preload an allocator that poisons freed memory")
+def test_jit_destroy_calls_read_no_freed_buffer(tmp_path):
+    """The JIT lifecycle tests and online_scoring's raise branches destroy
+    handles through out-param buffers. A freed buffer's bytes normally survive
+    until the memory is reused, so a destroy that reads a buffer numba has
+    already freed still passes. Under an allocator that overwrites memory as it
+    is freed, the same code reads garbage and crashes, so these tests are run
+    again with one preloaded."""
+    src = tmp_path / "poison_free.c"
+    src.write_text(_POISON_FREE_C)
+    lib = tmp_path / "poison_free.so"
+    subprocess.run(
+        ["gcc", "-shared", "-fPIC", "-O2", "-o", str(lib), str(src), "-ldl"],
+        check=True, capture_output=True)
+    here = os.path.abspath(__file__)
+    repo_root = os.path.dirname(os.path.dirname(here))
+    env = dict(os.environ)
+    env["LD_PRELOAD"] = str(lib)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+        + [f"{here}::{name}" for name in _BUFFER_LIFETIME_TESTS],
+        cwd=repo_root, env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout[-3000:]!r} stderr={proc.stderr[-3000:]!r}"
 
 
 # --- Value Interface ---

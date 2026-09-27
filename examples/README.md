@@ -45,6 +45,18 @@ treat the numbers as orders of magnitude, not fixed constants.
   example of the UDAF pattern. `irr.py` defines the UDAF and is meant to be
   imported, not run directly, so `run_irr.py` is the launcher that runs it.
 
+## Out-parameter buffers inside `@njit`
+
+The C API hands back handles through out-parameters, so a handle lives in a
+small numpy buffer and a binding gets the buffer's address. Inside `@njit`,
+numba frees an array right after its last use, and an address keeps nothing
+alive. A destroy call whose buffer is last used to take that address, as in
+`ducklib.duckdb_close(array_data_p(db))` on its own, reads a buffer that has
+already been freed. Use the buffer again after the call (reading the slot back
+also shows that the destroy set it to NULL), or pass the buffer itself to a
+function that takes the address, as `_release` does in
+[online_scoring.py](online_scoring.py).
+
 ## Requirements
 
 These scripts require [`pyarrow`](https://arrow.apache.org/docs/python/install.html) in addition to numbduck's normal dependencies
