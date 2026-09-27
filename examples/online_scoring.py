@@ -48,7 +48,8 @@ import numpy
 from numba import carray, njit
 from numba.core.types import intp
 from numbox.utils.clock import monotonic_ns
-from numbox.utils.lowlevel import _cast_int_to_void_p, array_data_p, get_unicode_data_p
+from numbox.utils.cstrings import c_string
+from numbox.utils.lowlevel import _cast_int_to_void_p, array_data_p
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import assert_results_match, format_table, print_env  # noqa: E402
@@ -210,7 +211,8 @@ def score_jit(conn, ids, x):
     # (it owns the error message), so it must always be destroyed. Hence the
     # try/finally, which also covers any exception raised inside the loop.
     try:
-        rc = ducklib.duckdb_prepare(conn_ptr, get_unicode_data_p(sql), stmt.ctypes.data)
+        with c_string(sql) as sql_p:
+            rc = ducklib.duckdb_prepare(conn_ptr, sql_p, stmt.ctypes.data)
         assert rc == ducklib.DuckDBSuccess
         _score_jit_loop(int(stmt[0]), ids, x, scores, latencies)
     finally:

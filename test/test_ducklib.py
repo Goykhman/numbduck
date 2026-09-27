@@ -4784,6 +4784,41 @@ def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
         conn.close()
 
 
+def test_non_ascii_text_reaches_duckdb_as_utf8(tmp_path):
+    """The C API reads every char* as NUL-terminated UTF-8. numbox's
+    get_unicode_data_p hands over CPython's internal storage instead (Latin-1,
+    UCS-2 or UCS-4), which is UTF-8 only for ASCII text. numbox's c_string
+    encodes the text, and is what the examples pass. A path, an identifier and a
+    bound value that are not ASCII all arrive intact through it."""
+    from numbox.utils.cstrings import c_string
+
+    path = str(tmp_path / "data_€.duckdb")
+    db = create_duckdb_database()
+    with c_string(path) as path_p:
+        assert ducklib.duckdb_open(path_p, db.ctypes.data) == ducklib.DuckDBSuccess
+    conn = create_duckdb_connection()
+    assert ducklib.duckdb_connect(db[0], conn.ctypes.data) == ducklib.DuckDBSuccess
+    result = create_duckdb_result()
+    with c_string('CREATE TABLE "café" (city VARCHAR)') as sql_p:
+        assert ducklib.duckdb_query(conn[0], sql_p, result.ctypes.data) == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    stmt = create_duckdb_prepared_statement()
+    with c_string('INSERT INTO "café" VALUES ($1)') as sql_p:
+        assert ducklib.duckdb_prepare(conn[0], sql_p, stmt.ctypes.data) == ducklib.DuckDBSuccess
+    with c_string("Tokyo 東京") as city_p:
+        assert ducklib.duckdb_bind_varchar(stmt[0], 1, city_p) == ducklib.DuckDBSuccess
+    result = create_duckdb_result()
+    assert ducklib.duckdb_execute_prepared(stmt[0], result.ctypes.data) == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
+    ducklib.duckdb_disconnect(conn.ctypes.data)
+    ducklib.duckdb_close(db.ctypes.data)
+
+    assert "data_€.duckdb" in os.listdir(tmp_path)
+    with duckdb.connect(path) as check:
+        assert check.execute('SELECT city FROM "café"').fetchall() == [("Tokyo 東京",)]
+
+
 def test_pybridge_closed_connection_raises_runtime_error():
     """A closed connection resets its unique_ptr<Connection> to null, so the
     documented offset yields a null pointer. extract_connection_ptr must raise a
