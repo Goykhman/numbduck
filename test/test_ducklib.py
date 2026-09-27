@@ -1454,8 +1454,50 @@ def test_get_jit_options_defaults_release_the_gil(monkeypatch):
     assert get_jit_options() == {"cache": True, "nogil": True}
     monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": false}')
     assert get_jit_options() == {"cache": False, "nogil": True}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"nogil": true}')
+    assert get_jit_options() == {"cache": True, "nogil": True}
+
+
+def test_get_jit_options_caches_only_the_default_compile_options(monkeypatch):
+    """numba's disk cache key holds no compile options, so an object compiled
+    under one set is served to a process running another. Only the default
+    compile options use the cache; asking for the cache together with other
+    options says why it is off instead of poisoning the shared cache."""
     monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"nogil": false}')
-    assert get_jit_options() == {"cache": True, "nogil": False}
+    assert get_jit_options() == {"cache": False, "nogil": False}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"fastmath": true}')
+    assert get_jit_options() == {"cache": False, "nogil": True, "fastmath": True}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": true, "fastmath": true}')
+    with pytest.warns(RuntimeWarning, match="NUMBDUCK_JIT_OPTIONS"):
+        assert get_jit_options() == {"cache": False, "nogil": True, "fastmath": True}
+
+
+_NON_DEFAULT_WRITER_SCRIPT = r"""
+from numbduck.duckdb_utils import create_duckdb_result
+
+create_duckdb_result()
+"""
+
+
+def test_non_default_compile_options_leave_the_disk_cache_untouched(tmp_path):
+    """A process compiling under non-default options must not write the shared
+    disk cache: the entries it would leave are served to every later process,
+    whatever options that one runs under."""
+    cache_dir = tmp_path / "numba-cache"
+    cache_dir.mkdir()
+    env = dict(os.environ)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    env["NUMBA_CACHE_DIR"] = str(cache_dir)
+    env["NUMBDUCK_JIT_OPTIONS"] = '{"cache": true, "fastmath": true}'
+    proc = subprocess.run(
+        [sys.executable, "-c", _NON_DEFAULT_WRITER_SCRIPT],
+        env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    written = [os.path.join(root, name) for root, _, names in os.walk(cache_dir) for name in names]
+    assert written == [], written
 
 
 _GIL_WORKER_SCRIPT = r"""
