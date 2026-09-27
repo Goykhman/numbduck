@@ -4542,6 +4542,7 @@ def test_load_duckdb_refuses_version_mismatch(monkeypatch):
 
     monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
     monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_open_private", fake_load_lib_path)
     monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
     monkeypatch.setattr(
         utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
@@ -4549,6 +4550,52 @@ def test_load_duckdb_refuses_version_mismatch(monkeypatch):
 
     with pytest.raises(RuntimeError, match="NUMBDUCK_LIBDUCKDB"):
         utils.load_duckdb()
+
+
+_REFUSED_STANDALONE_SCRIPT = r"""
+import ctypes
+import ctypes.util
+import os
+
+from numbduck import utils
+
+print("BEFORE", hasattr(ctypes.CDLL(None), "duckdb_open"))
+os.environ["NUMBDUCK_LIBDUCKDB"] = utils.find_duckdb_shared_lib()
+utils.find_duckdb_shared_lib = lambda: ctypes.util.find_library("m")
+utils._wheel_library_version = lambda: "0.0.0"
+try:
+    utils.load_duckdb()
+except RuntimeError as exc:
+    print("REFUSED", "0.0.0" in str(exc))
+print("GLOBAL", hasattr(ctypes.CDLL(None), "duckdb_open"))
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the process-wide symbol scope through dlopen(NULL)")
+def test_refused_standalone_libduckdb_stays_out_of_the_global_symbol_scope(tmp_path):
+    """A standalone libduckdb the version check refuses must not have entered the
+    process-wide symbol scope. numbox resolves every JIT call by name through that
+    scope, first definition wins, and a loaded library is never unloaded, so a
+    refused build left there keeps serving the JIT after a later candidate passes.
+
+    Runs in a subprocess: it simulates a wheel without the C API (libm stands in)
+    and offers the wheel's own libduckdb as the standalone, refused because the
+    wheel's version is faked, then asks dlopen(NULL) whether duckdb_open is visible.
+    """
+    env = dict(os.environ)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    env["HOME"] = str(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, "-c", _REFUSED_STANDALONE_SCRIPT],
+        env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    lines = proc.stdout.split("\n")
+    assert "BEFORE False" in lines, proc.stdout
+    assert "REFUSED True" in lines, proc.stdout
+    assert "GLOBAL False" in lines, proc.stdout
 
 
 def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
@@ -4630,6 +4677,7 @@ def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
 
     monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
     monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_open_private", fake_load_lib_path)
     monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
     monkeypatch.setattr(
         utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
@@ -4657,6 +4705,7 @@ def test_load_duckdb_refuses_dev_suffix_same_base(monkeypatch):
 
     monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
     monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_open_private", fake_load_lib_path)
     monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
     monkeypatch.setattr(
         utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
