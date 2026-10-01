@@ -1787,6 +1787,22 @@ void free(void *p) {
 }
 """
 
+_FREED_BYTES_SCRIPT = r"""
+import ctypes
+import numpy
+from numba import njit
+
+@njit
+def fill_and_drop():
+    a = numpy.empty(8, numpy.int64)
+    for i in range(8):
+        a[i] = 0x1111111111111111
+    return a.ctypes.data
+
+addr = fill_and_drop()
+print("FREED-BYTES", bytes((ctypes.c_ubyte * 16).from_address(addr + 32)).hex())
+"""
+
 _BUFFER_LIFETIME_TESTS = [
     "test_jit_open_close_database",
     "test_jit_connect_query_disconnect",
@@ -1797,26 +1813,50 @@ _BUFFER_LIFETIME_TESTS = [
 ]
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux") or shutil.which("gcc") is None,
-    reason="needs Linux and gcc to preload an allocator that poisons freed memory")
-def test_jit_destroy_calls_read_no_freed_buffer(tmp_path):
-    """The JIT lifecycle tests and online_scoring's raise branches destroy
-    handles through out-param buffers. A freed buffer's bytes normally survive
-    until the memory is reused, so a destroy that reads a buffer numba has
-    already freed still passes. Under an allocator that overwrites memory as it
-    is freed, the same code reads garbage and crashes, so these tests are run
-    again with one preloaded."""
+def _poison_on_free(tmp_path):
+    """The environment under which the allocator overwrites freed memory: macOS
+    has libmalloc scribble 0x55 over every block it frees, and not zero it
+    first as it does by default for a recent build; Linux preloads a free that
+    does the same with 0xDE."""
+    if sys.platform == "darwin":
+        return {"MallocScribble": "1", "MallocZeroOnFree": "0"}
     src = tmp_path / "poison_free.c"
     src.write_text(_POISON_FREE_C)
     lib = tmp_path / "poison_free.so"
     subprocess.run(
         ["gcc", "-shared", "-fPIC", "-O2", "-o", str(lib), str(src), "-ldl"],
         check=True, capture_output=True)
+    return {"LD_PRELOAD": str(lib)}
+
+
+@pytest.mark.skipif(
+    not (sys.platform == "darwin" or (sys.platform == "linux" and shutil.which("gcc"))),
+    reason="needs macOS, or Linux with gcc, for an allocator that poisons freed memory")
+def test_jit_destroy_calls_read_no_freed_buffer(tmp_path):
+    """The JIT lifecycle tests and online_scoring's raise branches destroy
+    handles through out-param buffers. A freed buffer's bytes normally survive
+    until the memory is reused, so a destroy that reads a buffer numba has
+    already freed still passes. Under an allocator that overwrites memory as it
+    is freed, the same code reads garbage and crashes, so these tests are run
+    again under one. First a numba array is filled and dropped under the same
+    environment and its freed bytes are read back, and a run in which they
+    survive, or were zeroed, is skipped rather than passed: macOS ignores the
+    variables for a restricted python, and a destroy that checks the handle
+    for NULL survives a zeroed buffer."""
     here = os.path.abspath(__file__)
     repo_root = os.path.dirname(os.path.dirname(here))
     env = dict(os.environ)
-    env["LD_PRELOAD"] = str(lib)
+    env.update(_poison_on_free(tmp_path))
+    check = subprocess.run(
+        [sys.executable, "-c", _FREED_BYTES_SCRIPT],
+        cwd=repo_root, env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert check.returncode == 0, f"stdout={check.stdout!r} stderr={check.stderr[-3000:]!r}"
+    freed = check.stdout.split("FREED-BYTES", 1)[1].split()[0]
+    if "1111" in freed:
+        pytest.skip(f"freed memory keeps its bytes under this allocator: {freed}")
+    if freed.strip("0") == "":
+        pytest.skip(f"this allocator zeroes freed memory, which a destroy checking for NULL survives: {freed}")
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
         + [f"{here}::{name}" for name in _BUFFER_LIFETIME_TESTS],
