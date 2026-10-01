@@ -1527,7 +1527,10 @@ def test_binding_called_from_python_lets_duckdb_workers_take_the_gil():
     """A binding called from Python must release the GIL for the C call. DuckDB
     runs a query on its worker threads, and a worker that needs the GIL (here a
     Python UDF on the same connection) waits for it forever if the calling
-    thread keeps it while it waits for the workers. 250000 rows is three row
+    thread keeps it while it waits for the workers. With one thread DuckDB runs
+    the whole query on the calling thread, which already holds the GIL, so the
+    UDF runs and nothing deadlocks; the script asks for two so that a second
+    thread is in play whatever the host's core count. 250000 rows is three row
     groups, so the workers get some of them, and the filter keeps the UDF to 1
     row in 64, since a Python UDF costs tens of microseconds a row. Runs in a
     subprocess so a deadlock is a timeout, not a hung suite."""
