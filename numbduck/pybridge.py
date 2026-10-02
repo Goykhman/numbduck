@@ -2,10 +2,9 @@ import ctypes
 
 import duckdb
 
-from numbduck import ducklib
-from numbduck.duckdb_utils import create_duckdb_result
+# Importing ducklib loads libduckdb, whose version the coordination check reads.
+from numbduck import ducklib  # noqa: F401
 from numbduck.utils import libraries_coordinated, loaded_library_version
-from numbox.utils.lowlevel import get_unicode_data_p
 
 
 # Byte offset from the Python object address (``id(conn)``) to the pybind11
@@ -30,16 +29,18 @@ def extract_connection_ptr(conn):
     (which document the offset derivations). Those offsets are an implementation
     detail of the duckdb Python package, validated on duckdb 1.3.2 / Linux x86-64
     / libstdc++; re-verify them when upgrading duckdb, since stale offsets yield a
-    wild pointer whose dereference inside ``duckdb_query`` is undefined behavior
-    the ``SELECT 1`` check below cannot catch.
+    wild pointer whose dereference inside the C API is undefined behavior that
+    nothing here can detect.
 
-    The pointer is handed out only after four guards: exact-type identity (not
+    The pointer is handed out only after three guards: exact-type identity (not
     ``isinstance``: a subclass or an object spoofing ``__class__`` would steer
     the raw pointer walk through arbitrary memory); runtime coordination (refuse
     when numbduck's JIT libduckdb and the wheel that minted *conn* are different
-    builds, i.e. the macOS dual-runtime seam); a null check on each intermediate
-    pointer (a closed connection nulls its ``unique_ptr<Connection>``); and a
-    best-effort ``SELECT 1`` liveness smoke-test.
+    builds, i.e. the macOS dual-runtime seam); and a null check on each
+    intermediate pointer (a closed connection nulls its ``unique_ptr<Connection>``).
+    Nothing is run on the connection: a query issued through it would close the
+    result the connection is still streaming, and wait on the connection's lock
+    while holding the GIL.
 
     Parameters
     ----------
@@ -67,9 +68,8 @@ def extract_connection_ptr(conn):
         If *conn* is not exactly a ``duckdb.DuckDBPyConnection``.
     RuntimeError
         If numbduck's JIT bindings and the Python ``duckdb`` module resolve
-        different libduckdb versions, if the extracted pointer is null (a closed
-        or uninitialized connection), or if the pointer fails the ``SELECT 1``
-        liveness smoke-test.
+        different libduckdb versions, or if the extracted pointer is null (a
+        closed or uninitialized connection).
     """
     if type(conn) is not duckdb.DuckDBPyConnection:
         raise TypeError(
@@ -104,16 +104,6 @@ def extract_connection_ptr(conn):
         raise RuntimeError(
             "extracted null Connection* from duckdb.DuckDBPyConnection "
             "(is the connection closed?)"
-        )
-
-    # Liveness smoke-test: run a trivial query through the C API.
-    result = create_duckdb_result()
-    query_p = get_unicode_data_p("SELECT 1")
-    rc = ducklib.duckdb_query(conn_ptr, query_p, result.ctypes.data)
-    ducklib.duckdb_destroy_result(result.ctypes.data)
-    if rc != ducklib.DuckDBSuccess:
-        raise RuntimeError(
-            "extracted connection pointer failed validation"
         )
 
     return conn_ptr

@@ -1,5 +1,6 @@
 import json
 import os
+import warnings
 
 from numba.core.options import DefaultOptions
 
@@ -14,14 +15,36 @@ _ALLOWED_JIT_OPTIONS = frozenset(
     name for name in vars(DefaultOptions) if not name.startswith("__")
 ) | {"cache"}
 
+# nogil lets a binding called from Python release the GIL for the length of
+# the C call. DuckDB runs a query on its worker threads, and a worker that needs
+# the GIL (a Python UDF on the same connection, a numba @cfunc reporting an
+# exception it swallowed) would otherwise wait for it forever while the calling
+# thread waits for the workers.
+_DEFAULT_JIT_OPTIONS = {"cache": True, "nogil": True}
+
+
+def _changes_compile_options(options):
+    return {k: v for k, v in options.items() if k != "cache"} != {
+        k: v for k, v in _DEFAULT_JIT_OPTIONS.items() if k != "cache"}
+
 
 def get_jit_options():
-    """
-    E.g., export NUMBDUCK_JIT_OPTIONS='{"cache": false}'
+    """The jit options every binding and buffer allocator is compiled with.
+
+    The defaults are ``{"cache": true, "nogil": true}``. NUMBDUCK_JIT_OPTIONS, a
+    JSON object, overrides individual defaults and adds other njit options,
+    e.g. export NUMBDUCK_JIT_OPTIONS='{"cache": false}' turns the disk cache
+    off and keeps nogil.
+
+    Only the default compile options use numba's disk cache. Its key holds no
+    compile options, so an object compiled under one set would be served to a
+    process running another, and one process under non-default options would
+    poison the cache for every later default one. Any other option turns the
+    cache off, with a RuntimeWarning when the cache was asked for explicitly.
     """
     as_str = os.environ.get("NUMBDUCK_JIT_OPTIONS")
     if as_str is None:
-        return {"cache": True}
+        return dict(_DEFAULT_JIT_OPTIONS)
     try:
         as_json = json.loads(as_str)
     except json.JSONDecodeError:
@@ -34,7 +57,18 @@ def get_jit_options():
             f"NUMBDUCK_JIT_OPTIONS contains unknown jit option(s) {sorted(unknown)}; "
             f"allowed keys are {sorted(_ALLOWED_JIT_OPTIONS)}"
         )
-    return as_json
+    options = {**_DEFAULT_JIT_OPTIONS, **as_json}
+    if options.get("cache") and _changes_compile_options(options):
+        if as_json.get("cache"):
+            warnings.warn(
+                "NUMBDUCK_JIT_OPTIONS asks for the disk cache together with non-default compile options; "
+                "numbduck compiles without the cache, because numba's cache key holds no compile options and "
+                "an object compiled under one set would be served to a process running another.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        options["cache"] = False
+    return options
 
 
 jit_options = get_jit_options()

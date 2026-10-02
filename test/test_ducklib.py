@@ -3,6 +3,7 @@ import ctypes
 import functools
 import math
 import os
+import shutil
 import subprocess
 import sys
 
@@ -1443,7 +1444,110 @@ def test_get_jit_options_rejects_unknown_key(monkeypatch):
 
 def test_get_jit_options_accepts_valid_object(monkeypatch):
     monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": false, "_dbg_optnone": true}')
-    assert get_jit_options() == {"cache": False, "_dbg_optnone": True}
+    assert get_jit_options() == {"cache": False, "nogil": True, "_dbg_optnone": True}
+
+
+def test_get_jit_options_defaults_release_the_gil(monkeypatch):
+    """nogil is on by default, and a NUMBDUCK_JIT_OPTIONS that sets other keys
+    keeps it: the variable overrides individual defaults instead of replacing
+    them all."""
+    monkeypatch.delenv("NUMBDUCK_JIT_OPTIONS", raising=False)
+    assert get_jit_options() == {"cache": True, "nogil": True}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": false}')
+    assert get_jit_options() == {"cache": False, "nogil": True}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"nogil": true}')
+    assert get_jit_options() == {"cache": True, "nogil": True}
+
+
+def test_get_jit_options_caches_only_the_default_compile_options(monkeypatch):
+    """numba's disk cache key holds no compile options, so an object compiled
+    under one set is served to a process running another. Only the default
+    compile options use the cache; asking for the cache together with other
+    options says why it is off instead of poisoning the shared cache."""
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"nogil": false}')
+    assert get_jit_options() == {"cache": False, "nogil": False}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"fastmath": true}')
+    assert get_jit_options() == {"cache": False, "nogil": True, "fastmath": True}
+    monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": true, "fastmath": true}')
+    with pytest.warns(RuntimeWarning, match="NUMBDUCK_JIT_OPTIONS"):
+        assert get_jit_options() == {"cache": False, "nogil": True, "fastmath": True}
+
+
+_NON_DEFAULT_WRITER_SCRIPT = r"""
+from numbduck.duckdb_utils import create_duckdb_result
+
+create_duckdb_result()
+"""
+
+
+def test_non_default_compile_options_leave_the_disk_cache_untouched(tmp_path):
+    """A process compiling under non-default options must not write the shared
+    disk cache: the entries it would leave are served to every later process,
+    whatever options that one runs under."""
+    cache_dir = tmp_path / "numba-cache"
+    cache_dir.mkdir()
+    env = dict(os.environ)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    env["NUMBA_CACHE_DIR"] = str(cache_dir)
+    env["NUMBDUCK_JIT_OPTIONS"] = '{"cache": true, "fastmath": true}'
+    proc = subprocess.run(
+        [sys.executable, "-c", _NON_DEFAULT_WRITER_SCRIPT],
+        env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    written = [os.path.join(root, name) for root, _, names in os.walk(cache_dir) for name in names]
+    assert written == [], written
+
+
+_GIL_WORKER_SCRIPT = r"""
+import duckdb
+from numbox.utils.lowlevel import get_unicode_data_p
+
+from numbduck import ducklib
+from numbduck.duckdb_utils import create_duckdb_result
+from numbduck.pybridge import extract_connection_ptr
+
+conn = duckdb.connect()
+conn.execute("SET threads = 2")
+conn.execute("SET enable_progress_bar = false")
+conn.execute("CREATE TABLE t AS SELECT range::DOUBLE AS x FROM range(250000)")
+conn.create_function("plus_one", lambda x: x + 1.0, ["DOUBLE"], "DOUBLE")
+conn_p = extract_connection_ptr(conn)
+result = create_duckdb_result()
+sql = "SELECT sum(plus_one(x)) FROM t WHERE x % 64 = 0"
+rc = ducklib.duckdb_query(conn_p, get_unicode_data_p(sql), result.ctypes.data)
+ducklib.duckdb_destroy_result(result.ctypes.data)
+print("QUERY_RC", rc)
+"""
+
+
+def test_binding_called_from_python_lets_duckdb_workers_take_the_gil():
+    """A binding called from Python must release the GIL for the C call. DuckDB
+    runs a query on its worker threads, and a worker that needs the GIL (here a
+    Python UDF on the same connection) waits for it forever if the calling
+    thread keeps it while it waits for the workers. With one thread DuckDB runs
+    the whole query on the calling thread, which already holds the GIL, so the
+    UDF runs and nothing deadlocks; the script asks for two so that a second
+    thread is in play whatever the host's core count. 250000 rows is three row
+    groups, so the workers get some of them, and the filter keeps the UDF to 1
+    row in 64, since a Python UDF costs tens of microseconds a row. Runs in a
+    subprocess so a deadlock is a timeout, not a hung suite."""
+    env = dict(os.environ)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    env.pop("NUMBDUCK_JIT_OPTIONS", None)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _GIL_WORKER_SCRIPT],
+            env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("duckdb_query called from Python never returned: the binding kept the GIL")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "QUERY_RC 0" in proc.stdout, proc.stdout
 
 
 # --- JIT Tests ---
@@ -1466,6 +1570,13 @@ def test_array_data_p():
         assert array_data_p(arr) == arr.ctypes.data
 
 
+# In the JIT lifecycle tests every buffer is read once more after the call that
+# destroys through it. numba frees an array right after its last use, and the
+# address array_data_p returns keeps nothing alive, so a buffer whose last use is
+# array_data_p(buf) is freed before the destroy call reads the handle out of it
+# and writes NULL back. Reading the slot afterwards keeps the buffer alive across
+# the call, and checks that the destroy nulled it.
+
 @njit
 def jit_open_close():
     db = create_duckdb_database()
@@ -1473,13 +1584,14 @@ def jit_open_close():
         get_unicode_data_p(':memory:'), array_data_p(db))
     db_p = db[0]
     ducklib.duckdb_close(array_data_p(db))
-    return rc, db_p
+    return rc, db_p, db[0]
 
 
 def test_jit_open_close_database():
-    rc, db_p = jit_open_close()
+    rc, db_p, db_after = jit_open_close()
     assert rc == ducklib.DuckDBSuccess, f"open failed, rc={rc}"
     assert db_p != 0, f"expected valid pointer, got {db_p}"
+    assert db_after == 0, f"expected null after close, got {db_after}"
 
 
 @njit
@@ -1499,17 +1611,18 @@ def jit_connect_query_disconnect():
     ducklib.duckdb_disconnect(array_data_p(conn))
     conn_after = conn[0]
     ducklib.duckdb_close(array_data_p(db))
-    return open_rc, db_p, connect_rc, conn_p, query_rc, conn_after
+    return open_rc, db_p, connect_rc, conn_p, query_rc, conn_after, db[0]
 
 
 def test_jit_connect_query_disconnect():
-    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after = jit_connect_query_disconnect()
+    open_rc, db_p, connect_rc, conn_p, query_rc, conn_after, db_after = jit_connect_query_disconnect()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert db_p != 0, f"expected valid db pointer, got {db_p}"
     assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
     assert conn_p != 0, f"expected valid connection pointer, got {conn_p}"
     assert query_rc == ducklib.DuckDBSuccess, f"query failed, rc={query_rc}"
     assert conn_after == 0, f"expected null after disconnect, got {conn_after}"
+    assert db_after == 0, f"expected null after close, got {db_after}"
 
 
 @njit
@@ -1528,7 +1641,8 @@ def jit_query_invalid_sql():
     ducklib.duckdb_destroy_result(array_data_p(out))
     ducklib.duckdb_disconnect(array_data_p(conn))
     ducklib.duckdb_close(array_data_p(db))
-    return open_rc, connect_rc, conn_p, rc, detected
+    left = numpy.count_nonzero(out) + numpy.count_nonzero(conn) + numpy.count_nonzero(db)
+    return open_rc, connect_rc, conn_p, rc, detected, left
 
 
 def test_jit_query_invalid_sql():
@@ -1540,12 +1654,13 @@ def test_jit_query_invalid_sql():
     before the connection, so on a null connection it segfaults rather than
     returning DuckDBError, and a crash inside compiled code takes the session
     down with no traceback."""
-    open_rc, connect_rc, conn_p, rc, detected = jit_query_invalid_sql()
+    open_rc, connect_rc, conn_p, rc, detected, left = jit_query_invalid_sql()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
     assert conn_p != 0, "expected a valid connection pointer"
     assert rc == ducklib.DuckDBError, f"expected DuckDBError, got {rc}"
     assert detected == 1, "in-JIT DuckDBError comparison did not observe the error"
+    assert left == 0, f"{left} handle words not nulled by the destroy calls"
 
 
 # --- JIT: Prepared Statements ---
@@ -1616,10 +1731,12 @@ def jit_prepare_bind_execute():
     ducklib.duckdb_destroy_prepare(array_data_p(stmt))
     ducklib.duckdb_disconnect(array_data_p(conn))
     ducklib.duckdb_close(array_data_p(db))
+    left = (numpy.count_nonzero(chunk_buf) + numpy.count_nonzero(result) + numpy.count_nonzero(stmt)
+            + numpy.count_nonzero(conn) + numpy.count_nonzero(db))
 
     return (open_rc, connect_rc, prepare_rc, nparams,
             bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
-            chunk_size, col0, col1, col2, col3_valid)
+            chunk_size, col0, col1, col2, col3_valid, left)
 
 
 def test_jit_prepare_bind_execute():
@@ -1634,7 +1751,7 @@ def test_jit_prepare_bind_execute():
     https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_prepare """
     (open_rc, connect_rc, prepare_rc, nparams,
      bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
-     chunk_size, col0, col1, col2, col3_valid) = jit_prepare_bind_execute()
+     chunk_size, col0, col1, col2, col3_valid, left) = jit_prepare_bind_execute()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
     assert prepare_rc == ducklib.DuckDBSuccess, f"prepare failed, rc={prepare_rc}"
@@ -1649,6 +1766,103 @@ def test_jit_prepare_bind_execute():
     assert col1 == 2**40, f"col1: expected 2^40, got {col1}"
     assert abs(col2 - 3.14) < 1e-10, f"col2: expected 3.14, got {col2}"
     assert col3_valid == 0, f"col3: expected NULL, validity={col3_valid}"
+    assert left == 0, f"{left} handle words not nulled by the destroy calls"
+
+
+_POISON_FREE_C = r"""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <malloc.h>
+#include <string.h>
+
+static void (*real_free)(void *) = 0;
+
+void free(void *p) {
+    if (!real_free) real_free = (void (*)(void *))dlsym(RTLD_NEXT, "free");
+    if (p) {
+        size_t n = malloc_usable_size(p);
+        if (n > 0 && n < 4096) memset(p, 0xDE, n);
+    }
+    real_free(p);
+}
+"""
+
+_FREED_BYTES_SCRIPT = r"""
+import ctypes
+import numpy
+from numba import njit
+
+@njit
+def fill_and_drop():
+    a = numpy.empty(8, numpy.int64)
+    for i in range(8):
+        a[i] = 0x1111111111111111
+    return a.ctypes.data
+
+addr = fill_and_drop()
+print("FREED-BYTES", bytes((ctypes.c_ubyte * 16).from_address(addr + 32)).hex())
+"""
+
+_BUFFER_LIFETIME_TESTS = [
+    "test_jit_open_close_database",
+    "test_jit_connect_query_disconnect",
+    "test_jit_query_invalid_sql",
+    "test_jit_prepare_bind_execute",
+    "test_online_scoring_missing_key_raises",
+    "test_online_scoring_null_feature_raises",
+]
+
+
+def _poison_on_free(tmp_path):
+    """The environment under which the allocator overwrites freed memory: macOS
+    has libmalloc scribble 0x55 over every block it frees, and not zero it
+    first as it does by default for a recent build; Linux preloads a free that
+    does the same with 0xDE."""
+    if sys.platform == "darwin":
+        return {"MallocScribble": "1", "MallocZeroOnFree": "0"}
+    src = tmp_path / "poison_free.c"
+    src.write_text(_POISON_FREE_C)
+    lib = tmp_path / "poison_free.so"
+    subprocess.run(
+        ["gcc", "-shared", "-fPIC", "-O2", "-o", str(lib), str(src), "-ldl"],
+        check=True, capture_output=True)
+    return {"LD_PRELOAD": str(lib)}
+
+
+@pytest.mark.skipif(
+    not (sys.platform == "darwin" or (sys.platform == "linux" and shutil.which("gcc"))),
+    reason="needs macOS, or Linux with gcc, for an allocator that poisons freed memory")
+def test_jit_destroy_calls_read_no_freed_buffer(tmp_path):
+    """The JIT lifecycle tests and online_scoring's raise branches destroy
+    handles through out-param buffers. A freed buffer's bytes normally survive
+    until the memory is reused, so a destroy that reads a buffer numba has
+    already freed still passes. Under an allocator that overwrites memory as it
+    is freed, the same code reads garbage and crashes, so these tests are run
+    again under one. First a numba array is filled and dropped under the same
+    environment and its freed bytes are read back, and a run in which they
+    survive, or were zeroed, is skipped rather than passed: macOS ignores the
+    variables for a restricted python, and a destroy that checks the handle
+    for NULL survives a zeroed buffer."""
+    here = os.path.abspath(__file__)
+    repo_root = os.path.dirname(os.path.dirname(here))
+    env = dict(os.environ)
+    env.update(_poison_on_free(tmp_path))
+    check = subprocess.run(
+        [sys.executable, "-c", _FREED_BYTES_SCRIPT],
+        cwd=repo_root, env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert check.returncode == 0, f"stdout={check.stdout!r} stderr={check.stderr[-3000:]!r}"
+    freed = check.stdout.split("FREED-BYTES", 1)[1].split()[0]
+    if "1111" in freed:
+        pytest.skip(f"freed memory keeps its bytes under this allocator: {freed}")
+    if freed.strip("0") == "":
+        pytest.skip(f"this allocator zeroes freed memory, which a destroy checking for NULL survives: {freed}")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+        + [f"{here}::{name}" for name in _BUFFER_LIFETIME_TESTS],
+        cwd=repo_root, env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout[-3000:]!r} stderr={proc.stderr[-3000:]!r}"
 
 
 # --- Value Interface ---
@@ -4542,6 +4756,7 @@ def test_load_duckdb_refuses_version_mismatch(monkeypatch):
 
     monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
     monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_open_private", fake_load_lib_path)
     monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
     monkeypatch.setattr(
         utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
@@ -4549,6 +4764,52 @@ def test_load_duckdb_refuses_version_mismatch(monkeypatch):
 
     with pytest.raises(RuntimeError, match="NUMBDUCK_LIBDUCKDB"):
         utils.load_duckdb()
+
+
+_REFUSED_STANDALONE_SCRIPT = r"""
+import ctypes
+import ctypes.util
+import os
+
+from numbduck import utils
+
+print("BEFORE", hasattr(ctypes.CDLL(None), "duckdb_open"))
+os.environ["NUMBDUCK_LIBDUCKDB"] = utils.find_duckdb_shared_lib()
+utils.find_duckdb_shared_lib = lambda: ctypes.util.find_library("m")
+utils._wheel_library_version = lambda: "0.0.0"
+try:
+    utils.load_duckdb()
+except RuntimeError as exc:
+    print("REFUSED", "0.0.0" in str(exc))
+print("GLOBAL", hasattr(ctypes.CDLL(None), "duckdb_open"))
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the process-wide symbol scope through dlopen(NULL)")
+def test_refused_standalone_libduckdb_stays_out_of_the_global_symbol_scope(tmp_path):
+    """A standalone libduckdb the version check refuses must not have entered the
+    process-wide symbol scope. numbox resolves every JIT call by name through that
+    scope, first definition wins, and a loaded library is never unloaded, so a
+    refused build left there keeps serving the JIT after a later candidate passes.
+
+    Runs in a subprocess: it simulates a wheel without the C API (libm stands in)
+    and offers the wheel's own libduckdb as the standalone, refused because the
+    wheel's version is faked, then asks dlopen(NULL) whether duckdb_open is visible.
+    """
+    env = dict(os.environ)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = os.pathsep.join(
+        [repo_root, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    env["HOME"] = str(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, "-c", _REFUSED_STANDALONE_SCRIPT],
+        env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    lines = proc.stdout.split("\n")
+    assert "BEFORE False" in lines, proc.stdout
+    assert "REFUSED True" in lines, proc.stdout
+    assert "GLOBAL False" in lines, proc.stdout
 
 
 def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
@@ -4566,6 +4827,41 @@ def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
         conn.close()
 
 
+def test_non_ascii_text_reaches_duckdb_as_utf8(tmp_path):
+    """The C API reads every char* as NUL-terminated UTF-8. numbox's
+    get_unicode_data_p hands over CPython's internal storage instead (Latin-1,
+    UCS-2 or UCS-4), which is UTF-8 only for ASCII text. numbox's c_string
+    encodes the text, and is what the examples pass. A path, an identifier and a
+    bound value that are not ASCII all arrive intact through it."""
+    from numbox.utils.cstrings import c_string
+
+    path = str(tmp_path / "data_€.duckdb")
+    db = create_duckdb_database()
+    with c_string(path) as path_p:
+        assert ducklib.duckdb_open(path_p, db.ctypes.data) == ducklib.DuckDBSuccess
+    conn = create_duckdb_connection()
+    assert ducklib.duckdb_connect(db[0], conn.ctypes.data) == ducklib.DuckDBSuccess
+    result = create_duckdb_result()
+    with c_string('CREATE TABLE "café" (city VARCHAR)') as sql_p:
+        assert ducklib.duckdb_query(conn[0], sql_p, result.ctypes.data) == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    stmt = create_duckdb_prepared_statement()
+    with c_string('INSERT INTO "café" VALUES ($1)') as sql_p:
+        assert ducklib.duckdb_prepare(conn[0], sql_p, stmt.ctypes.data) == ducklib.DuckDBSuccess
+    with c_string("Tokyo 東京") as city_p:
+        assert ducklib.duckdb_bind_varchar(stmt[0], 1, city_p) == ducklib.DuckDBSuccess
+    result = create_duckdb_result()
+    assert ducklib.duckdb_execute_prepared(stmt[0], result.ctypes.data) == ducklib.DuckDBSuccess
+    ducklib.duckdb_destroy_result(result.ctypes.data)
+    ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
+    ducklib.duckdb_disconnect(conn.ctypes.data)
+    ducklib.duckdb_close(db.ctypes.data)
+
+    assert "data_€.duckdb" in os.listdir(tmp_path)
+    with duckdb.connect(path) as check:
+        assert check.execute('SELECT city FROM "café"').fetchall() == [("Tokyo 東京",)]
+
+
 def test_pybridge_closed_connection_raises_runtime_error():
     """A closed connection resets its unique_ptr<Connection> to null, so the
     documented offset yields a null pointer. extract_connection_ptr must raise a
@@ -4578,6 +4874,41 @@ def test_pybridge_closed_connection_raises_runtime_error():
     conn.close()
     with pytest.raises(RuntimeError, match="null"):
         extract_connection_ptr(conn)
+
+
+def test_extract_connection_ptr_leaves_pending_result_intact():
+    """Extracting the pointer runs nothing on the connection. A query issued
+    through it would close the result the connection is still streaming, and
+    every later fetch of that result would come back short without an error.
+    """
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    try:
+        pending = conn.execute("SELECT * FROM range(5000)")
+        extract_connection_ptr(conn)
+        assert len(pending.fetchall()) == 5000
+    finally:
+        conn.close()
+
+
+def test_extract_connection_ptr_inside_an_aborted_transaction():
+    """A connection whose transaction has failed still holds a valid Connection*,
+    so extraction succeeds there, and the transaction's own error stays the
+    caller's to see.
+    """
+    from numbduck.pybridge import extract_connection_ptr
+
+    conn = duckdb.connect()
+    try:
+        conn.execute("BEGIN")
+        with pytest.raises(duckdb.Error):
+            conn.execute("SELECT error('boom')")
+        assert extract_connection_ptr(conn) != 0
+        with pytest.raises(duckdb.Error, match="aborted"):
+            conn.execute("SELECT 42")
+    finally:
+        conn.close()
 
 
 def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
@@ -4595,6 +4926,7 @@ def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
 
     monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
     monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_open_private", fake_load_lib_path)
     monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
     monkeypatch.setattr(
         utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")
@@ -4622,6 +4954,7 @@ def test_load_duckdb_refuses_dev_suffix_same_base(monkeypatch):
 
     monkeypatch.setattr(utils, "find_duckdb_shared_lib", lambda: "/fake/wheel.so")
     monkeypatch.setattr(utils, "load_lib_path", fake_load_lib_path)
+    monkeypatch.setattr(utils, "_open_private", fake_load_lib_path)
     monkeypatch.setattr(utils, "_has_capi_symbols", lambda lib: lib is standalone_lib)
     monkeypatch.setattr(
         utils, "_find_standalone_libduckdb", lambda: "/fake/libduckdb.dylib")

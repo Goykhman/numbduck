@@ -37,7 +37,8 @@ import duckdb
 import numpy
 from numba import cfunc, njit, carray
 from numba import types as nb_types
-from numbox.utils.lowlevel import _cast_int_to_void_p, get_unicode_data_p
+from numbox.utils.cstrings import c_string
+from numbox.utils.lowlevel import _cast_int_to_void_p
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import assert_results_match, format_table, print_env, time_median  # noqa: E402
@@ -185,7 +186,8 @@ def register_jit_udf(conn):
     in test/test_ducklib.py for the canonical pattern."""
     conn_ptr = extract_connection_ptr(conn)
     func_p = ducklib.duckdb_create_scalar_function()
-    ducklib.duckdb_scalar_function_set_name(func_p, get_unicode_data_p("hv_jit"))
+    with c_string("hv_jit") as name_p:
+        ducklib.duckdb_scalar_function_set_name(func_p, name_p)
     dbl_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_DOUBLE)
     for _ in range(4):
         ducklib.duckdb_scalar_function_add_parameter(func_p, dbl_p)

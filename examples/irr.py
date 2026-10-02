@@ -54,7 +54,8 @@ from numba import types as nb_types
 from numba.experimental import structref
 from numbox.core.vector.vector import make_vector, vector_push, vector_extend
 from numbox.utils.highlevel import make_structref
-from numbox.utils.lowlevel import _cast_int_to_void_p, get_unicode_data_p
+from numbox.utils.cstrings import c_string
+from numbox.utils.lowlevel import _cast_int_to_void_p
 from numbox.utils.meminfo import borrow_structref, export_meminfo, release_meminfo
 
 from numbduck import ducklib
@@ -403,8 +404,8 @@ def register_irr(conn):
     conn_p = extract_connection_ptr(conn)
 
     func_p = ducklib.duckdb_create_aggregate_function()
-    name_p = get_unicode_data_p("irr")
-    ducklib.duckdb_aggregate_function_set_name(func_p, name_p)
+    with c_string("irr") as name_p:
+        ducklib.duckdb_aggregate_function_set_name(func_p, name_p)
 
     dbl_type_p = ducklib.duckdb_create_logical_type(ducklib.DUCKDB_TYPE_DOUBLE)
     for _ in range(4):

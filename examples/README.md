@@ -45,6 +45,31 @@ treat the numbers as orders of magnitude, not fixed constants.
   example of the UDAF pattern. `irr.py` defines the UDAF and is meant to be
   imported, not run directly, so `run_irr.py` is the launcher that runs it.
 
+## Out-parameter buffers inside `@njit`
+
+The C API hands back handles through out-parameters, so a handle lives in a
+small numpy buffer and a binding gets the buffer's address. Inside `@njit`,
+numba frees an array right after its last use, and an address keeps nothing
+alive. A destroy call whose buffer is last used to take that address, as in
+`ducklib.duckdb_close(array_data_p(db))` on its own, reads a buffer that has
+already been freed. Use the buffer again after the call (reading the slot back
+also shows that the destroy set it to NULL), or pass the buffer itself to a
+function that takes the address, as `_release` does in
+[online_scoring.py](online_scoring.py).
+
+## Text passed to the C API
+
+The C API reads every `char *` as NUL-terminated UTF-8. numbox's
+`get_unicode_data_p(s)` hands over CPython's internal storage of `s`, which is
+Latin-1, UCS-2 or UCS-4 depending on its widest character, so it is UTF-8 only
+when `s` is ASCII: a file, table or function name, SQL text or a bound value
+with any other character reaches DuckDB cut short or as invalid UTF-8. The
+examples pass text through numbox's
+[`c_string`](https://github.com/Goykhman/numbox/blob/0.6.2/numbox/utils/cstrings.py),
+which encodes it and keeps the buffer alive for its `with` block. Inside
+`@njit`, which has no context managers, encode the text beforehand into a
+`numpy.uint8` buffer ending in a NUL byte and pass `array_data_p(buf)`.
+
 ## Requirements
 
 These scripts require [`pyarrow`](https://arrow.apache.org/docs/python/install.html) in addition to numbduck's normal dependencies

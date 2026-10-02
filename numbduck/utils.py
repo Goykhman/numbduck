@@ -148,6 +148,35 @@ def _require_coordinated_standalone(lib, source):
         )
 
 
+def _open_private(path):
+    """Open *path* without adding its symbols to the process-wide scope.
+
+    ``RTLD_LOCAL`` where the platform has it (Linux, macOS); a plain ``CDLL``
+    elsewhere.
+    """
+    mode = getattr(os, "RTLD_LOCAL", None)
+    return ctypes.CDLL(path) if mode is None else ctypes.CDLL(path, mode=mode)
+
+
+def _load_coordinated_standalone(path):
+    """Load a standalone libduckdb for the JIT only once it has passed its checks.
+
+    numbox resolves every JIT call by name through the process-wide symbol
+    scope, where the first definition wins, and a loaded library is never
+    unloaded. So the candidate is first opened privately to check that it
+    exports the C API and that its version matches the wheel's. A refused
+    candidate never enters that scope, where it would keep serving every JIT
+    call even after a later candidate passed. Returns the handle loaded for the
+    JIT, or ``None`` when *path* does not export the C API; raises
+    ``RuntimeError`` on a version mismatch.
+    """
+    probe = _open_private(path)
+    if not _has_capi_symbols(probe):
+        return None
+    _require_coordinated_standalone(probe, path)
+    return load_lib_path(path)
+
+
 def _migrate_legacy_cache():
     """Best-effort removal of the pre-versioned unversioned cache file.
 
@@ -376,16 +405,15 @@ def load_duckdb():
     _migrate_legacy_cache()
     standalone = _find_standalone_libduckdb()
     if standalone:
-        lib = load_lib_path(standalone)
-        if _has_capi_symbols(lib):
-            _require_coordinated_standalone(lib, standalone)
+        lib = _load_coordinated_standalone(standalone)
+        if lib is not None:
             _loaded_libduckdb = lib
             return lib
     if platform.system() != "Darwin":
         raise RuntimeError(_non_darwin_capi_error())
     downloaded = _download_libduckdb()
-    lib = load_lib_path(downloaded)
-    if not _has_capi_symbols(lib):
+    lib = _load_coordinated_standalone(downloaded)
+    if lib is None:
         # Mirror the standalone branch's check so a corrupt or wrong-arch
         # download fails here with a pointer back to the cache, not later as an
         # opaque JIT link error at the first @njit call.
@@ -395,7 +423,6 @@ def load_duckdb():
             f"{_LIBDUCKDB_CACHE_DIR!r} and retry, or set NUMBDUCK_LIBDUCKDB to a "
             f"libduckdb that provides the C API."
         )
-    _require_coordinated_standalone(lib, downloaded)
     _loaded_libduckdb = lib
     return lib
 
