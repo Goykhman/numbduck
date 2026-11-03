@@ -1,8 +1,10 @@
+import inspect
 import json
 import os
 import warnings
 
 from numba.core.options import DefaultOptions
+from numbox.core.configurations import cache_remedy, check_cache_location, is_a_cache_error
 
 
 # njit's accepted compilation options. Take the target-level options straight
@@ -71,4 +73,51 @@ def get_jit_options():
     return options
 
 
-jit_options = get_jit_options()
+def _cache_probe():
+    """Give the check this module's file; numba looks the package up by the file that holds this function's code."""
+
+
+# numbox's bound on the length of a name numba writes for a function's cache file. numbduck's longest name is 96
+# bytes, and a test holds every function's name under the bound. A cache directory within 32 bytes of the path
+# limit therefore turns caching off though its names would fit; the margin keeps a longer binding name from
+# overflowing a directory that passed the check.
+LONGEST_CACHE_FILE_NAME = 128
+
+
+def uncached_where_no_cache_can_be_written(options):
+    """Return ``options``, with ``cache`` turned off after one warning if numba cannot write a cache for numbduck.
+
+    numba has no cache location in three placements: a read-only install whose user cache directory is read-only
+    too, an import from an ``.egg``, ``.whl`` or ``.pyz`` archive, and an import from a ``.zip`` whose user cache
+    directory is read-only. From numba 0.68 on, an import from a ``.zip`` that holds numbduck as ``.pyc`` files
+    alone is a fourth placement. The warning names numbox's remedy for the placement. A source install needs
+    ``NUMBA_CACHE_DIR`` set. A ``.zip`` whose user cache directory is read-only needs that directory made writable.
+    A ``.zip`` of ``.pyc`` files alone, or any other archive, needs the source files on disk.
+    ``NUMBDUCK_JIT_OPTIONS='{"cache": false}'`` turns caching off without the warning. An error that numbox's
+    ``is_a_cache_error`` does not classify as a cache error is raised unchanged.
+    """
+    if not options.get("cache"):
+        return options
+    # numba sets a cached function up at decoration, so the check runs before the first binding is decorated. Every
+    # binding and buffer allocator is in this module's directory, so one check of this module's file covers all of
+    # them. check_cache_location runs numba's cache set-up and the writability check of its first save without
+    # compiling anything.
+    py_file = inspect.getfile(_cache_probe)
+    try:
+        check_cache_location(py_file, LONGEST_CACHE_FILE_NAME)
+    except (RuntimeError, OSError, KeyError, ValueError) as error:
+        if not is_a_cache_error(error):
+            raise
+        failure = error
+    else:
+        return options
+    silence = "NUMBDUCK_JIT_OPTIONS='{\"cache\": false}' to turn caching off and silence this warning"
+    remedy = cache_remedy(py_file, failure, silence, package="numbduck")
+    warnings.warn(
+        f"numba cannot cache numbduck here ({failure}); it compiles without a cache. {remedy}",
+        RuntimeWarning, stacklevel=2,
+    )
+    return {**options, "cache": False}
+
+
+jit_options = uncached_where_no_cache_can_be_written(get_jit_options())
