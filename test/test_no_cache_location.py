@@ -93,22 +93,20 @@ def test_an_import_from_an_archive_compiles_uncached_with_one_warning_naming_the
     assert quiet.returncode == 0, quiet.stderr
 
 
-def test_a_zip_import_is_cached_by_numba_from_0_61(tmp_path):
-    # numba caches a .zip member from 0.61 on, in the user's cache directory regardless of NUMBA_CACHE_DIR, so the
-    # warning directs an archive's user to a .zip. Before numba 0.61, numba treats a .zip as any other archive.
-    import numba
+def test_a_zip_import_is_cached_by_numba(tmp_path):
+    # numba caches a .zip member in the user's cache directory regardless of NUMBA_CACHE_DIR, so the warning directs
+    # an archive's user to a .zip.
     archive = _archive(tmp_path / "numbduck.zip")
     home = tmp_path / "home"
     env = _env(PYTHONPATH=str(archive), HOME=str(home), XDG_CACHE_HOME=str(home / "cache"),
                NUMBA_CACHE_DIR=str(tmp_path / "cache"))
     run = _run(env, tmp_path)
     assert run.returncode == 0 and str(archive) in run.stdout, run.stderr
-    cached = tuple(int(part) for part in numba.__version__.split(".")[:2]) >= (0, 61)
-    assert (WARNING not in run.stderr) == cached, run.stderr
+    assert WARNING not in run.stderr, run.stderr
     assert _index_files(tmp_path / "cache") == []
     if os.name != "nt":
         # On Windows, numba obtains the user's cache directory from the system, and no variable set here changes it.
-        assert bool(_index_files(home)) == cached
+        assert _index_files(home)
 
 
 def test_a_zip_of_pyc_files_alone_compiles_uncached_from_numba_0_68_and_is_cached_before(tmp_path):
