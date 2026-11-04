@@ -103,10 +103,10 @@ def test_a_zip_import_is_cached_by_numba(tmp_path):
                NUMBA_CACHE_DIR=str(tmp_path / "cache"))
     run = _run(env, tmp_path)
     assert run.returncode == 0 and str(archive) in run.stdout, run.stderr
-    if os.name == "nt" and numba.__version__ == "0.68.0":
-        # numba 0.68.0 on Windows reads a .zip member's source by a name with Windows's separator, and no archive
-        # holds that name (numba issue 10889, fixed in 0.68.1). So numbduck compiles uncached there, and the warning
-        # names the issue.
+    if os.name == "nt" and numba.__version__.startswith("0.68.0"):
+        # numba 0.68.0 and its release candidate on Windows read a .zip member's source by a name with Windows's
+        # separator, and no archive holds that name (numba issue 10889, fixed in 0.68.1). So numbduck compiles
+        # uncached there, and the warning names the issue.
         assert run.stderr.count(WARNING) == 1 and "numba/issues/10889" in run.stderr, run.stderr
     else:
         assert WARNING not in run.stderr, run.stderr
@@ -206,10 +206,12 @@ def test_a_location_too_close_to_the_path_limit_for_numbas_files_compiles_uncach
     # limit for numbduck's location can still leave no room for numba's file names, which run to seventy bytes and
     # more for a binding. The check reserves LONGEST_CACHE_FILE_NAME bytes for them. numba's location for numbduck
     # is the directory's name and a hash of its path under NUMBA_CACHE_DIR, and the test places the end of that
-    # location 20 bytes short of the limit, regardless of the checkout's own path.
+    # location 20 bytes short of the limit, regardless of the checkout's own path. The directory begins with a
+    # non-ASCII component, which has more bytes than characters, so the lengths are counted in bytes.
     from numba.core.caching import _CacheLocator
     location = _CacheLocator.get_suitable_cache_subpath(str(REPO / "numbduck" / "configurations.py"))
-    cache_dir = _directory_of_length(tmp_path, 4096 - 20 - 1 - len(os.fsencode(location)))
+    cache_dir = _directory_of_length(tmp_path / "ü", 4096 - 20 - 1 - len(os.fsencode(location)))
+    assert len(os.fsencode(os.path.join(cache_dir, location))) == 4096 - 20
     env = _env(PYTHONPATH=str(REPO), NUMBA_CACHE_DIR=str(cache_dir))
     run = _run(env, tmp_path)
     assert run.returncode == 0 and str(REPO / "numbduck") in run.stdout, run.stderr

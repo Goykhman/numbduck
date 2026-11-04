@@ -17,7 +17,9 @@ not in any cache key.
 numbduck checks once at import whether numba can write a cache for it. If numba cannot, numbduck compiles
 without a cache and warns once, naming the remedy. That happens on a read-only install, and under an import from
 a `.zip`, when the user cache directory is read-only too. It also happens under an import from an `.egg`, `.whl`
-or `.pyz` archive, and on numba 0.68 and later under an import from a `.zip` that holds only `.pyc` files. numbox's
+or `.pyz` archive, and on numba 0.68 and later under an import from a `.zip` that holds only `.pyc` files. On
+Windows under numba 0.68.0, it happens under any import from a `.zip`
+([numba issue 10889](https://github.com/numba/numba/issues/10889), fixed in 0.68.1). numbox's
 [Where the cache lands](https://goykhman.github.io/numbox/numbox.core.configurations.html#where-the-cache-lands)
 describes each placement and its remedy.
 
