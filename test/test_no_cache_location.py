@@ -96,13 +96,20 @@ def test_an_import_from_an_archive_compiles_uncached_with_one_warning_naming_the
 def test_a_zip_import_is_cached_by_numba(tmp_path):
     # numba caches a .zip member in the user's cache directory regardless of NUMBA_CACHE_DIR, so the warning directs
     # an archive's user to a .zip.
+    import numba
     archive = _archive(tmp_path / "numbduck.zip")
     home = tmp_path / "home"
     env = _env(PYTHONPATH=str(archive), HOME=str(home), XDG_CACHE_HOME=str(home / "cache"),
                NUMBA_CACHE_DIR=str(tmp_path / "cache"))
     run = _run(env, tmp_path)
     assert run.returncode == 0 and str(archive) in run.stdout, run.stderr
-    assert WARNING not in run.stderr, run.stderr
+    if os.name == "nt" and numba.__version__ == "0.68.0":
+        # numba 0.68.0 on Windows reads a .zip member's source by a name with Windows's separator, and no archive
+        # holds that name (numba issue 10889, fixed in 0.68.1). So numbduck compiles uncached there, and the warning
+        # names the issue.
+        assert run.stderr.count(WARNING) == 1 and "numba/issues/10889" in run.stderr, run.stderr
+    else:
+        assert WARNING not in run.stderr, run.stderr
     assert _index_files(tmp_path / "cache") == []
     if os.name != "nt":
         # On Windows, numba obtains the user's cache directory from the system, and no variable set here changes it.
@@ -180,13 +187,15 @@ def _directory_of_length(root, length):
     """Make a directory under ``root`` whose path is ``length`` bytes, whatever the length of ``root``.
 
     The path takes components of 200 bytes while one more of them leaves room for a last component, and then a last
-    component of the remaining length, so the directory itself can always be made.
+    component of the remaining length, so the directory itself can always be made. Lengths are counted in the file
+    system's encoding, because Linux limits a path's bytes, and a root with non-ASCII characters has more bytes than
+    characters.
     """
     deep = root
-    while len(str(deep)) + 201 < length - 1:
+    while len(os.fsencode(deep)) + 201 < length - 1:
         deep = deep / ("d" * 200)
-    deep = deep / ("d" * (length - 1 - len(str(deep))))
-    assert len(str(deep)) == length
+    deep = deep / ("d" * (length - 1 - len(os.fsencode(deep))))
+    assert len(os.fsencode(deep)) == length
     deep.mkdir(parents=True)
     return deep
 
@@ -200,7 +209,7 @@ def test_a_location_too_close_to_the_path_limit_for_numbas_files_compiles_uncach
     # location 20 bytes short of the limit, regardless of the checkout's own path.
     from numba.core.caching import _CacheLocator
     location = _CacheLocator.get_suitable_cache_subpath(str(REPO / "numbduck" / "configurations.py"))
-    cache_dir = _directory_of_length(tmp_path, 4096 - 20 - 1 - len(location))
+    cache_dir = _directory_of_length(tmp_path, 4096 - 20 - 1 - len(os.fsencode(location)))
     env = _env(PYTHONPATH=str(REPO), NUMBA_CACHE_DIR=str(cache_dir))
     run = _run(env, tmp_path)
     assert run.returncode == 0 and str(REPO / "numbduck") in run.stdout, run.stderr
@@ -257,6 +266,6 @@ def test_numbas_longest_file_name_for_the_package_is_within_the_probes_bound():
     names = [f"{path.stem}.__{qualname}-{lineno}{tag}"
              for path in sorted((REPO / "numbduck").rglob("*.py"))
              for qualname, lineno in _function_names(ast.parse(path.read_text(encoding="utf-8")))]
-    longest = max(names, key=len)
+    longest = max(names, key=lambda name: len(os.fsencode(name)))
     assert len(names) > 200
-    assert len(longest) <= LONGEST_CACHE_FILE_NAME, longest
+    assert len(os.fsencode(longest)) <= LONGEST_CACHE_FILE_NAME, longest
