@@ -57,6 +57,7 @@ from _common import assert_results_match, format_table, print_env  # noqa: E402
 from numbduck import ducklib  # noqa: E402
 from numbduck.duckdb_utils import create_duckdb_prepared_statement  # noqa: E402
 from numbduck.pybridge import extract_connection_ptr  # noqa: E402
+from numbduck.utils import complete_open_result  # noqa: E402
 
 
 N_EVENTS = 50_000
@@ -210,6 +211,7 @@ def score_jit(conn, ids, x):
     # duckdb_prepare allocates a statement object even when the prepare fails
     # (it owns the error message), so it must always be destroyed. Hence the
     # try/finally, which also covers any exception raised inside the loop.
+    complete_open_result(conn)
     try:
         with c_string(sql) as sql_p:
             rc = ducklib.duckdb_prepare(conn_ptr, sql_p, stmt.ctypes.data)

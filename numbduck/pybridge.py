@@ -14,6 +14,41 @@ from numbduck.utils import libraries_coordinated, loaded_library_version
 # ``DuckDBPyConnection*`` sits immediately after it at +16.
 PYBIND11_HELD_OBJECT_OFFSET = 16
 
+
+def extract_duckdb_conn_ptr(x: duckdb.DuckDBPyConnection):
+    if type(x) is not duckdb.DuckDBPyConnection:
+        raise TypeError("Expected duckdb.DuckDBPyConnection")
+
+    obj_addr = id(x)
+    if int(duckdb.__version__.split(".")[0]) < 2:
+        return ctypes.c_void_p.from_address(obj_addr + PYBIND11_HELD_OBJECT_OFFSET).value
+    # for duckdb>=2.0.0, nanobind superseded pybind11
+    # nb_inst::offset, at byte 16
+    offset = ctypes.c_int32.from_address(obj_addr + 16).value
+
+    # nb_inst::state, at byte 20
+    state_byte = ctypes.c_uint8.from_address(obj_addr + 20).value
+
+    # https://github.com/wjakob/nanobind/blob/v3.1.0/src/nb_internals.h#L365
+    state = state_byte & 0b11
+    # https://github.com/wjakob/nanobind/blob/v3.1.0/src/nb_internals.h#L373
+    is_direct = bool(state_byte & 0b100)
+
+    # https://github.com/wjakob/nanobind/blob/v3.1.0/src/nb_internals.h#L361
+    if state != 2:
+        raise RuntimeError(f"Nanobind instance is not ready: state={state}")
+
+    # C++ object address
+    instance_addr = obj_addr + offset
+
+    # https://github.com/wjakob/nanobind/blob/v3.1.0/src/nb_internals.h#L1062
+    if is_direct:
+        cpp_address = instance_addr
+    else:
+        cpp_address = ctypes.c_void_p.from_address(instance_addr).value or 0
+    return cpp_address
+
+
 # Byte offset from a ``DuckDBPyConnection*`` to its ``unique_ptr<Connection>``.
 # The C++ object begins with an ``enable_shared_from_this`` weak_ptr (16 bytes)
 # and a ``shared_ptr<DuckDB> database`` (16 bytes); the ``unique_ptr<Connection>``
@@ -89,9 +124,7 @@ def extract_connection_ptr(conn):
         )
 
     # Step 1: read the C++ object pointer from the pybind11 instance header.
-    py_obj_addr = id(conn)
-    cpp_obj_p = ctypes.c_void_p.from_address(
-        py_obj_addr + PYBIND11_HELD_OBJECT_OFFSET).value
+    cpp_obj_p = extract_duckdb_conn_ptr(conn)
     if not cpp_obj_p:
         raise RuntimeError(
             "extracted null DuckDBPyConnection* from duckdb.DuckDBPyConnection"
