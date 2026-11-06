@@ -2,7 +2,6 @@ name: numbduck_ci
 
 on:
   push:
-    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
 
