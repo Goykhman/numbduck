@@ -5399,9 +5399,8 @@ def _run_raising_udaf_nrt_delta(update_cb):
     conn.execute("CREATE TABLE t_raise AS SELECT 1.0 AS v FROM range(8)")
     before = rtsys.get_allocation_stats()
     row = conn.execute("SELECT wraise(v) FROM t_raise").fetchone()
-    complete_open_result(conn)
-    after = rtsys.get_allocation_stats()
     conn.close()
+    after = rtsys.get_allocation_stats()
     delta = (after.alloc - before.alloc) - (after.free - before.free)
     return delta, row[0]
 
@@ -5633,9 +5632,8 @@ def test_irr_example_combine_path_nrt_balanced():
     irr_val = conn.execute(
         "SELECT irr(cashflow, period, investment, target_npv) "
         "FROM t_irr").fetchone()[0]
-    complete_open_result(conn)
-    after = rtsys.get_allocation_stats()
     conn.close()
+    after = rtsys.get_allocation_stats()
 
     npv = -10000.0
     for t in range(1, 13):
@@ -6072,9 +6070,8 @@ def test_irr_update_rollback_drops_poison_row_cleanly():
     rate = conn.execute(
         "SELECT irr_probe(cashflow, period, investment, target_npv) "
         "FROM cfp").fetchone()[0]
-    complete_open_result(conn)
-    after = rtsys.get_allocation_stats()
     conn.close()
+    after = rtsys.get_allocation_stats()
     leak = (after.alloc - before.alloc) - (after.free - before.free)
     expected = (13000.0 / 10000.0) ** (1.0 / 12.0) - 1.0
     assert leak == 0, f"rollback path leaked NRT delta {leak}"
@@ -6225,7 +6222,7 @@ def test_open_result_error():
     error_ptr = ducklib.duckdb_prepare_error(stmt[0])
     error = get_str_from_p_as_int(error_ptr)
     assert error == "Resource In Use Error: connection has an open result; drain or destroy it before starting a new query"  # noqa: E501
-    conn.complete()
+    complete_open_result(conn)
     with c_string(sql) as sql_p:
         rc = ducklib.duckdb_prepare(conn_ptr, sql_p, stmt.ctypes.data)
     assert rc == 0, rc
@@ -6239,4 +6236,4 @@ def test_python_open_result():
     with pytest.raises(duckdb.ResourceInUseException):
         conn.sql("SELECT 2").fetchall()
     complete_open_result(conn)
-    assert conn.sql("SELECT 2").fetchall() == [(1,)]
+    assert conn.sql("SELECT 2").fetchall() == [(2,)]
