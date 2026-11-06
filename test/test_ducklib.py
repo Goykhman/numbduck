@@ -6216,16 +6216,39 @@ def test_open_result_error():
     _ = conn.execute("SELECT 137;")
     stmt = create_duckdb_prepared_statement()
     sql = "SELECT 101;"
-    with c_string(sql) as sql_p:
-        rc = ducklib.duckdb_prepare(conn_ptr, sql_p, stmt.ctypes.data)
-    assert rc == 1, rc
-    error_ptr = ducklib.duckdb_prepare_error(stmt[0])
-    error = get_str_from_p_as_int(error_ptr)
-    assert error == "Resource In Use Error: connection has an open result; drain or destroy it before starting a new query"  # noqa: E501
-    complete_open_result(conn)
+    try:
+        with c_string(sql) as sql_p:
+            rc = ducklib.duckdb_prepare(conn_ptr, sql_p, stmt.ctypes.data)
+        assert rc == 1, rc
+        error_ptr = ducklib.duckdb_prepare_error(stmt[0])
+        error = get_str_from_p_as_int(error_ptr)
+        assert error == "Resource In Use Error: connection has an open result; drain or destroy it before starting a new query"  # noqa: E501
+        complete_open_result(conn)
+        with c_string(sql) as sql_p:
+            rc = ducklib.duckdb_prepare(conn_ptr, sql_p, stmt.ctypes.data)
+        assert rc == 0, rc
+    finally:
+        ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
+
+
+@pytest.mark.skipif(duckdb_major_version >= 2, reason="Testing duckdb<2.0.0 behavior.")
+def test_api_call_completes_open_query():
+    """
+    Counterpart of test_open_result_error, for duckdb<2.
+    """
+    from numbox.utils.cstrings import c_string
+    from numbduck.pybridge import extract_connection_ptr
+    conn = duckdb.connect()
+    conn_ptr = extract_connection_ptr(conn)
+    cur = conn.execute("SELECT * FROM range(15, 19);")
+    assert cur.fetchone() == (15,)
+    assert cur.fetchone() == (16,)
+    stmt = create_duckdb_prepared_statement()
+    sql = "SELECT 101;"
     with c_string(sql) as sql_p:
         rc = ducklib.duckdb_prepare(conn_ptr, sql_p, stmt.ctypes.data)
     assert rc == 0, rc
+    assert cur.fetchall() == [(17,), (18,)]
 
 
 @pytest.mark.skipif(duckdb_major_version < 2, reason="Testing duckdb>=2.0.0 behavior.")

@@ -36,7 +36,8 @@ each chunk crosses the Python boundary and allocates intermediate arrays for
 every pc.if_else step.
 
 DuckDb==2.0.0 on MacBook Pro M1
-(notice that with 2.0.0, Python was in fact run for 100,000 and 1,000,000 rows as well):
+(notice that with 2.0.0, Python was in fact run for 100,000 and 1,000,000 rows as well,
+adjust `PY_MAX_N = 10_000` below to reproduce):
 
 env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
 Fraud score UDF benchmark: [10000, 100000, 1000000] rows
