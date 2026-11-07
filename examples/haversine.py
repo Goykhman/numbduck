@@ -28,6 +28,18 @@ take ~10s and at 1M it would take minutes, which violates the example's
 "finishes in under 30s" budget. Arrow and JIT scale to all three tiers.
 Numbers vary by ±30% across runs due to small absolute timings; the
 order-of-magnitude story (Python << Arrow << JIT) is stable.
+
+Duckdb==2.0.0 on MacBook Pro M1:
+(notice that with 2.0.0, Python was in fact run for 100,000 and 1,000,000 rows as well,
+adjust `PY_MAX_N = 10_000` below to reproduce):
+
+env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
+Haversine UDF benchmark: [10000, 100000, 1000000] rows, radius 50.0 km
+
+       Rows  Python   Arrow     JIT  Py/JIT  Arr/JIT
+     10,000  0.005s  0.004s  0.001s      7x       4x
+    100,000  0.048s  0.028s  0.004s     13x       7x
+  1,000,000  0.467s  0.478s  0.008s     56x      57x
 """
 import math
 import os

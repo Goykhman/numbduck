@@ -9,7 +9,7 @@ include = ["numbduck*"]
 [project]
 name = "numbduck"
 dependencies = [
-    "duckdb>=1.2.2,<1.6",
+    "duckdb>=1.2.2,<2.1.0",
     "numbox>=0.7.8"
 ]
 dynamic = ["version"]

@@ -34,6 +34,18 @@ round-trip is too expensive at >10K). The Arrow/JIT gap of ~1750x at 1M rows
 is real (cross-check passes) but is partly an Arrow PyArrow-UDF artifact:
 each chunk crosses the Python boundary and allocates intermediate arrays for
 every pc.if_else step.
+
+DuckDb==2.0.0 on MacBook Pro M1
+(notice that with 2.0.0, Python was in fact run for 100,000 and 1,000,000 rows as well,
+adjust `PY_MAX_N = 10_000` below to reproduce):
+
+env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
+Fraud score UDF benchmark: [10000, 100000, 1000000] rows
+
+       Rows    Python     Arrow     JIT  Py/JIT  Arr/JIT
+     10,000    3.64ms    8.60ms  0.37ms     10x    23.2x
+    100,000   30.63ms   47.82ms  0.69ms     44x    69.2x
+  1,000,000  309.46ms  797.50ms  1.35ms    229x   589.6x
 """
 import os
 import sys

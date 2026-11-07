@@ -303,14 +303,17 @@ def _fetch_and_cache(url, dest):
     return dest
 
 
+duckdb_version = duckdb.__version__
+duckdb_major_version = int(duckdb_version.split(".")[0])
+
+
 def _download_libduckdb():
-    version = duckdb.__version__
     url = (
         "https://github.com/duckdb/duckdb/releases"
-        f"/download/v{version}"
+        f"/download/v{duckdb_version}"
         "/libduckdb-osx-universal.zip"
     )
-    if not _consent_to_download(version):
+    if not _consent_to_download(duckdb_version):
         raise RuntimeError(
             "numbduck requires the DuckDB C API but consent to download the "
             "standalone libduckdb was not given. Re-run in a terminal and "
@@ -319,7 +322,7 @@ def _download_libduckdb():
             "duckdb' and set NUMBDUCK_LIBDUCKDB=/path/to/libduckdb.dylib."
         )
     print(f"numbduck: Downloading libduckdb "
-          f"v{version}...")
+          f"v{duckdb_version}...")
     dest = _fetch_and_cache(url, _LIBDUCKDB_CACHED_DYLIB)
     print(f"numbduck: Saved to {dest}")
     return dest
@@ -457,3 +460,13 @@ def libraries_coordinated():
     if wheel_version is None:
         return False
     return jit_version == wheel_version
+
+
+def complete_open_result(conn):
+    """
+    Added in duckdb==2.0.0
+    https://github.com/duckdb/duckdb-python/releases
+    """
+    if duckdb_major_version >= 2:
+        assert hasattr(conn, "complete")
+        conn.complete()
