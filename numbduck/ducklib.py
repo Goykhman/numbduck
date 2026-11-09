@@ -1,3 +1,39 @@
+"""Bindings of DuckDB's C API that Python code and numba-compiled code can call.
+
+Each binding has the name of a function of DuckDB's C API, such as ``duckdb_open`` or ``duckdb_query``, and its
+docstring links to DuckDB's C API page. numbox's ``proxy`` compiles each binding when this
+module is imported, under :data:`numbduck.configurations.jit_options`, and a jitted caller calls that compiled binding.
+With the default options, a binding called from Python releases the GIL while its C function runs. The import loads
+libduckdb through :func:`numbduck.utils.load_duckdb`. The module also defines the ``DUCKDB_TYPE_*`` codes of DuckDB's
+``duckdb_type`` enum, the state codes ``DuckDBSuccess`` and ``DuckDBError``, and the numba types of the structs that
+the C API passes by value.
+
+A binding takes and returns what its C function does, with every pointer as an ``intp``. A handle, such as a
+``duckdb_connection``, is a pointer in C, so it is an ``intp`` too. A parameter whose name ends in ``_p`` holds a
+pointer: a handle, a ``char *`` to UTF-8 text, a function pointer or the address of a struct. The text ends with a
+NUL byte, unless the function also takes its length, as ``duckdb_create_varchar_length`` does. A name that ends in
+``_pp`` holds the address of a handle, such as the out-parameter of ``duckdb_open`` or the argument of a destroy
+function, and :mod:`numbduck.duckdb_utils` allocates buffers for such handles. A C ``bool`` is an ``int8``, and the
+caller passes 0 or 1.
+
+A binding never raises for an error that DuckDB reports. It returns what the C function returns, such as
+``DuckDBError`` or a null pointer, and the caller checks it, as a C caller does. An exception raised inside a binding
+does not reach the caller: a call enters the compiled binding through its C entry point, which prints the exception
+and returns zero (https://github.com/Goykhman/numbox/issues/5). numbduck checks no argument either. A handle must be
+live, and a pointer must point at memory that the C function may read or write.
+
+A struct that a C function takes or returns by value is a numba tuple of the struct's fields in C order, such as
+``duckdb_hugeint_ty``. ``duckdb_decimal_ty`` flattens the ``duckdb_hugeint`` inside a ``duckdb_decimal`` into its two
+fields, which keeps the C layout. A struct of one field, such as ``duckdb_date``, is passed and returned as that field:
+``duckdb_bind_date`` takes the days as an ``int32``. numbox's ``_call_lib_func`` passes each tuple as the platform's C
+calling convention requires. The compiler front end, not LLVM, must implement that convention
+(https://github.com/numba/llvmlite/issues/300#issuecomment-327235846).
+
+Some C functions are missing from older duckdb releases. numbox's ``proxy_if_available`` makes the binding of such a
+function a stub if the loaded libduckdb lacks it. duckdb 1.4.0 renamed ``duckdb_create_varint`` and
+``duckdb_get_varint`` to ``duckdb_create_bignum`` and ``duckdb_get_bignum``. The two bignum bindings call whichever name
+the loaded libduckdb exports, and numba does not cache them.
+"""
 import sys
 
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
@@ -14,12 +50,15 @@ duckdb_lib = load_duckdb()
 _is_win = sys.platform == 'win32'
 
 
+# duckdb_state, the result of most C API functions, and its two values.
 duckdb_state_ty = int32
 
 DuckDBSuccess = 0
 DuckDBError = 1
 
-# duckdb_type enum (from duckdb.h)
+# The codes of the duckdb_type enum in DuckDB's duckdb.h, through DUCKDB_TYPE_TIME_NS. Later releases add
+# DUCKDB_TYPE_GEOMETRY (40, duckdb 1.5.2), DUCKDB_TYPE_VARIANT (41, duckdb 1.5.3) and DUCKDB_TYPE_TIMESTAMP_TZ_NS (42,
+# duckdb 2.0.0), which are not defined here.
 DUCKDB_TYPE_INVALID = 0
 DUCKDB_TYPE_BOOLEAN = 1
 DUCKDB_TYPE_TINYINT = 2
@@ -55,17 +94,20 @@ DUCKDB_TYPE_TIMESTAMP_TZ = 31
 DUCKDB_TYPE_UHUGEINT = 32
 DUCKDB_TYPE_ARRAY = 33
 DUCKDB_TYPE_ANY = 34
-# VARINT (duckdb ≤1.3) and BIGNUM (duckdb ≥1.4) are the same type:
-# same enum value, same struct layout ({byte_ptr, size, is_negative}).
-# duckdb renamed the type and its value functions in 1.4.0. Both enum
-# names are defined for cross-version portability.
+# duckdb 1.4.0 renamed the VARINT type to BIGNUM and also renamed the type's value functions. The enum value, 35, and
+# the struct layout, {data pointer, size, is_negative}, did not change, so both names are defined, for duckdb before
+# 1.4.0 and for 1.4.0 and later.
 DUCKDB_TYPE_VARINT = 35
 DUCKDB_TYPE_BIGNUM = 35
 DUCKDB_TYPE_SQLNULL = 36
 DUCKDB_TYPE_STRING_LITERAL = 37
 DUCKDB_TYPE_INTEGER_LITERAL = 38
-DUCKDB_TYPE_TIME_NS = 39  # duckdb 1.5+
+DUCKDB_TYPE_TIME_NS = 39  # duckdb 1.4.0 and later
 
+# ducklib declares each struct of two or more fields that the C API passes or returns by value as a numba tuple of its
+# fields in C order. A pointer is an intp, idx_t a uint64 and bool an int8. duckdb_decimal_ty flattens the
+# duckdb_hugeint inside a duckdb_decimal into its two fields, which keeps the C layout, and duckdb_result_ty holds the
+# six 8-byte fields of a duckdb_result.
 duckdb_result_ty = UniTuple(intp, 6)
 duckdb_hugeint_ty = Tuple((uint64, int64))
 duckdb_uhugeint_ty = UniTuple(uint64, 2)
@@ -76,11 +118,9 @@ duckdb_bit_ty = Tuple((intp, uint64))
 duckdb_bignum_ty = Tuple((intp, uint64, int8))
 
 
-# duckdb renamed duckdb_create_varint/duckdb_get_varint to duckdb_create_bignum/
-# duckdb_get_bignum in 1.4.0: same enum value, same struct, same signature, and
-# no C-level alias either way. Only the bignum spelling is bound; the binding
-# calls whichever symbol the loaded libduckdb exports, so it works across the
-# whole supported duckdb range.
+# duckdb 1.4.0 renamed duckdb_create_varint and duckdb_get_varint to duckdb_create_bignum and duckdb_get_bignum, with
+# the same enum value, struct and signature, and no C alias for either name. Only the bignum names are bound. Each
+# binding calls whichever symbol the loaded libduckdb exports, so it works across the supported duckdb range.
 _BIGNUM_CREATE = next(
     (name for name in ("duckdb_create_bignum", "duckdb_create_varint")
      if hasattr(duckdb_lib, name)), None)
@@ -89,20 +129,22 @@ _BIGNUM_GET = next(
      if hasattr(duckdb_lib, name)), None)
 
 
-# numba's cache key hashes bytecode and closure cells only, so the symbol chosen
-# above reaches it by neither route: a cached object built against one spelling
-# would be served to a process needing the other and abort at import. Upgrading
-# duckdb across 1.4.0 with a warm cache is enough, so keep these two off the disk
-# cache. Every other binding still caches.
+# numba's cache key holds a function's bytecode and the values of its closure cells, but not the values of the globals
+# that it reads, and numbox's part of the key does not hold them either. The symbol chosen above is such a global. A
+# binding cached against one name would therefore load in a process whose libduckdb exports only the other name, and
+# that process would abort at import. An upgrade of duckdb across 1.4.0 with a warm cache is enough to cause it, so the
+# two bignum bindings compile without the cache. Every other binding still caches.
 _bignum_jit_options = {name: value for name, value in jit_options.items() if name != "cache"}
 
 
 def _bignum_proxy(sym, bignum_name):
-    """Proxy decorator for a bignum binding that calls the C symbol ``sym``.
+    """Return the decorator of a bignum binding, whose body calls the C symbol ``sym``.
 
-    ``sym`` is the spelling the loaded libduckdb exports. When it is None the
-    library exports neither, and the binding degrades to the version-gated stub
-    that raises a clear, named error from Python and at ``@njit`` typing time.
+    ``sym`` is the name under which the loaded libduckdb exports the function, and ``bignum_name`` is the function's
+    name from duckdb 1.4.0 on. If ``sym`` is None, the library exports neither name, and the decorator is numbox's
+    ``proxy_if_available`` for ``bignum_name``, which makes the binding a stub. A call of the stub from Python raises
+    ``NotImplementedError``, and jitted code that calls it fails to compile with a ``TypingError``. Either decorator
+    compiles the binding without the cache.
     """
     if sym is None:
         return proxy_if_available(duckdb_lib, signatures.get(bignum_name),
@@ -185,8 +227,8 @@ signatures["duckdb_create_uint64"] = intp(uint64)
 signatures["duckdb_create_union_type"] = intp(intp, intp, uint64)
 signatures["duckdb_create_union_value"] = intp(intp, uint64, intp)
 signatures["duckdb_create_uuid"] = intp(duckdb_uhugeint_ty)
-# Both spellings stay registered: the binding calls whichever one the loaded
-# libduckdb exports, and _call_lib_func resolves the signature by C symbol name.
+# Both names stay registered, because the binding calls whichever one the loaded libduckdb exports, and _call_lib_func
+# looks up the signature by the name of the C symbol that it calls.
 signatures["duckdb_create_bignum"] = intp(duckdb_bignum_ty)
 signatures["duckdb_create_varint"] = intp(duckdb_bignum_ty)
 signatures["duckdb_create_varchar"] = intp(intp)
