@@ -126,8 +126,8 @@ processes load them from numba's cache, as [Compilation and the cache](#compilat
 ### The bindings
 
 [`numbduck/ducklib.py`][ducklib] defines every binding, and DuckDB's [C API reference][c-api-reference] documents the
-C function behind each one. A binding has the name of its C function, and its docstring links to the reference.
-numbduck binds part of the C API, and a C function that `ducklib` does not define cannot be
+C function behind each one. A binding has the name of its C function, and its docstring links to that function's
+entry in the reference. numbduck binds part of the C API, and a C function that `ducklib` does not define cannot be
 called. `ducklib` also defines DuckDB's state codes, `DuckDBSuccess` and `DuckDBError`, and its type ids, such as
 `DUCKDB_TYPE_INTEGER`.
 
