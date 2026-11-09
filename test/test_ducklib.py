@@ -1,3 +1,15 @@
+"""Tests of numbduck's bindings of the DuckDB C API, of its libduckdb loader, and of the UDFs and UDAFs in examples/.
+
+The tests call the bindings from Python and from @njit code. They open databases, run queries and prepared statements,
+bind parameters of every type, create values and logical types, and register scalar and aggregate functions whose
+callbacks numba compiles. A counting harness checks, in the tests it wraps, that every handle created is destroyed.
+Other tests keep an aggregate's state in a numba structref or array and compare numba's counts of allocations and
+frees; test_ducklib.md explains that design. Further tests cover numbduck's jit options and the connection pointer it
+borrows from the duckdb Python package. A test runs in a child process when it needs other jit options, an allocator
+that overwrites freed memory, a guard against a deadlock on the GIL, or a clean process-wide symbol scope. A test
+whose behavior depends on the duckdb version or the platform checks the installed version or skips itself.
+test_no_cache_location.py covers the imports where numba cannot write a cache for numbduck.
+"""
 import ast
 import ctypes
 import functools
@@ -38,9 +50,11 @@ from numbox.utils.lowlevel import array_data_p
 
 
 class _HandleFamily:
-    """One DuckDB C-handle lifetime family: the binding calls that acquire a
-    handle (each paired with a predicate that says whether a given call actually
-    produced one) and the calls that release it."""
+    """A kind of DuckDB handle, named by the bindings that create one and the bindings that destroy one.
+
+    ``acquires`` maps the name of each creating binding to a predicate. The predicate receives the call's arguments and
+    result, and returns True if that call created a handle. ``releases`` names the destroying bindings.
+    """
 
     def __init__(self, name, acquires, releases):
         self.name = name
@@ -53,7 +67,7 @@ def _acquired_by_return(args, result):
 
 
 def _acquired_by_last_arg(args, result):
-    # duckdb_query only allocates a result when a non-null out pointer is passed.
+    # duckdb_query fills a result only when the caller passes a non-null out pointer.
     return args[-1] != 0
 
 
@@ -87,11 +101,14 @@ SCALAR_FUNCTION_FAMILY = _HandleFamily(
 
 
 class handle_balance:
-    """Count paired acquire/release calls on the DuckDB bindings and assert the
-    two match on exit. DuckDB's C API exposes no allocator-stats accessor, so a
-    missing destroy or a double free surfaces here as a per-family imbalance in
-    the wrapped call counts. Every patched binding is restored before the balance
-    is checked, so a failing assertion never leaves the module monkeypatched."""
+    """A context manager that asserts on exit that each family destroyed as many handles as it created.
+
+    DuckDB's C API has no function that reports its allocations, so the manager counts calls of the bindings instead.
+    If a handle is never destroyed, or is destroyed twice, the two counts of its family differ. The manager replaces
+    each named binding in ``ducklib`` with a counting wrapper, so it counts only calls made from Python through
+    ``ducklib``. It restores every binding before it checks the counts, so a failed assertion never leaves ``ducklib``
+    patched. If the body raises, the exception propagates, and the manager does not check the counts.
+    """
 
     def __init__(self, *families):
         self._families = families
@@ -132,7 +149,7 @@ class handle_balance:
 
 
 def balanced(*families):
-    """Run the decorated test under a handle_balance harness over the given families."""
+    """Return a decorator that runs a test inside ``handle_balance`` over the given families."""
     def decorate(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -187,8 +204,11 @@ def aux_close_db(duckdb_database, duckdb_connection):
 
 
 def aux_destroy_data_chunk(chunk_p):
-    """Destroy a data chunk fetched via duckdb_fetch_chunk by passing the buffer
-    address (pointer-to-handle) to duckdb_destroy_data_chunk."""
+    """Destroy the data chunk ``chunk_p`` that ``duckdb_fetch_chunk`` returned.
+
+    ``duckdb_destroy_data_chunk`` takes a pointer to the handle, so the helper stores the handle in a one-element buffer
+    and passes the buffer's address.
+    """
     buf = numpy.zeros(1, dtype=numpy.intp)
     buf[0] = chunk_p
     ducklib.duckdb_destroy_data_chunk(buf.ctypes.data)
@@ -230,7 +250,12 @@ arr_ty = ctypes.c_int32 * 3
 
 
 def aux_query_1():
-    """ https://duckdb.org/docs/current/clients/c/query#duckdb_fetch_chunk """
+    """Create and select the table ``integers`` of ``i_col`` and ``j_col``; return the result, database and connection.
+
+    It returns them in the order ``(out_result, duckdb_database, duckdb_connection)``. The caller destroys the result
+    and closes the connection and the database. The steps follow DuckDB's example at
+    https://duckdb.org/docs/2.0/clients/c/query#duckdb_fetch_chunk.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     duckdb_connection_p = duckdb_connection[0]
 
@@ -411,9 +436,10 @@ def test_handle_balance_detects_missing_destroy():
 
 
 def test_handle_balance_scalar_function_family():
-    """Create and destroy scalar-function handles in a long loop under the
-    balance harness, so a leaked (never-destroyed) function handle surfaces as
-    an acquire/release imbalance."""
+    """Check that 50 scalar functions, each created and then destroyed, balance under ``handle_balance``.
+
+    A function handle that is never destroyed would make the family's two counts differ.
+    """
     with handle_balance(SCALAR_FUNCTION_FAMILY):
         for _ in range(50):
             fn_p = ducklib.duckdb_create_scalar_function()
@@ -425,10 +451,12 @@ def test_handle_balance_scalar_function_family():
 
 
 def test_destroy_zeroes_handle_slots():
-    """duckdb_destroy_* nulls the caller's handle slot for the value,
-    logical-type, and scalar/aggregate-function families, exactly as it does
-    for the database/connection/prepared/data-chunk handles. This is the only
-    direct proof that destroy actually ran for these largest handle families."""
+    """Check that the destroy bindings of values, logical types, scalar functions and aggregate functions zero the slot.
+
+    DuckDB zeroes the caller's slot for these handles, as it does for a database, a connection, a prepared statement and
+    a data chunk. ``handle_balance`` counts the calls of a destroy binding but cannot detect whether DuckDB destroyed
+    anything. A zeroed slot is direct evidence that DuckDB's destroy function ran.
+    """
     buf = numpy.zeros(1, dtype=numpy.intp)
 
     buf[0] = ducklib.duckdb_create_int64(7)
@@ -455,7 +483,11 @@ def test_destroy_zeroes_handle_slots():
 # --- Prepared Statements ---
 
 def aux_prepare(connection_p, sql):
-    """Prepare a statement and return (prepared_statement buffer, rc)."""
+    """Prepare ``sql`` on the connection and return the statement's buffer and the state code.
+
+    The caller destroys the statement with ``aux_destroy_prepared`` whether the prepare succeeded or not, as DuckDB
+    requires.
+    """
     query_p = get_unicode_data_p(sql)
     stmt = create_duckdb_prepared_statement()
     stmt_pp = stmt.ctypes.data
@@ -464,7 +496,10 @@ def aux_prepare(connection_p, sql):
 
 
 def aux_execute_prepared(stmt_p):
-    """Execute a prepared statement, fetch the first chunk. Returns (result, chunk_p)."""
+    """Execute the prepared statement ``stmt_p`` and return the result's buffer and its first data chunk.
+
+    The helper asserts that the execution succeeds and that the result has a first chunk.
+    """
     out_result = create_duckdb_result()
     out_result_p = out_result.ctypes.data
     rc = ducklib.duckdb_execute_prepared(stmt_p, out_result_p)
@@ -476,23 +511,27 @@ def aux_execute_prepared(stmt_p):
 
 
 def aux_read_column_data(chunk_p, col_idx):
-    """Return the raw data pointer for a column in a chunk."""
+    """Return the address of the data of column ``col_idx`` in the data chunk ``chunk_p``."""
     vec_p = ducklib.duckdb_data_chunk_get_vector(chunk_p, col_idx)
     return ducklib.duckdb_vector_get_data(vec_p)
 
 
 def aux_read_inline_string(data_p):
-    """Read a DuckDB string_t vector entry as text, the text-returning
-    counterpart of aux_read_string_t below, which handles both layouts.
-    https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365 """
+    """Return the ``duckdb_string_t`` entry at ``data_p`` as text: the bytes of ``aux_read_string_t``, decoded as UTF-8.
+
+    Despite its name, the helper reads a string stored out of line as well as one stored inline. The layout is in
+    https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365.
+    """
     return aux_read_string_t(data_p).decode()
 
 
 def aux_read_string_t(data_p):
-    """Read a DuckDB string_t vector entry as raw bytes, handling both layouts:
-    inline (length <= 12, chars at data_p + 4) and out-of-line (length > 12,
-    4-byte prefix at data_p + 4 and a pointer at data_p + 8).
-    https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365 """
+    """Return the bytes of the ``duckdb_string_t`` entry at ``data_p``.
+
+    The entry starts with a 4-byte length. DuckDB stores a string of up to 12 bytes inline, in the 12 bytes that follow
+    the length. For a longer string, it keeps the first 4 bytes after the length and a pointer to the whole string at
+    ``data_p + 8``. The layout is in https://github.com/duckdb/duckdb/blob/v1.3.2/src/include/duckdb.h#L365.
+    """
     length = ctypes.c_uint32.from_address(data_p).value
     if length <= 12:
         raw = (ctypes.c_char * length).from_address(data_p + 4)
@@ -503,7 +542,7 @@ def aux_read_string_t(data_p):
 
 
 def aux_destroy_prepared(stmt):
-    """Destroy a prepared statement via its buffer."""
+    """Destroy the prepared statement whose handle the buffer ``stmt`` holds; DuckDB zeroes the slot."""
     ducklib.duckdb_destroy_prepare(stmt.ctypes.data)
 
 
@@ -566,7 +605,7 @@ def test_execute_prepared():
 
 
 def test_bind_all_types():
-    """Bind int32, int64, double, varchar, and null in a single statement."""
+    """Check that one statement binds an int32, an int64, a double, a varchar and a NULL, and returns each of them."""
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     sql = "SELECT $1::INTEGER, $2::BIGINT, $3::DOUBLE, $4::VARCHAR, $5::INTEGER;"  # noqa: E501
@@ -632,8 +671,10 @@ def test_execute_prepared_unbound_params():
 # --- Error Messages ---
 
 def test_prepare_error_on_invalid_sql():
-    """duckdb_prepare_error returns a non-null pointer with error text after failed prepare.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare_error """
+    """Check that ``duckdb_prepare_error`` returns a non-empty message after a failed prepare.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_prepare_error
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "NOT VALID SQL;")
@@ -647,8 +688,10 @@ def test_prepare_error_on_invalid_sql():
 
 
 def test_prepare_error_on_valid_sql():
-    """duckdb_prepare_error returns null pointer after successful prepare.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare_error """
+    """Check that ``duckdb_prepare_error`` returns a null pointer after a successful prepare.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_prepare_error
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT 1;")
@@ -660,8 +703,10 @@ def test_prepare_error_on_valid_sql():
 
 
 def test_result_error_on_invalid_query():
-    """duckdb_result_error returns a non-null pointer with error text after failed query.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_error """
+    """Check that ``duckdb_result_error`` returns a non-empty message after a failed query.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_result_error
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("NOT VALID SQL;")
@@ -678,8 +723,10 @@ def test_result_error_on_invalid_query():
 
 
 def test_result_error_on_valid_query():
-    """duckdb_result_error returns null pointer after successful query.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_error """
+    """Check that ``duckdb_result_error`` returns a null pointer after a successful query.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_result_error
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     query_p = get_unicode_data_p("SELECT 1;")
@@ -693,11 +740,13 @@ def test_result_error_on_valid_query():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# --- Additional Bind Types ---
+# --- Binding booleans, floats, dates and timestamps ---
 
 def test_bind_boolean():
-    """Bind boolean values and verify readback.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_boolean """
+    """Check that true and false, bound with ``duckdb_bind_boolean``, read back as the bytes 1 and 0.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_boolean
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::BOOLEAN, $2::BOOLEAN;")
@@ -724,8 +773,10 @@ def test_bind_boolean():
 
 
 def test_bind_float():
-    """Bind float value and verify readback.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_float """
+    """Check that a float bound with ``duckdb_bind_float`` reads back as the same 32-bit float.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_float
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::FLOAT;")
@@ -745,14 +796,16 @@ def test_bind_float():
 
 
 def test_bind_date():
-    """Bind a date value (days since 1970-01-01) and verify readback.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_date """
+    """Check that a date bound with ``duckdb_bind_date``, as days since 1970-01-01, reads back as the same day count.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_date
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::DATE;")
     assert rc == ducklib.DuckDBSuccess, f"Prepare failed, rc = {rc}"
 
-    # 2025-01-02 = 20089 days since 1970-01-01
+    # 20089 days after 1970-01-01 is 2025-01-01.
     days = 20089
     rc = ducklib.duckdb_bind_date(stmt[0], 1, days)
     assert rc == ducklib.DuckDBSuccess, f"Bind date failed, rc = {rc}"
@@ -768,8 +821,10 @@ def test_bind_date():
 
 
 def test_bind_timestamp():
-    """Bind a timestamp value (microseconds since epoch) and verify readback.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_timestamp """
+    """Check that a timestamp bound with ``duckdb_bind_timestamp``, in microseconds since 1970-01-01, reads back intact.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_timestamp
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::TIMESTAMP;")
@@ -790,7 +845,7 @@ def test_bind_timestamp():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# --- Scalar Bind Types ---
+# --- Binding the other scalar types, strings and blobs ---
 
 def test_bind_int8():
     duckdb_database, duckdb_connection = aux_connect_db()
@@ -942,7 +997,7 @@ def test_bind_blob():
     assert rc == ducklib.DuckDBSuccess
     out_result, chunk_p = aux_execute_prepared(stmt[0])
     data_p = aux_read_column_data(chunk_p, 0)
-    # BLOB uses same string_t layout: uint32 length + inline data
+    # A BLOB has the duckdb_string_t layout too: a uint32 length, then up to 12 bytes stored inline.
     blob_len = ctypes.c_uint32.from_address(data_p).value
     assert blob_len == 4
     raw = (ctypes.c_char * blob_len).from_address(data_p + 4)
@@ -953,9 +1008,11 @@ def test_bind_blob():
 
 
 def test_bind_varchar_long_out_of_line():
-    """A > 12-character VARCHAR uses the out-of-line string_t layout (4-byte
-    length, 4-byte prefix, 8-byte data pointer) rather than inlined chars. The
-    other string tests only ever exercise the <= 12-byte inline layout."""
+    """Check that a VARCHAR longer than 12 bytes binds and reads back through the out-of-line string layout.
+
+    That layout holds a 4-byte length, a 4-byte prefix and an 8-byte pointer to the characters. The other string tests
+    use strings of 12 bytes or fewer, which DuckDB stores inline.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::VARCHAR;")
@@ -977,8 +1034,10 @@ def test_bind_varchar_long_out_of_line():
 
 
 def test_bind_blob_long_out_of_line():
-    """A > 12-byte BLOB uses the same out-of-line string_t layout; the existing
-    blob test only covers the 4-byte inline case."""
+    """Check that a BLOB longer than 12 bytes reads back through the same out-of-line layout.
+
+    ``test_bind_blob`` binds a BLOB of 4 bytes, which DuckDB stores inline.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::BLOB;")
@@ -1044,7 +1103,7 @@ def test_bind_parameter_index():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# --- Struct Bind Types ---
+# --- Binding structs passed by value, and value handles ---
 
 def test_bind_hugeint():
     duckdb_database, duckdb_connection = aux_connect_db()
@@ -1111,8 +1170,8 @@ def test_bind_decimal():
     assert rc == ducklib.DuckDBSuccess
     out_result, chunk_p = aux_execute_prepared(stmt[0])
     data_p = aux_read_column_data(chunk_p, 0)
-    # DECIMAL(10,2) uses INT64 physical storage (width <= 18)
-    # The stored value is the unscaled integer: 12345 represents 123.45
+    # The bound duckdb_decimal is (width, scale, lower 64 bits, upper 64 bits). DuckDB stores a DECIMAL of width 10 to
+    # 18 as an int64 that holds the unscaled value, so 12345 represents 123.45.
     stored = (ctypes.c_int64 * 1).from_address(data_p)[0]
     assert stored == 12345
     aux_destroy_data_chunk(chunk_p)
@@ -1122,10 +1181,11 @@ def test_bind_decimal():
 
 
 def test_bind_decimal_wide_upper64():
-    """DECIMAL(38,0) uses INT128 physical storage. Bind a value whose magnitude
-    genuinely needs the upper 64 bits and assert both halves of the stored
-    int128 round-trip (test_bind_decimal only exercises width <= 18, INT64
-    physical, with the upper word always zero)."""
+    """Check that a DECIMAL(38, 0) value bound with ``duckdb_bind_decimal`` reads back with both 64-bit halves intact.
+
+    DuckDB stores a DECIMAL wider than 18 digits as an int128, and the bound value needs its upper half.
+    ``test_bind_decimal`` binds a DECIMAL(10, 2), which DuckDB stores as an int64, so its upper half is always zero.
+    """
     lower = 0xFEDCBA9876543210
     upper = 0x0123456789ABCDEF
     duckdb_database, duckdb_connection = aux_connect_db()
@@ -1146,10 +1206,11 @@ def test_bind_decimal_wide_upper64():
 
 
 def test_bind_value_success_roundtrip():
-    """duckdb_bind_value's only other coverage is the invalid-index sweep, whose
-    DuckDBError assertion a completely broken binding would also satisfy. Bind a
-    real value handle at a valid index and read the result back so the success
-    path, handle marshaling included, is pinned."""
+    """Check that a value handle bound with ``duckdb_bind_value`` at a valid index reads back as the value it holds.
+
+    The invalid-index sweep is the only other test of this binding, and a binding that never bound a value would also
+    return ``DuckDBError`` there. This test also checks that the binding passes the handle to DuckDB intact.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::BIGINT;")
@@ -1174,16 +1235,16 @@ _INVALID_INDEX_VARCHAR_P = ctypes.c_void_p.from_buffer(_INVALID_INDEX_VARCHAR).v
 _INVALID_INDEX_BLOB = ctypes.create_string_buffer(b"\x00\x01\x02\x03", 4)
 _INVALID_INDEX_BLOB_P = ctypes.cast(_INVALID_INDEX_BLOB, ctypes.c_void_p).value
 
-# Every duckdb_bind_* wrapper that takes a parameter index, paired with the
-# trailing arguments to call it with after an out-of-range index (999). The
-# wrapper itself is resolved from the name in the first column, so each binding
-# is named exactly once here and a row cannot drift into calling something other
-# than what it is labelled. Pass real values, not null: duckdb builds the bound
-# value before it checks the index for at least duckdb_bind_blob, where a null
-# data pointer aborts the process (std::logic_error, "construction from null is
-# not valid") rather than returning DuckDBError. duckdb_bind_parameter_index is
-# excluded deliberately: its second argument is an out-pointer for a looked-up
-# index, not an index to bind at.
+# Every duckdb_bind_* binding that takes a parameter index, with the arguments that follow the index. The sweep below
+# calls each one at the out-of-range index 999. It looks the binding up by the name in the first column, so each row
+# names its binding once and calls the binding it names.
+#
+# The arguments are real values, not null pointers. DuckDB builds the bound value before it checks the index, at least
+# in duckdb_bind_blob, and there a null data pointer aborts the process with std::logic_error ("construction from null
+# is not valid") instead of returning DuckDBError.
+#
+# duckdb_bind_parameter_index is left out: its second argument is an out pointer that receives the index of a named
+# parameter, not an index to bind at.
 _INVALID_INDEX_BINDS = [
     ("duckdb_bind_boolean", (1,)),
     ("duckdb_bind_int8", (1,)),
@@ -1208,17 +1269,19 @@ _INVALID_INDEX_BINDS = [
     ("duckdb_bind_uhugeint", ((100, 0),)),
     ("duckdb_bind_interval", ((1, 2, 3),)),
     ("duckdb_bind_decimal", ((10, 2, 12345, 0),)),
-    # duckdb_bind_value needs a duckdb_value handle created and destroyed around
-    # the call, so it carries None and is dispatched to its own helper below.
+    # duckdb_bind_value takes a value handle, which aux_bind_value_out_of_range creates and destroys around the call.
+    # None sends the row to that helper.
     ("duckdb_bind_value", None),
 ]
 
 
 def aux_bind_value_out_of_range(stmt_p):
-    """duckdb_bind_value takes a duckdb_value handle rather than a plain scalar,
-    so the sweep's dummy has to be created and destroyed around the call. A null
-    handle happens to return DuckDBError at an out-of-range index, but it
-    segfaults at a valid one, so it is not worth relying on."""
+    """Call ``duckdb_bind_value`` at the out-of-range index 999 with a real value handle, and return the state code.
+
+    The helper creates an int64 value for the call and destroys it afterward. A null handle would also return
+    ``DuckDBError`` at an out-of-range index, but it crashes the process at a valid one, so the sweep does not rely on
+    it.
+    """
     val_p = ducklib.duckdb_create_int64(1)
     assert val_p != 0
     try:
@@ -1230,11 +1293,11 @@ def aux_bind_value_out_of_range(stmt_p):
 @pytest.mark.parametrize("name,args", _INVALID_INDEX_BINDS,
                          ids=[entry[0] for entry in _INVALID_INDEX_BINDS])
 def test_bind_family_invalid_param_index(name, args):
-    """Every duckdb_bind_* wrapper that takes a parameter index returns
-    DuckDBError (not a crash) for an out-of-range one. Verified on duckdb 1.5.4:
-    all of them, including the struct-by-value binds
-    (hugeint/uhugeint/interval/decimal), return DuckDBError; none segfault, so
-    none are excluded."""
+    """Check that each ``duckdb_bind_*`` binding that takes an index returns ``DuckDBError`` for an index out of range.
+
+    None of them crashes, including the four that pass a struct by value (hugeint, uhugeint, interval and decimal), so
+    the table omits none of them.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     connection_p = duckdb_connection[0]
     stmt, rc = aux_prepare(connection_p, "SELECT $1::INTEGER;")
@@ -1249,20 +1312,19 @@ def test_bind_family_invalid_param_index(name, args):
 
 
 def test_invalid_param_index_sweep_covers_every_indexed_bind():
-    """The sweep table above is hand-written, so a binding added later would
-    silently go uncovered. Assert the table names exactly the prepared-statement
-    duckdb_bind_* wrappers that take a parameter index, reading the set off
-    ducklib itself. Because the sweep resolves each wrapper from the same name
-    this test compares, matching name sets certify that every one of those
-    wrappers was actually called, not merely listed.
+    """Check that ``_INVALID_INDEX_BINDS`` names exactly the bindings in ``ducklib`` that bind a parameter at an index.
 
-    One exclusion. duckdb_bind_parameter_index resolves a name to an index
-    rather than binding at one. There is deliberately no symbol-presence filter:
-    every bind wrapper is a plain @proxy binding, so a missing C symbol aborts
-    the ducklib import outright rather than producing a callable stub, and a
-    presence filter would let a future version-gated bind wrapper drop out of
-    both sides of this comparison silently. If one ever appears, this test
-    should fail and force it into the table with its own gating."""
+    The table is written by hand, so without this test the sweep would not call a binding added to ``ducklib`` later.
+    The sweep calls each binding by the name in the table, so equal sets of names mean that the sweep calls every such
+    binding, not only that the table lists it. ``duckdb_bind_parameter_index`` is left out, because it looks up the
+    index of a named parameter instead of binding a value at an index.
+
+    The test does not filter out the bindings whose C symbol the loaded libduckdb lacks. Every ``duckdb_bind_*`` binding
+    is a plain ``@proxy`` binding, and a missing symbol makes the import of ``ducklib`` fail instead of producing a stub
+    that can be called. numbox's ``proxy_if_available`` turns a version-gated binding into such a stub when the symbol
+    is missing. A filter would remove that binding from both sets, and the sets would still be equal. If one is added,
+    this test fails until the table lists it with a check of its own for the symbol.
+    """
     swept = {name for name, _ in _INVALID_INDEX_BINDS}
     expected = {
         name for name in dir(ducklib)
@@ -1409,13 +1471,15 @@ print("BYVAL_ROUNDTRIP_OK")
 
 
 def test_fetch_chunk_byval_roundtrip_low_opt():
-    """Exercise the by-value duckdb_result path (duckdb_fetch_chunk,
-    duckdb_result_return_type, duckdb_result_statement_type) with the numba
-    optimizer disabled, so the >16-byte struct argument is marshalled the
-    ABI-correct way (byval stack copy on SysV x86-64) rather than relying on
-    the optimized stack layout happening to place the value where the callee
-    reads it. Runs in a subprocess because NUMBDUCK_JIT_OPTIONS is read once,
-    at ducklib import time, to build every wrapper's jit_options.
+    """Check that the bindings that take a ``duckdb_result`` by value work when numba compiles them unoptimized.
+
+    ``duckdb_fetch_chunk``, ``duckdb_result_return_type`` and ``duckdb_result_statement_type`` take the 48-byte struct
+    by value. On SysV x86-64, numbox passes a struct over 16 bytes as a copy on the stack, marked ``byval`` as the ABI
+    requires. With optimization on, a wrong lowering could still pass if the optimized code happened to leave the value
+    where C reads it. ``_dbg_optnone`` turns the optimizer off, so the test passes only if the lowering itself is right.
+
+    The test runs in a child process, because numbduck reads ``NUMBDUCK_JIT_OPTIONS`` once, when it is imported, and
+    compiles every binding with those options.
     """
     env = dict(os.environ)
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1449,9 +1513,10 @@ def test_get_jit_options_accepts_valid_object(monkeypatch):
 
 
 def test_get_jit_options_defaults_release_the_gil(monkeypatch):
-    """nogil is on by default, and a NUMBDUCK_JIT_OPTIONS that sets other keys
-    keeps it: the variable overrides individual defaults instead of replacing
-    them all."""
+    """Check that ``nogil`` is on by default and stays on when ``NUMBDUCK_JIT_OPTIONS`` sets other keys.
+
+    The variable overrides single defaults instead of replacing them all.
+    """
     monkeypatch.delenv("NUMBDUCK_JIT_OPTIONS", raising=False)
     assert get_jit_options() == {"cache": True, "nogil": True}
     monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"cache": false}')
@@ -1461,10 +1526,12 @@ def test_get_jit_options_defaults_release_the_gil(monkeypatch):
 
 
 def test_get_jit_options_caches_only_the_default_compile_options(monkeypatch):
-    """numba's disk cache key holds no compile options, so an object compiled
-    under one set is served to a process running another. Only the default
-    compile options use the cache; asking for the cache together with other
-    options says why it is off instead of poisoning the shared cache."""
+    """Check that only the default compile options use numba's disk cache.
+
+    numba's cache key does not include the compile options, so code cached under one set of options would load in a
+    later process that runs under another. Any other option turns the cache off. If ``NUMBDUCK_JIT_OPTIONS`` also sets
+    ``"cache": true``, a ``RuntimeWarning`` says why the cache is off.
+    """
     monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"nogil": false}')
     assert get_jit_options() == {"cache": False, "nogil": False}
     monkeypatch.setenv("NUMBDUCK_JIT_OPTIONS", '{"fastmath": true}')
@@ -1482,9 +1549,11 @@ create_duckdb_result()
 
 
 def test_non_default_compile_options_leave_the_disk_cache_untouched(tmp_path):
-    """A process compiling under non-default options must not write the shared
-    disk cache: the entries it would leave are served to every later process,
-    whatever options that one runs under."""
+    """Check that a process compiling under non-default options writes nothing to numba's disk cache.
+
+    A later process would load those entries regardless of its own options. The child process has a cache directory of
+    its own, so the test can list what the child wrote.
+    """
     cache_dir = tmp_path / "numba-cache"
     cache_dir.mkdir()
     env = dict(os.environ)
@@ -1502,6 +1571,11 @@ def test_non_default_compile_options_leave_the_disk_cache_untouched(tmp_path):
     assert written == [], written
 
 
+# The child sets two threads. With one thread, DuckDB runs the whole query on the calling thread, which already holds
+# the GIL, so the UDF runs and nothing deadlocks, whether or not the binding releases the GIL. With two threads, DuckDB
+# also uses a worker thread on every host, regardless of its number of cores. The 250000 rows fill three row groups,
+# so the workers scan some of them. The filter passes 1 row in 64 to the UDF, because a Python UDF costs tens of
+# microseconds per row on duckdb 1.5.4 and earlier.
 _GIL_WORKER_SCRIPT = r"""
 import duckdb
 from numbox.utils.lowlevel import get_unicode_data_p
@@ -1525,16 +1599,14 @@ print("QUERY_RC", rc)
 
 
 def test_binding_called_from_python_lets_duckdb_workers_take_the_gil():
-    """A binding called from Python must release the GIL for the C call. DuckDB
-    runs a query on its worker threads, and a worker that needs the GIL (here a
-    Python UDF on the same connection) waits for it forever if the calling
-    thread keeps it while it waits for the workers. With one thread DuckDB runs
-    the whole query on the calling thread, which already holds the GIL, so the
-    UDF runs and nothing deadlocks; the script asks for two so that a second
-    thread is in play whatever the host's core count. 250000 rows is three row
-    groups, so the workers get some of them, and the filter keeps the UDF to 1
-    row in 64, since a Python UDF costs tens of microseconds a row. Runs in a
-    subprocess so a deadlock is a timeout, not a hung suite."""
+    """Check that ``duckdb_query``, called from Python, releases the GIL while DuckDB runs the query.
+
+    DuckDB runs a query on its worker threads. In this test, a worker needs the GIL to run a Python UDF registered on
+    the same connection. Such a worker cannot run while the calling thread holds the GIL and waits for the workers, and
+    the query can hang. The query runs in a child process, under the default jit options, so a deadlock shows as a
+    timeout instead of a hung test session. On duckdb 1.2.2, the query sometimes finishes even when the binding keeps
+    the GIL, so on that version the test can pass without detecting that defect.
+    """
     env = dict(os.environ)
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env["PYTHONPATH"] = os.pathsep.join(
@@ -1551,9 +1623,9 @@ def test_binding_called_from_python_lets_duckdb_workers_take_the_gil():
     assert "QUERY_RC 0" in proc.stdout, proc.stdout
 
 
-# --- JIT Tests ---
-# get_unicode_data_p is safe inside @njit with numbox >= 0.5.6, which
-# extracts the data pointer directly instead of going through NRT meminfo.
+# --- Bindings called from @njit code ---
+# The jitted functions below pass string literals to numbox's get_unicode_data_p. From numbox 0.5.6 on, it reads the
+# data pointer from numba's string structure itself, not through the string's NRT meminfo, which a literal lacks.
 
 def test_jit_create_duckdb_database():
     @njit
@@ -1571,12 +1643,11 @@ def test_array_data_p():
         assert array_data_p(arr) == arr.ctypes.data
 
 
-# In the JIT lifecycle tests every buffer is read once more after the call that
-# destroys through it. numba frees an array right after its last use, and the
-# address array_data_p returns keeps nothing alive, so a buffer whose last use is
-# array_data_p(buf) is freed before the destroy call reads the handle out of it
-# and writes NULL back. Reading the slot afterwards keeps the buffer alive across
-# the call, and checks that the destroy nulled it.
+# In the jitted lifecycle functions below, each buffer is read once more after the call that destroys its handle.
+# numba frees an array immediately after its last use, and the address that array_data_p returns does not keep the
+# array alive. If array_data_p(buf) were the last use of a buffer, numba would free the buffer before the destroy call
+# read the handle from it and wrote NULL back. The read afterward keeps the buffer alive across the call and checks
+# that the destroy wrote NULL.
 
 @njit
 def jit_open_close():
@@ -1647,14 +1718,16 @@ def jit_query_invalid_sql():
 
 
 def test_jit_query_invalid_sql():
-    """A DuckDBError return code is produced and branched on entirely inside
-    compiled @njit code (the native LLVM call path), not just via the
-    Python-called dispatcher path every other error test uses.
+    """Check that jitted code receives ``DuckDBError`` from ``duckdb_query`` and can branch on it.
 
-    Open and connect are asserted first. duckdb_query checks the query string
-    before the connection, so on a null connection it segfaults rather than
-    returning DuckDBError, and a crash inside compiled code takes the session
-    down with no traceback."""
+    The other error tests call the bindings from Python, through numba's dispatcher; this one makes the call and the
+    comparison inside compiled code. It also checks that the destroy calls zero every handle.
+
+    The error comes from invalid SQL on an open connection, and the test asserts that the open and the connect
+    succeeded. The error cannot come from a null connection: ``duckdb_query`` checks neither of its arguments for NULL,
+    so it crashes on a null connection instead of returning ``DuckDBError``. A crash inside compiled
+    code ends the test session without a traceback.
+    """
     open_rc, connect_rc, conn_p, rc, detected, left = jit_query_invalid_sql()
     assert open_rc == ducklib.DuckDBSuccess, f"open failed, rc={open_rc}"
     assert connect_rc == ducklib.DuckDBSuccess, f"connect failed, rc={connect_rc}"
@@ -1676,7 +1749,7 @@ def jit_prepare_bind_execute():
     connect_rc = ducklib.duckdb_connect(db[0], array_data_p(conn))
     conn_p = conn[0]
 
-    # prepare: SELECT $1::INTEGER, $2::BIGINT, $3::DOUBLE, $4::INTEGER
+    # prepare a statement with four parameters
     prepare_rc = ducklib.duckdb_prepare(
         conn_p,
         get_unicode_data_p(
@@ -1696,6 +1769,7 @@ def jit_prepare_bind_execute():
     exec_rc = ducklib.duckdb_execute_prepared(stmt_p, array_data_p(result))
 
     # fetch chunk and read back values
+    # duckdb_fetch_chunk takes the duckdb_result struct by value, as a tuple of its six words.
     result_tup = (result[0], result[1], result[2],
                   result[3], result[4], result[5])
     chunk_p = ducklib.duckdb_fetch_chunk(result_tup)
@@ -1741,15 +1815,19 @@ def jit_prepare_bind_execute():
 
 
 def test_jit_prepare_bind_execute():
-    """Prepared statement with parameter binding from JIT context.
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_nparams
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int32
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int64
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_double
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_null
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_execute_prepared
-    https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_prepare """
+    """Check that jitted code can prepare a statement, bind four parameters, execute it and read the values back.
+
+    The test also checks that the destroy calls zero every handle.
+
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_prepare
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_nparams
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_int32
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_int64
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_double
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_null
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_execute_prepared
+    https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_prepare
+    """
     (open_rc, connect_rc, prepare_rc, nparams,
      bind1_rc, bind2_rc, bind3_rc, bind4_rc, exec_rc,
      chunk_size, col0, col1, col2, col3_valid, left) = jit_prepare_bind_execute()
@@ -1815,10 +1893,13 @@ _BUFFER_LIFETIME_TESTS = [
 
 
 def _poison_on_free(tmp_path):
-    """The environment under which the allocator overwrites freed memory: macOS
-    has libmalloc scribble 0x55 over every block it frees, and not zero it
-    first as it does by default for a recent build; Linux preloads a free that
-    does the same with 0xDE."""
+    """Return the environment variables under which the C allocator overwrites memory as it frees it.
+
+    On macOS, ``MallocScribble`` makes libmalloc write 0x55 over every block it frees, and ``MallocZeroOnFree=0`` stops
+    it from zeroing the block, which a recent macOS does by default. On Linux, the helper compiles ``_POISON_FREE_C``
+    with gcc into ``tmp_path`` and preloads it with ``LD_PRELOAD``. That ``free`` writes 0xDE over a block of fewer
+    than 4096 usable bytes before it frees the block.
+    """
     if sys.platform == "darwin":
         return {"MallocScribble": "1", "MallocZeroOnFree": "0"}
     src = tmp_path / "poison_free.c"
@@ -1834,16 +1915,18 @@ def _poison_on_free(tmp_path):
     not (sys.platform == "darwin" or (sys.platform == "linux" and shutil.which("gcc"))),
     reason="needs macOS, or Linux with gcc, for an allocator that poisons freed memory")
 def test_jit_destroy_calls_read_no_freed_buffer(tmp_path):
-    """The JIT lifecycle tests and online_scoring's raise branches destroy
-    handles through out-param buffers. A freed buffer's bytes normally survive
-    until the memory is reused, so a destroy that reads a buffer numba has
-    already freed still passes. Under an allocator that overwrites memory as it
-    is freed, the same code reads garbage and crashes, so these tests are run
-    again under one. First a numba array is filled and dropped under the same
-    environment and its freed bytes are read back, and a run in which they
-    survive, or were zeroed, is skipped rather than passed: macOS ignores the
-    variables for a restricted python, and a destroy that checks the handle
-    for NULL survives a zeroed buffer."""
+    """Run the JIT lifecycle tests and online_scoring's raise branches under an allocator that overwrites freed memory.
+
+    These tests destroy each handle through a buffer that holds it: the destroy call reads the handle from the buffer
+    and writes NULL back. A freed buffer usually keeps its bytes until the memory is reused, so a destroy that read
+    a buffer numba had already freed would still pass. An allocator that overwrites memory as it frees it makes the
+    same read return garbage, and the process crashes. The tests run in a child process, because the allocator reads
+    its variables when the process starts.
+
+    A first child fills a numba array, lets numba free it and prints the freed bytes. If the freed memory keeps its
+    bytes, or the allocator zeroed them, the test skips instead of passing. macOS ignores the variables for a restricted
+    Python, and a destroy that checks the handle for NULL does not crash on a zeroed buffer.
+    """
     here = os.path.abspath(__file__)
     repo_root = os.path.dirname(os.path.dirname(here))
     env = dict(os.environ)
@@ -1869,8 +1952,11 @@ def test_jit_destroy_calls_read_no_freed_buffer(tmp_path):
 # --- Value Interface ---
 
 def aux_destroy_value(val_p):
-    """Destroy a duckdb_value by storing the handle in a buffer and passing
-    the buffer address (pointer-to-handle) to duckdb_destroy_value."""
+    """Destroy the value handle ``val_p``.
+
+    ``duckdb_destroy_value`` takes a pointer to the handle, so the helper stores the handle in a one-element buffer and
+    passes the buffer's address.
+    """
     buf = numpy.zeros(1, dtype=numpy.intp)
     buf[0] = val_p
     ducklib.duckdb_destroy_value(buf.ctypes.data)
@@ -2045,12 +2131,13 @@ def test_create_get_uuid():
 
 
 def test_create_get_bignum():
-    """duckdb renamed duckdb_create_varint/duckdb_get_varint to the bignum
-    spellings in 1.4.0. Same enum value, same struct, different C symbols.
+    """Check that a BIGNUM keeps its bytes and its sign through ``duckdb_create_bignum`` and ``duckdb_get_bignum``.
 
-    The binding calls whichever spelling the loaded libduckdb exports, so this
-    runs unskipped across the whole supported duckdb range. Covers a multi-byte
-    magnitude and both settings of the negative flag."""
+    The value has a magnitude of five bytes, and the test runs it with the negative flag clear and set. duckdb 1.4.0
+    renamed ``duckdb_create_varint`` and ``duckdb_get_varint`` to the bignum spellings and kept the enum value and the
+    struct. The bindings call whichever spelling the loaded libduckdb exports, so the test runs, without a skip, on
+    every duckdb that numbduck supports.
+    """
     payload = b"\x01\x02\x03\x04\x05"
     data_bytes = ctypes.create_string_buffer(payload, len(payload))
     data_p = ctypes.cast(data_bytes, ctypes.c_void_p).value
@@ -2067,16 +2154,17 @@ def test_create_get_bignum():
 
 
 def test_bignum_bindings_are_not_disk_cached():
-    """numba's cache key hashes bytecode and closure cells only, so the symbol
-    the bignum pair resolves at import reaches neither. A cached object built
-    against one spelling is served to a process needing the other, and importing
-    ducklib aborts with LLVM ERROR: Symbol not found.
+    """Check that numba does not cache the two bignum bindings on disk, but caches ``duckdb_create_uuid`` beside them.
 
-    The check reads each dispatcher's cache object rather than the cache
-    directory: the pair compiles at import, so a directory listing taken here
-    cannot tell a fresh write from files left behind by an earlier build, and it
-    sees nothing at all when NUMBA_CACHE_DIR points elsewhere. duckdb_create_uuid
-    is the control, a sibling that does cache."""
+    numba's cache key hashes the bytecode and the closure cells only. ducklib chooses the C symbol that the bignum
+    bindings call when it is imported, and the bindings read it from a module global, so neither the bytecode nor the
+    closure cells contain the symbol. Code cached under one spelling would load in a process whose libduckdb exports
+    the other, and the import of ducklib would then abort with ``LLVM ERROR: Symbol not found``.
+
+    The test reads each dispatcher's cache object, not the cache directory. The bindings compile when ducklib is
+    imported, so a listing of the directory taken here could not tell a new file from one that an earlier run left. It
+    would also find nothing when ``NUMBA_CACHE_DIR`` points elsewhere.
+    """
     assert "cache" not in ducklib._bignum_jit_options
     for name in ("duckdb_create_bignum", "duckdb_get_bignum"):
         assert isinstance(getattr(ducklib, name)._cache, NullCache), name
@@ -2084,8 +2172,11 @@ def test_bignum_bindings_are_not_disk_cached():
 
 
 def test_bignum_binds_the_spelling_this_libduckdb_exports():
-    """The binding resolves to the bignum spelling on duckdb >=1.4 and to the
-    varint spelling below it, and never to a symbol the library lacks."""
+    """Check that the bignum bindings call the bignum symbols on duckdb 1.4 and later, and the varint symbols before it.
+
+    They never call a symbol that the library lacks, and ducklib has no ``duckdb_create_varint`` or
+    ``duckdb_get_varint`` of its own.
+    """
     resolved = ducklib._BIGNUM_CREATE, ducklib._BIGNUM_GET
     expected = (
         ("duckdb_create_bignum", "duckdb_get_bignum")
@@ -2100,11 +2191,13 @@ def test_bignum_binds_the_spelling_this_libduckdb_exports():
 
 
 def test_gated_binding_missing_symbol_raises_clear_njit_error():
-    """A version-gated binding whose C symbol is absent from libduckdb raises a
-    clear, named error at @njit typing time, not an opaque numba TypingError.
+    """Check that a version-gated binding whose C symbol the library lacks fails clearly when jitted code calls it.
 
-    The absent-symbol path is simulated with a lib object that lacks the
-    attribute, so this holds whether or not the loaded libduckdb has it."""
+    numbox's ``proxy_if_available`` makes a version-gated binding. When jitted code that calls it is compiled, numba
+    raises a ``TypingError`` whose message names the binding and says that its C symbol is missing, instead of an
+    opaque typing error. The test passes a library object without the attribute in place of a libduckdb without the
+    symbol, so it runs whether or not the loaded libduckdb exports the symbol.
+    """
 
     class _NoSymLib:
         pass
@@ -2132,10 +2225,12 @@ def test_gated_binding_missing_symbol_raises_clear_njit_error():
     reason="duckdb_scalar_function_set_init present in this libduckdb; absent-symbol path not exercised",
 )
 def test_gated_binding_unavailable_real_name_njit_error():
-    """The actual version-gated ducklib binding, when absent from the loaded
-    libduckdb, raises a clear named error at @njit typing time rather than an
-    opaque numba TypingError. Complements the simulated case above by covering
-    the binding as ducklib actually built it."""
+    """Check that ducklib's ``duckdb_scalar_function_set_init`` fails clearly in jitted code if its symbol is missing.
+
+    The ``TypingError`` names the binding and says that it is not available. The test above builds a gated binding of
+    its own; this one checks the binding as ducklib builds it. It runs only with a libduckdb that lacks the symbol, such
+    as duckdb 1.4 and earlier.
+    """
 
     @njit
     def use_set_init(scalar_function_p, init_p):
@@ -2441,9 +2536,10 @@ def test_create_array_value():
     vals = numpy.array([v1, v2, v3], dtype=numpy.intp)
     av = ducklib.duckdb_create_array_value(int_type, vals.ctypes.data, 3)
     assert av != 0
-    # duckdb_get_list_* reject an ARRAY-typed value, so check the array through
-    # its logical type instead: id, fixed size, and element type. Do not destroy
-    # array_type_p; duckdb_get_value_type returns the value handle itself.
+    # duckdb_get_list_size and duckdb_get_list_child do not read a value of ARRAY type: on duckdb 1.5.4 they return a
+    # size of 0 and a null child. The test checks the array through its logical type instead: the type id, the fixed
+    # size and the element type. duckdb_get_value_type returns the value handle itself, so the test does not destroy
+    # array_type_p separately.
     array_type_p = ducklib.duckdb_get_value_type(av)
     assert array_type_p == av
     assert ducklib.duckdb_get_type_id(array_type_p) == ducklib.DUCKDB_TYPE_ARRAY
@@ -2503,9 +2599,10 @@ def test_get_value_type():
     type_p = ducklib.duckdb_get_value_type(val_p)
     assert type_p != 0
     assert ducklib.duckdb_get_type_id(type_p) == ducklib.DUCKDB_TYPE_INTEGER
-    # duckdb_get_value_type returns the value handle itself; assert the
-    # aliasing so the do-not-destroy rule stays pinned by a check the call
-    # can actually fail (destroying both would double-free).
+    # duckdb_get_value_type returns the type that the value owns, at the address of the value handle itself, so the
+    # test destroys only the value: destroying the type as well would free the same memory twice. The assertion checks
+    # the aliasing, so the rule not to destroy the type depends on a check that fails if the call returns a type at
+    # another address.
     assert type_p == val_p
     aux_destroy_value(val_p)
 
@@ -2520,13 +2617,13 @@ def test_destroy_value():
 
 
 def test_struct_by_value_abi_roundtrip():
-    """Round-trip a 16-byte and a 24-byte struct through the real create/get
-    wrappers, exercising numbox's <=16-byte by-value vs >16-byte by-pointer
-    struct-ABI classification. Both eightbytes of each struct's 128-bit payload
-    are fully populated, so a dropped or mis-packed upper eightbyte is caught.
-    (The arithmetic-only predecessor asserted sum(bitwidth)/8 over numba type
-    metadata and never called into ducklib, so it could not detect an ABI
-    regression at all.)"""
+    """Check that a 16-byte and a 24-byte struct keep every bit through ducklib's create and get bindings.
+
+    On SysV x86-64 and AAPCS64, numbox's ``_call_lib_func`` passes a struct of 16 bytes or less by value. It passes a
+    larger one as a copy on the stack on SysV x86-64, and as a pointer to a copy on AAPCS64. The 16-byte struct and the
+    24-byte struct cover both cases. Both 64-bit halves of each struct's 128-bit value are nonzero. The test therefore
+    catches an upper half that a binding drops or packs wrongly.
+    """
     lower = 0xFEDCBA9876543210
     upper = 0x0123456789ABCDEF
 
@@ -2539,8 +2636,8 @@ def test_struct_by_value_abi_roundtrip():
     assert hugeint[1] == upper
     aux_destroy_value(hugeint_p)
 
-    # duckdb_decimal is padded to 24 bytes and therefore passed by pointer; a
-    # width > 18 keeps INT128 physical storage so the upper eightbyte is live.
+    # duckdb_decimal is padded to 24 bytes, so it tests how numbox passes a struct over 16 bytes. A width over 18
+    # makes DuckDB keep the value as an int128, so the upper half carries data.
     decimal_p = ducklib.duckdb_create_decimal((38, 0, lower, upper))
     assert decimal_p != 0
     decimal = ducklib.duckdb_get_decimal(decimal_p)
@@ -2766,7 +2863,7 @@ def _add_one_cb(info, chunk, output):
 
 
 def test_scalar_function_round_trip():
-    """Register a scalar UDF that adds 1 to an integer, call it from SQL."""
+    """Check that SQL calls a scalar UDF registered through the C API: ``add_one(42)`` returns 43."""
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
@@ -2787,6 +2884,7 @@ def test_scalar_function_round_trip():
     rc = ducklib.duckdb_register_scalar_function(conn_p, func_p)
     assert rc == ducklib.DuckDBSuccess
 
+    # The connection keeps the registered function, so the handle can be destroyed before the query runs.
     func_buf = numpy.array([func_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
 
@@ -2826,7 +2924,7 @@ def _extra_info_cb(info, chunk, output):
 
 
 def test_scalar_function_extra_info():
-    """Verify extra_info pointer round-trips through set/get."""
+    """Check that the callback reads back, with ``duckdb_scalar_function_get_extra_info``, the extra info set on it."""
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
@@ -2877,7 +2975,7 @@ def _error_cb(info, chunk, output):
 
 
 def test_scalar_function_set_error():
-    """Verify set_error in callback causes query failure."""
+    """Check that a callback that calls ``duckdb_scalar_function_set_error`` makes the query return ``DuckDBError``."""
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
@@ -2942,7 +3040,10 @@ def _double_it_dbl_cb(info, chunk, output):
 
 
 def test_scalar_function_set_overloads():
-    """Register overloaded scalar function with integer and double variants."""
+    """Check that a scalar function set registers ``double_it`` for INTEGER and DOUBLE.
+
+    DuckDB calls the INTEGER variant for an INTEGER argument and the DOUBLE variant for a DOUBLE argument.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
@@ -3124,7 +3225,7 @@ def _agg_finalize_cb(info, source, result, count, offset):
 
 
 def test_aggregate_function_round_trip():
-    """Register an aggregate UDF that sums int32 values, call it from SQL."""
+    """Check that SQL calls an aggregate UDF registered through the C API: ``my_sum`` of 1, 2 and 3 returns 6."""
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
@@ -3182,10 +3283,9 @@ def test_aggregate_function_round_trip():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-# The compiled callback below captures _INIT_CB_FIRED_ADDR at import time, so
-# any reset must write through the existing buffer in place; rebinding
-# _INIT_CB_FIRED to a fresh array would leave the callback writing freed
-# memory from a DuckDB worker thread.
+# numba compiles the callback below when the module is imported and freezes _INIT_CB_FIRED_ADDR into it as a
+# constant. A reset must therefore write into the existing buffer. If _INIT_CB_FIRED were bound to a new array, the
+# old one would be freed, and the callback would write into freed memory from a DuckDB worker thread.
 _INIT_CB_FIRED = numpy.zeros(1, dtype=numpy.int64)
 _INIT_CB_FIRED_ADDR = _INIT_CB_FIRED.ctypes.data
 
@@ -3207,14 +3307,15 @@ def _init_cb(info):
     reason="duckdb_scalar_function_set_init not available",
 )
 def test_scalar_function_set_init():
-    """Verify the set_init callback (v1.5+) is not just accepted but actually
-    invoked: the init impl increments an observable marker, asserted after the
-    query. A binding that silently dropped the init pointer would leave it 0.
+    """Check that DuckDB calls the init callback set with ``duckdb_scalar_function_set_init``, which duckdb 1.5 added.
 
-    The assertion is >= 1, not == 1. duckdb.h documents the scalar init callback
-    as running once per worker thread that executes the function, so the count is
-    a property of the query plan rather than of the binding; a single-row
-    constant projection happens to give exactly one today."""
+    The callback increments a counter that the test reads after the query. A binding that dropped the init pointer
+    would leave the counter at 0.
+
+    The test asserts a count of at least one, not exactly one. duckdb.h documents that the init callback runs once for
+    each worker thread that executes the function, so the count depends on the query plan, not on the binding. The
+    one-row constant projection here runs it once, but another plan may run it more often.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
     _INIT_CB_FIRED[0] = 0  # reset in place; see the note above _INIT_CB_FIRED
@@ -3268,7 +3369,10 @@ def test_scalar_function_set_init():
 
 
 def test_aggregate_function_set_overloads():
-    """Register overloaded aggregate with int32 and int64 variants."""
+    """Check that an aggregate function set registers ``my_sum2`` for INTEGER and BIGINT.
+
+    DuckDB calls the INTEGER variant for an INTEGER argument and the BIGINT variant for a BIGINT argument.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
@@ -3282,7 +3386,7 @@ def test_aggregate_function_set_overloads():
     ducklib.duckdb_destroy_result(result.ctypes.data)
 
 
-    # Integer input variant (reuses existing agg callbacks)
+    # Integer input variant, with the callbacks of test_aggregate_function_round_trip
     int_func_p = ducklib.duckdb_create_aggregate_function()
     ducklib.duckdb_aggregate_function_set_name(
         int_func_p, get_unicode_data_p("my_sum2"))
@@ -3403,7 +3507,7 @@ def _isqrt_cb(info, chunk, output):
 
 
 def test_hybrid_jit_udf_on_python_connection():
-    """Register a JIT-compiled UDF on a Python duckdb connection via numbduck."""
+    """Check that SQL on a connection of the duckdb Python package calls a jitted UDF that numbduck registered on it."""
     from numbduck.pybridge import extract_connection_ptr
 
     conn = duckdb.connect()
@@ -3460,7 +3564,7 @@ def _triple_cb(info, chunk, output):
 
 
 def test_jit_udf_vs_python_udf():
-    """Compare JIT UDF registered via numbduck C API with a pure Python UDF."""
+    """Check that a jitted UDF and a Python UDF that triple an integer return the same values for 100 rows."""
     from numbduck.pybridge import extract_connection_ptr
 
     conn = duckdb.connect()
@@ -3526,18 +3630,18 @@ def _bench_square_cb(info, chunk, output):
 
 @pytest.mark.benchmark
 def test_udf_benchmark(capsys):
-    """Benchmark three UDF approaches: Python scalar, Python Arrow, numbduck JIT.
+    """Time x*x with a Python scalar UDF, a Python Arrow UDF and a jitted numbduck UDF, and check that the sums agree.
 
-    Computes x*x at 10K, 100K, and 1M rows. The JIT UDF runs as a raw C
-    function pointer with no Python overhead per invocation, while the Python
-    UDFs round-trip through the interpreter (scalar: per-row, Arrow: per-batch
-    via pyarrow).
+    The test runs over 10,000, 100,000 and 1,000,000 rows. DuckDB calls the jitted UDF through a C function pointer,
+    with no Python code per call. The Python UDFs go through the interpreter: the scalar UDF once per row, and the Arrow
+    UDF once per batch, through pyarrow. conftest.py skips the test unless ``-m`` names ``benchmark``.
 
-    Results (WSL2, Python 3.12, duckdb 1.5.1, numba 0.60):
-        Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
-      10,000     0.749s      0.003s      0.000s     2,095x        7x
-     100,000     7.382s      0.019s      0.001s    13,879x       36x
-   1,000,000   118.835s      0.242s      0.001s   130,568x      266x
+    One run gave these times (WSL2, Python 3.12, duckdb 1.5.1, numba 0.60)::
+
+             Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
+           10,000     0.749s      0.003s      0.000s     2,095x        7x
+          100,000     7.382s      0.019s      0.001s    13,879x       36x
+        1,000,000   118.835s      0.242s      0.001s   130,568x      266x
     """
     import sys
     import time
@@ -3634,48 +3738,34 @@ def test_udf_benchmark(capsys):
                   f"  {arr_ratio:>8s}")
 
 
-# ---- structref <-> raw MemInfo pointer bridge intrinsics ----
+# ---- Structrefs kept in DuckDB's state slots as raw MemInfo pointers ----
 #
-# See test_ducklib.md for a full explanation of the DuckDB aggregate
-# lifecycle, the removerefctpass interaction, and why release_meminfo
-# uses NRT_MemInfo_release while the others don't.
+# test_ducklib.md explains the DuckDB aggregate lifecycle, how numba's removerefctpass bears on numbox's MemInfo
+# helpers, and why release_meminfo calls NRT_MemInfo_release while the other helpers do not.
 #
-# The state slot is an 8-byte stretch of memory owned by DuckDB. The
-# initializer writes a MemInfo pointer into it. MemInfo is NRT's handle
-# for memory allocated to store a data structure (structref, array, etc.).
-# NRT manages that memory via a reference count. The initializer bumps
-# the refcount by one so NRT won't free the memory when the callback
+# DuckDB owns each group's state slot, 8 bytes of memory here. The init callback writes a MemInfo pointer into the
+# slot. A MemInfo is the header through which numba's runtime, NRT, manages the memory of a structref or an array with
+# a reference count. The init callback takes one more reference, so NRT does not free the memory when the callback
 # returns and its local variables go out of scope.
 #
-# Reference counting contract:
-#   export_meminfo(s):   +1 incref; returned intp keeps the allocation alive.
-#   borrow_structref():  +1 incref on entry; local decref on scope exit
-#                        balances it. Net zero for the external owner.
-#   release_meminfo(p):  -1 decref; triggers dtor at refcount 0.
+# How numbox's helpers change the count:
+#   export_meminfo(s):   +1; the returned intp keeps the allocation alive.
+#   borrow_structref():  +1 on entry, which numba's release of the local structref after its last use balances, so
+#                        the count held for the slot does not change.
+#   release_meminfo(p):  -1; the destructor runs when the count reaches 0.
 
 
-# WARNING: This intrinsic does not work as intended. It was written to
-# observe intermediate refcount states (e.g. refcount==2 while both a
-# local structref and an exported MemInfo pointer are live in the same
-# @njit scope). The idea was that reading refcount from JIT code would
-# let the test assert the full 1→2→1→2→1→0 ladder at each step.
+# The intrinsic commented out below reads a MemInfo's reference count from jitted code, and it cannot check the counts
+# step by step. It reads 1 inside the @njit function that exports a structref, never the 2 that the local structref
+# and the exported pointer hold together. numba releases a local immediately after its last use, so a structref whose
+# last use is the export has already dropped its reference when the count is read. If the structref stays in use,
+# numba's reference-count pruning pass removes the export's increment together with the local's later decrement. With
+# that pass off (NUMBA_LLVM_REFPRUNE_PASS=0), the read returns 2 on numba 0.65.1. Either way the net change is zero,
+# and the object stays alive. numba's removerefctpass has no effect here: it does not run in a function that calls a
+# structref constructor, because numba counts the references of the constructor's result.
 #
-# It fails because of removerefctpass (numba/core/lowering.py L207-210).
-# That pass checks whether the function's args and return type involve
-# NRT-tracked types. If they don't (and our bridge functions return
-# plain intp, not structrefs), it strips ALL NRT_incref/NRT_decref calls
-# from the function. So by the time this intrinsic reads the refcount,
-# the incref from export_meminfo has already been removed by the pass.
-# The refcount reads 1 (initial allocation), not 2.
-#
-# The test still works because the stripping is symmetric: the export's
-# incref AND the local variable's scope-exit decref are both removed,
-# so the net refcount change is zero and the object survives correctly.
-# But the intermediate refcount==2 state never actually exists at runtime.
-#
-# Python-side _read_refcount() between separate @njit calls is the only
-# way to verify post-scope-exit refcounts, which is what the ladder test
-# does. This intrinsic is preserved as a cautionary example.
+# The two tests below whose names end in refcount_ladder therefore read the count from Python, with _read_refcount,
+# between separate @njit calls. The intrinsic stays here, commented out, as an example of a check that cannot work.
 # @intrinsic
 # def _refcount_of_meminfo(typingctx, p_ty):
 #     """Read MemInfo refcount from JIT code. MemInfo.refct is the first field."""
@@ -3744,15 +3834,15 @@ welford_type = WelfordStateType(
 
 
 def _read_refcount(meminfo_intp):
-    """Read NRT MemInfo refcount from Python via ctypes.
+    """Return the reference count of the MemInfo at the address ``meminfo_intp``, read from Python with ctypes.
 
-    MemInfo.refct is the first field (size_t), stable since numba 0.50.
-    See numba/core/runtime/nrt.cpp.
+    ``refct``, a ``size_t``, is the first field of numba's MemInfo structure, and has been since numba 0.50. The
+    structure is defined in numba/core/runtime/nrt.cpp.
     """
     return int(ctypes.c_size_t.from_address(meminfo_intp).value)
 
 
-# ---- Heap-owning structref (for nested-dtor test) ----
+# ---- A structref that owns heap memory, for the test of its destructor ----
 
 @structref.register
 class _HeapStateType(nb_types.StructRef):
@@ -3772,10 +3862,10 @@ _heap_state_type = _HeapStateType(
 
 
 def test_structref_meminfo_bridge_refcount_ladder():
-    """Prove export/borrow/release maintain refcount invariants step by step.
+    """Check, step by step, the reference count that export, borrow and release leave on a structref's MemInfo.
 
-    Each njit function is its own scope so numba's decref fires on return,
-    giving us clean refcount readings from Python between calls.
+    Each step runs in an @njit function of its own. numba has released the function's local references when it
+    returns, so Python reads the count between the calls.
     """
 
     @njit
@@ -3793,16 +3883,16 @@ def test_structref_meminfo_bridge_refcount_ladder():
     def _do_release(p):
         release_meminfo(p)
 
-    # See refcount_of_meminfo above for why in-scope refcount==2 checks
-    # don't work. We verify via Python-side _read_refcount between calls.
+    # The comment above the commented-out refcount_of_meminfo explains why jitted code cannot read the count of 2
+    # inside a step, so Python reads the count between the steps.
 
-    # Step 1: allocate + export. After return, refcount == 1.
+    # Step 1: allocate and export. After the return, the count is 1, the reference that the export took.
     p = _allocate_and_export()
     assert p != 0, "export_meminfo returned null"
     rc = _read_refcount(p)
     assert rc == 1, f"expected refcount 1 after export+local-drop, got {rc}"
 
-    # Step 2: borrow + read. After return, refcount still 1.
+    # Step 2: borrow and read the fields. The borrow's reference ends with the function, so the count is still 1.
     mean, count, m2 = _borrow_and_read(p)
     assert mean == 1.5, f"mean={mean}"
     assert count == 2, f"count={count}"
@@ -3810,21 +3900,19 @@ def test_structref_meminfo_bridge_refcount_ladder():
     rc = _read_refcount(p)
     assert rc == 1, f"expected refcount 1 after borrow-drop, got {rc}"
 
-    # Step 3: release the slot's reference. refcount → 0, dtor runs.
+    # Step 3: release the exported reference. The count drops to 0, and the destructor runs.
     _do_release(p)
 
 
 def test_array_meminfo_bridge_refcount_ladder():
-    """Array bridge using inline incref + carray access.
+    """Check that an array exported by its allocating function stays alive with a count of 1 and can be read back.
 
-    Unlike structrefs, arrays allocate via NRT_MemInfo_alloc in the same
-    function body. This disables removerefctpass, so both the manual incref
-    AND the scope-exit decref survive. Net: +1 -1 = 0 on top of the initial
-    refcount of 1 from allocation. The memory stays alive.
-
-    The incref MUST be done via the @intrinsic _incref_meminfo (which inlines)
-    rather than the @njit export_meminfo wrapper (separate compilation unit
-    where removerefctpass WOULD strip it).
+    The allocating function takes the extra reference with numbox's ``_incref_meminfo`` intrinsic, and a second
+    function reads the data back through ``carray``. numba's removerefctpass does not run in the allocating function,
+    because the array's allocation calls an NRT allocation function there, so the pass leaves the increment in place.
+    The increment and the release of the local array when the function returns cancel out, which leaves the
+    allocation's count of 1. ``export_meminfo(arr)`` would take the reference as well: with numbox 0.7.8 and later,
+    ``_incref_meminfo`` keeps removerefctpass from removing the increment inside ``export_meminfo`` too.
     """
 
     @njit
@@ -3860,16 +3948,14 @@ def test_array_meminfo_bridge_refcount_ladder():
     _do_release(meminfo_p)
 
 
-# ---- Array-backed variance UDAF callbacks for DuckDB ----
+# ---- Callbacks of the array-backed variance UDAF ----
 #
-# Demonstrates the array bridge pattern: state is a numpy array instead
-# of a structref. state_size=16 stores two intp values: meminfo_p (for
-# lifecycle) and data_p (for carray access). The incref is done via the
-# @intrinsic _incref_meminfo directly in the allocating function so it
-# inlines; removerefctpass is already disabled there because numpy.zeros
-# generates NRT_MemInfo_alloc*.
-#
-# State layout: float64 array of 3 elements [sum, sum_sq, count].
+# This UDAF keeps its state in a numpy array instead of a structref: three float64 values, the sum, the sum of squares
+# and the count. Each group's 16-byte state slot holds two intp values. The first is the address of the array's
+# MemInfo, for the destroy callback to release. The second is the address of the array's data, for the other callbacks
+# to read and write through carray. The init callback takes the reference with numbox's _incref_meminfo intrinsic,
+# which numba inlines into the function that allocates the array. numba's removerefctpass does not run in that
+# function, because numpy.zeros calls an NRT allocation function there.
 
 _ARR_STATE_SLOTS = 2  # meminfo_p, data_p
 _ARR_STATE_ELEMS = 3  # sum, sum_sq, count
@@ -4017,7 +4103,7 @@ def welford_update(s, x):
 
 @njit
 def welford_combine(src, tgt):
-    """Merge src into tgt in place. Chan et al. pairwise formula."""
+    """Merge the Welford state ``src`` into ``tgt`` in place, with the pairwise formula of Chan et al."""
     if src.count == 0:
         return
     if tgt.count == 0:
@@ -4067,8 +4153,8 @@ def _welford_init_cb(info, state):
     _welford_init_impl(info, state)
 
 
-# NOTE: skips NULL validity checks; test data has no NULLs.
-# Production use must call duckdb_vector_get_validity() and check bits.
+# The update reads every row as valid, without the validity mask, because the test data holds no NULL. A UDAF for
+# real data must read the mask with duckdb_vector_get_validity and skip the NULL rows.
 @njit
 def _welford_update_impl(info, chunk, states):
     n = ducklib.duckdb_data_chunk_get_size(chunk)
@@ -4149,7 +4235,10 @@ def _welford_destroy_cb(states, count):
 
 
 def test_welford_numba_only():
-    """Verify Welford ops match numpy.std(ddof=1) without DuckDB."""
+    """Check, without DuckDB, that the Welford update, combine and finalize match ``numpy.std`` with ``ddof=1``.
+
+    The test also checks the combined mean, and that a single value gives NaN.
+    """
 
     @njit
     def _compute_serial(xs):
@@ -4188,7 +4277,11 @@ def test_welford_numba_only():
 
 
 def test_structref_meminfo_bridge_nested_heap():
-    """Prove release_meminfo cascades dtor into heap-owning fields."""
+    """Check that release_meminfo runs the destructor of a structref that owns heap memory, freeing its typed List too.
+
+    numba's runtime counts its allocations and frees. One warm-up cycle of export and release measures the allocations
+    of a cycle, and 100 more cycles must allocate and free exactly 100 times as much.
+    """
     from numba.core.runtime import _nrt_python as _nrt
     _nrt.memsys_enable_stats()
     from numba.core.runtime.nrt import rtsys
@@ -4206,7 +4299,7 @@ def test_structref_meminfo_bridge_nested_heap():
     def _release(p):
         release_meminfo(p)
 
-    # Warmup: single cycle to measure per-cycle alloc delta
+    # One warm-up cycle measures the allocations of a cycle.
     stats_before_warmup = rtsys.get_allocation_stats()
     p = _alloc_and_export()
     _release(p)
@@ -4219,7 +4312,7 @@ def test_structref_meminfo_bridge_nested_heap():
     assert warmup_alloc == warmup_free, (
         f"warmup leak: alloc={warmup_alloc}, free={warmup_free}")
 
-    # 100 cycles: exact multiple of warmup
+    # 100 more cycles must allocate and free exactly 100 times as much as the warm-up.
     N = 100
     stats_before = rtsys.get_allocation_stats()
     for _ in range(N):
@@ -4236,7 +4329,11 @@ def test_structref_meminfo_bridge_nested_heap():
 
 
 def test_aggregate_function_structref_stddev():
-    """End-to-end: structref-backed Welford stddev UDAF in DuckDB."""
+    """Check that the structref-backed Welford UDAF computes the sample standard deviation in DuckDB.
+
+    The test also checks that numba's runtime frees as many blocks as it allocates, from the query to the close of the
+    database.
+    """
     from numba.core.runtime import _nrt_python as _nrt
     _nrt.memsys_enable_stats()
     from numba.core.runtime.nrt import rtsys
@@ -4313,11 +4410,11 @@ def test_aggregate_function_structref_stddev():
 
 
 def test_aggregate_function_array_variance():
-    """End-to-end: array-backed population variance UDAF in DuckDB.
+    """Check that the array-backed UDAF computes the population variance in DuckDB, with no NRT allocation left over.
 
-    Mirrors test_aggregate_function_structref_stddev but uses a numpy array
-    for state instead of a structref. state_size=16 stores meminfo_p + data_p.
-    Demonstrates the inline incref + carray access pattern.
+    The test repeats the steps of test_aggregate_function_structref_stddev, with a numpy array as the state instead of a
+    structref. Each 16-byte state slot holds the address of the array's MemInfo and the address of its data, as the
+    comment above ``_ARR_STATE_SLOTS`` describes.
     """
     from numba.core.runtime import _nrt_python as _nrt
     _nrt.memsys_enable_stats()
@@ -4394,7 +4491,7 @@ def test_aggregate_function_array_variance():
         f"leak: alloc={alloc_delta}, free={free_delta}")
 
 
-# --- Multi-chunk and NULL-aware coverage ---
+# --- UDFs over more than one chunk, and over NULL input ---
 
 STANDARD_VECTOR_SIZE = 2048
 NULL_SENTINEL = -999
@@ -4410,8 +4507,8 @@ def _null_to_sentinel_impl(info, chunk, output):
     in_arr = carray(_cast_int_to_void_p(in_data), (n,), dtype=numpy.int32)
     out_arr = carray(_cast_int_to_void_p(out_data), (n,), dtype=numpy.int32)
     for i in range(n):
-        # A null validity pointer means the vector is all-valid; otherwise bit i
-        # of the mask is the row's validity.
+        # A validity pointer of 0 means that every row of the vector is valid; otherwise row i is valid if bit i of the
+        # mask is set.
         valid = validity_p == 0 or ducklib.duckdb_validity_row_is_valid(
             validity_p, i) != 0
         out_arr[i] = in_arr[i] if valid else NULL_SENTINEL
@@ -4496,17 +4593,18 @@ def _null_count_finalize_cb(info, source, result, count, offset):
 
 @balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_scalar_function_multi_chunk():
-    """Drive a scalar UDF over more than STANDARD_VECTOR_SIZE rows so its
-    callback runs on chunks past the first, then loop duckdb_fetch_chunk to
-    reassemble the multi-chunk result and assert the values straddling the
-    2048-row chunk boundary."""
+    """Check that a scalar UDF returns the right values over 5000 rows, which take more than one chunk of 2048 rows.
+
+    DuckDB calls the callback once for each chunk. The test fetches the result chunk by chunk and checks every value,
+    including the two on each side of the first chunk boundary.
+    """
     n_rows = 5000
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
     result = create_duckdb_result()
-    # Bind the SQL to a name: get_unicode_data_p borrows the str's data pointer,
-    # so a runtime-built string must outlive the duckdb_query call.
+    # get_unicode_data_p returns a pointer into the string without a copy. A string literal lives as long as the code
+    # that holds it, but a string built at run time needs a name that keeps it alive until duckdb_query has read it.
     create_sql = f"CREATE TABLE t_mc AS SELECT range::INTEGER AS v FROM range({n_rows})"
     query_p = get_unicode_data_p(create_sql)
     rc = ducklib.duckdb_query(conn_p, query_p, result.ctypes.data)
@@ -4558,18 +4656,19 @@ def test_scalar_function_multi_chunk():
 
 @balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_aggregate_function_multi_chunk():
-    """Drive a UDAF that produces more than STANDARD_VECTOR_SIZE groups so
-    finalize is called across multiple output chunks, then loop
-    duckdb_fetch_chunk over the grouped result and assert the group sums
-    across the chunk boundaries (grouped output is not guaranteed to fill
-    chunks to STANDARD_VECTOR_SIZE; duckdb 1.3.2 emits 1295-row chunks)."""
+    """Check that a UDAF returns the right sum for each of 5000 groups, whose results take several output chunks.
+
+    DuckDB therefore calls finalize for more than one output chunk. The test fetches the grouped result chunk by chunk
+    and checks every sum, including those of the groups around row 2048. It does not expect full chunks: DuckDB need
+    not fill a chunk of grouped output, and on duckdb 1.3.2 the sizes of the chunks change with the number of threads.
+    """
     n_groups = 5000
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
     result = create_duckdb_result()
-    # get_unicode_data_p borrows the str's data pointer, so hold the runtime-built
-    # SQL in a name until duckdb_query has read it.
+    # A name keeps the SQL built at run time alive until duckdb_query has read it, because get_unicode_data_p does not
+    # copy the string.
     create_sql = (
         "CREATE TABLE t_grp AS SELECT range::INTEGER AS g, "
         f"range::INTEGER AS v FROM range({n_groups})")
@@ -4617,7 +4716,7 @@ def test_aggregate_function_multi_chunk():
     assert sum(chunk_sizes) == n_groups, chunk_sizes
     assert len(chunk_sizes) >= 2, "expected a multi-chunk result"
     assert all(s <= STANDARD_VECTOR_SIZE for s in chunk_sizes), chunk_sizes
-    # each singleton group g has my_sum(v) == g
+    # Each group g holds the one row v = g, so mc_sum(v) is g.
     assert sums == list(range(n_groups))
     assert sums[STANDARD_VECTOR_SIZE - 1] == STANDARD_VECTOR_SIZE - 1
     assert sums[STANDARD_VECTOR_SIZE] == STANDARD_VECTOR_SIZE
@@ -4628,10 +4727,12 @@ def test_aggregate_function_multi_chunk():
 
 @balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_scalar_function_null_aware():
-    """A scalar UDF over a NULL-containing column. Special handling passes the
-    NULL rows to the callback, which reads duckdb_vector_get_validity and maps
-    them to a sentinel; a validity-blind callback would return the NULL rows'
-    (arbitrary) storage instead."""
+    """Check that a scalar UDF that reads the validity mask maps a column's NULL rows to a sentinel.
+
+    DuckDB passes a column's NULL rows to the callback with or without special handling; special handling also makes
+    DuckDB call the function for a constant NULL argument. The callback reads the mask with
+    ``duckdb_vector_get_validity``. A callback that ignored the mask would return whatever the NULL rows' storage holds.
+    """
     inputs = [1, None, 3, None, 5]
     expected = sorted(NULL_SENTINEL if x is None else x for x in inputs)
     duckdb_database, duckdb_connection = aux_connect_db()
@@ -4679,10 +4780,12 @@ def test_scalar_function_null_aware():
 
 @balanced(RESULT_FAMILY, CHUNK_FAMILY)
 def test_aggregate_function_null_aware():
-    """A UDAF over a NULL-containing column. Special handling passes the NULL
-    rows to update, which reads duckdb_vector_get_validity and counts only the
-    valid rows; the result matches DuckDB's NULL-ignoring count(v), whereas a
-    validity-blind update would instead count every row (count(*))."""
+    """Check that a UDAF's update skips a column's NULL rows by the validity mask.
+
+    DuckDB passes a column's NULL rows to update with or without special handling. The UDAF counts the valid rows, so
+    its result must equal DuckDB's ``count(v)``, which ignores NULL. An update that ignored the mask would count every
+    row, as ``count(*)`` does.
+    """
     duckdb_database, duckdb_connection = aux_connect_db()
     conn_p = duckdb_connection[0]
 
@@ -4741,11 +4844,11 @@ def test_aggregate_function_null_aware():
 
 
 def test_load_duckdb_refuses_version_mismatch(monkeypatch):
-    """The standalone-fallback loader refuses a libduckdb whose version differs.
+    """Check that load_duckdb refuses a standalone libduckdb whose version differs from the duckdb wheel's.
 
-    Simulates the macOS dual-runtime seam on any platform: force the wheel to
-    look symbol-less, hand back a standalone libduckdb whose reported version
-    disagrees with the installed duckdb wheel, and assert load_duckdb refuses.
+    load_duckdb loads a standalone libduckdb when the wheel's library does not export the C API, as on macOS, and the
+    process then holds two DuckDB runtimes. The test fakes that case on any platform: the wheel's library seems to lack
+    the C API, and the standalone library reports the version 9.9.9.
     """
     from numbduck import utils
 
@@ -4788,19 +4891,21 @@ print("GLOBAL", hasattr(ctypes.CDLL(None), "duckdb_open"))
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the process-wide symbol scope through dlopen(NULL)")
 def test_refused_standalone_libduckdb_stays_out_of_the_global_symbol_scope(tmp_path):
-    """A standalone libduckdb the version check refuses must not have entered the
-    process-wide symbol scope. numbox resolves every JIT call by name through that
-    scope, first definition wins, and a loaded library is never unloaded, so a
-    refused build left there keeps serving the JIT after a later candidate passes.
+    """Check that a standalone libduckdb that the version check refuses never enters the process-wide symbol scope.
 
-    Runs in a subprocess: it simulates a wheel without the C API (libm stands in)
-    and offers the wheel's own libduckdb as the standalone, refused because the
-    wheel's version is faked, then asks dlopen(NULL) whether duckdb_open is visible.
+    numbox resolves every call from jitted code by name in that scope, where the first definition of a name takes
+    precedence, and a loaded library is never unloaded. A refused library left there would receive the jitted calls
+    even after a later candidate passed the check.
+
+    The test runs in a child process. The child uses libm, which lacks the C API, as the wheel's library, and offers the
+    wheel's own libduckdb as the standalone library; the check refuses it because the child fakes the wheel's version.
+    The child then checks, through dlopen(NULL), whether duckdb_open is visible.
     """
     env = dict(os.environ)
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env["PYTHONPATH"] = os.pathsep.join(
         [repo_root, env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    # With HOME in a temporary directory, the child's loader sees an empty numbduck cache instead of the user's.
     env["HOME"] = str(tmp_path)
     proc = subprocess.run(
         [sys.executable, "-c", _REFUSED_STANDALONE_SCRIPT],
@@ -4814,7 +4919,7 @@ def test_refused_standalone_libduckdb_stays_out_of_the_global_symbol_scope(tmp_p
 
 
 def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
-    """pybridge refuses to extract a Connection* when runtimes are uncoordinated."""
+    """Check that extract_connection_ptr raises RuntimeError when numbduck's libduckdb and the duckdb wheel's differ."""
     from numbduck import pybridge
 
     monkeypatch.setattr(pybridge, "libraries_coordinated", lambda: False)
@@ -4829,11 +4934,12 @@ def test_pybridge_refuses_uncoordinated_runtime(monkeypatch):
 
 
 def test_non_ascii_text_reaches_duckdb_as_utf8(tmp_path):
-    """The C API reads every char* as NUL-terminated UTF-8. numbox's
-    get_unicode_data_p hands over CPython's internal storage instead (Latin-1,
-    UCS-2 or UCS-4), which is UTF-8 only for ASCII text. numbox's c_string
-    encodes the text, and is what the examples pass. A path, an identifier and a
-    bound value that are not ASCII all arrive intact through it."""
+    """Check that a path, an identifier and a bound value that are not ASCII reach DuckDB intact through ``c_string``.
+
+    The C API reads every ``char*`` as UTF-8 that ends with a NUL. numbox's ``get_unicode_data_p`` passes CPython's own
+    storage of the string instead, in Latin-1, UCS-2 or UCS-4, which is UTF-8 only for ASCII text. numbox's
+    ``c_string`` makes a UTF-8 copy, and the examples pass that.
+    """
     from numbox.utils.cstrings import c_string
 
     path = str(tmp_path / "data_€.duckdb")
@@ -4864,10 +4970,11 @@ def test_non_ascii_text_reaches_duckdb_as_utf8(tmp_path):
 
 
 def test_pybridge_closed_connection_raises_runtime_error():
-    """A closed connection resets its unique_ptr<Connection> to null, so the
-    documented offset yields a null pointer. extract_connection_ptr must raise a
-    clean RuntimeError there rather than pass the null on to duckdb_query (an
-    opaque numba TypeError or a NULL-connection dereference).
+    """Check that extract_connection_ptr raises RuntimeError for a closed connection instead of returning a null.
+
+    Closing a connection resets its ``unique_ptr<Connection>`` to null, so the pointer at the offset that pybridge reads
+    is null. If that pointer were passed on to ``duckdb_query``, it would cause an opaque numba TypeError or crash the
+    process on the null connection.
     """
     from numbduck.pybridge import extract_connection_ptr
 
@@ -4878,9 +4985,10 @@ def test_pybridge_closed_connection_raises_runtime_error():
 
 
 def test_extract_connection_ptr_leaves_pending_result_intact():
-    """Extracting the pointer runs nothing on the connection. A query issued
-    through it would close the result the connection is still streaming, and
-    every later fetch of that result would come back short without an error.
+    """Check that extracting the pointer runs nothing on the connection, so a result it is streaming stays complete.
+
+    A query issued on the connection would close that result, and every later fetch of it would return too few rows
+    without an error.
     """
     from numbduck.pybridge import extract_connection_ptr
 
@@ -4894,9 +5002,10 @@ def test_extract_connection_ptr_leaves_pending_result_intact():
 
 
 def test_extract_connection_ptr_inside_an_aborted_transaction():
-    """A connection whose transaction has failed still holds a valid Connection*,
-    so extraction succeeds there, and the transaction's own error stays the
-    caller's to see.
+    """Check that the extraction works on a connection whose transaction has failed, and leaves the failure visible.
+
+    Such a connection still holds a valid ``Connection*``. The next query on it still raises the aborted transaction's
+    error, for the caller to handle.
     """
     from numbduck.pybridge import extract_connection_ptr
 
@@ -4913,9 +5022,10 @@ def test_extract_connection_ptr_inside_an_aborted_transaction():
 
 
 def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
-    """A standalone libduckdb whose version cannot be read is refused rather than
-    loaded unverified. Otherwise it surfaces later as a confusing 'libduckdb
-    None' coordination error. No network.
+    """Check that load_duckdb refuses a standalone libduckdb whose version it cannot read, instead of loading it.
+
+    A library loaded without a version would fail later, with a coordination error that names libduckdb None. The test
+    uses no network.
     """
     from numbduck import utils
 
@@ -4938,12 +5048,10 @@ def test_load_duckdb_refuses_unverifiable_standalone_version(monkeypatch):
 
 
 def test_load_duckdb_refuses_dev_suffix_same_base(monkeypatch):
-    """A standalone dev build is refused even when it shares the release's base.
+    """Check that load_duckdb refuses a standalone dev build whose version shares the release's ``X.Y.Z``.
 
-    The coordination check compares the full library version, never a stripped
-    ``X.Y.Z``, so a ``.dev``/``rc`` build (a different commit with a possibly
-    different Connection layout) never passes as the release that shares its
-    base. Pins that we do not "normalize out" the suffix.
+    The check compares the full library version, suffix included, and never strips it to ``X.Y.Z``. A dev or rc build
+    comes from another commit, whose Connection layout may differ, so the check must not accept it as the release.
     """
     from numbduck import utils
 
@@ -4967,11 +5075,11 @@ def test_load_duckdb_refuses_dev_suffix_same_base(monkeypatch):
 
 
 def test_libraries_coordinated_compares_library_version_not_package(monkeypatch):
-    """Coordination compares the wheel's own library version (PRAGMA version),
-    not ``duckdb.__version__``. A dev build whose library version matches the
-    standalone's is coordinated even though the Python package version uses a
-    different pre-release scheme. This is the pairing the old package-version
-    compare wrongly refused. A differing library version still fails closed.
+    """Check that libraries_coordinated compares library versions, as PRAGMA version reports them, not the package's.
+
+    A dev build whose library version matches the standalone library's counts as coordinated, although the Python
+    package writes its pre-release version in another scheme. A comparison with ``duckdb.__version__`` would return
+    False for that pair. A library version that differs still counts as not coordinated.
     """
     from numbduck import utils
 
@@ -4984,9 +5092,10 @@ def test_libraries_coordinated_compares_library_version_not_package(monkeypatch)
 
 
 def test_wheel_library_version_reads_pragma_version():
-    """_wheel_library_version reports the wheel's own library version from
-    PRAGMA version (normalized): the like-for-like counterpart to a standalone's
-    duckdb_library_version().
+    """Check that _wheel_library_version returns the version that PRAGMA version reports, without its leading ``v``.
+
+    A standalone library's ``duckdb_library_version()`` reports its version in the same scheme, so the two compare
+    directly.
     """
     from numbduck import utils
 
@@ -4995,8 +5104,9 @@ def test_wheel_library_version_reads_pragma_version():
 
 
 def test_non_darwin_capi_error_uses_platform_extension(monkeypatch):
-    """The non-macOS C-API-missing guidance names the platform's own library
-    extension (.dll on Windows, .so elsewhere), not a hard-coded .so.
+    """Check that the error for a wheel without the C API, off macOS, names the platform's library file.
+
+    The message names libduckdb.dll on Windows and libduckdb.so on other platforms.
     """
     from numbduck import utils
 
@@ -5008,10 +5118,9 @@ def test_non_darwin_capi_error_uses_platform_extension(monkeypatch):
 
 
 def _build_fake_libduckdb_zip(tmp_path):
-    """Write a ZIP holding a fake libduckdb.dylib under a tmp dir.
+    """Write a ZIP archive holding a fake libduckdb.dylib into ``tmp_path``; return its path and the dylib's bytes.
 
-    Returns (zip_path, dylib_bytes) for driving _fetch_and_cache against a local
-    file:// archive.
+    The tests pass the archive to ``_fetch_and_cache`` as a file:// URL.
     """
     import io
     import zipfile
@@ -5026,8 +5135,10 @@ def _build_fake_libduckdb_zip(tmp_path):
 
 
 def test_fetch_and_cache_local_zip_roundtrip(tmp_path):
-    """Drive _fetch_and_cache end-to-end against a local file:// archive: it must
-    extract the dylib and atomically write it to the cache path. No network.
+    """Check that ``_fetch_and_cache`` extracts the dylib from a local file:// archive and writes it to the cache path.
+
+    ``_fetch_and_cache`` writes the file atomically, under a temporary name that it then renames. The test uses no
+    network.
     """
     from numbduck import utils
 
@@ -5042,9 +5153,11 @@ def test_fetch_and_cache_local_zip_roundtrip(tmp_path):
 
 @pytest.mark.parametrize("headless_mode", ["non_tty", "eof"])
 def test_download_consent_headless_raises_branded(monkeypatch, headless_mode):
-    """A headless import (stdin not a TTY, or input hitting EOF) gets the branded
-    instructional RuntimeError naming NUMBDUCK_LIBDUCKDB_DOWNLOAD=1,
-    NUMBDUCK_LIBDUCKDB, and brew, instead of a raw EOFError. No network.
+    """Check that a headless import raises numbduck's RuntimeError with instructions, instead of an EOFError.
+
+    An import is headless when stdin is not a terminal, or when the consent prompt reaches the end of stdin. The message
+    names ``NUMBDUCK_LIBDUCKDB_DOWNLOAD=1``, ``NUMBDUCK_LIBDUCKDB`` and brew. The test fails if any code calls
+    ``urllib.request.urlopen``.
     """
     from numbduck import utils
 
@@ -5082,10 +5195,10 @@ def test_download_consent_headless_raises_branded(monkeypatch, headless_mode):
 
 @pytest.mark.parametrize("env_configured", [False, True])
 def test_load_duckdb_non_darwin_message(monkeypatch, env_configured):
-    """On a non-macOS platform with a symbol-less wheel and no standalone lib,
-    load_duckdb names the macOS-only download asymmetry and distinguishes an
-    unset NUMBDUCK_LIBDUCKDB from one set to a missing path (echoing it). No
-    network.
+    """Check the error that load_duckdb raises off macOS for a wheel without the C API and no standalone library.
+
+    The message says that the automatic download exists only on macOS. It tells an unset ``NUMBDUCK_LIBDUCKDB`` apart
+    from one set to a missing path, and repeats that path. The test uses no network.
     """
     from numbduck import utils
 
@@ -5113,12 +5226,11 @@ def test_load_duckdb_non_darwin_message(monkeypatch, env_configured):
 
 
 def _import_irr_example():
-    """Import the IRR UDAF example module (examples/irr.py).
+    """Import examples/irr.py, the IRR UDAF example, as the module ``irr`` and return it.
 
-    The module is imported as ``irr`` (the name examples/run_irr.py also uses),
-    keeping ``IRRStateType.__module__`` stable so numba type inference matches.
-    Importing it also compiles every @cfunc/@njit callback, exercising that the
-    finalize -> irr_bisect chain still builds under numba.
+    ``irr`` is the name that examples/run_irr.py uses, so ``IRRStateType.__module__`` stays the same and numba's type
+    inference matches. The import compiles every @cfunc callback of the example and the @njit functions they call, so
+    it also checks that finalize, with the irr_bisect it calls, still compiles.
     """
     examples_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
@@ -5129,14 +5241,12 @@ def _import_irr_example():
 
 
 def test_irr_bisect_large_magnitude_converges():
-    """IRR is scale-invariant, so scaling the sparse single-cashflow case by
-    1000 (10,000,000 investment / 13,000,000 cashflow at period 12) must yield
-    the same monthly rate as the 10,000 / 13,000 case, and a finite value.
+    """Check that scaling a case by 1000 leaves its monthly IRR finite and unchanged.
 
-    The pre-fix solver only exited on a fixed absolute NPV tolerance, which the
-    residual at the true root cannot reach at large magnitude, so it returned
-    NaN despite full convergence. The bracket-width exit returns the converged
-    rate at every scale.
+    IRR does not depend on the scale of the amounts. An investment of 10,000,000 with 13,000,000 back at period 12 must
+    give the rate of 10,000 with 13,000 back. The solver stops when the bracket of rates is narrower than a fixed width,
+    which works at every scale. A stop on a fixed NPV tolerance could fail for large amounts, because the NPV left at
+    the true root grows with the amounts; such a solver would return NaN after it had converged.
     """
     irr = _import_irr_example()
     periods = numpy.array([12.0], dtype=numpy.float64)
@@ -5156,9 +5266,10 @@ def test_irr_bisect_large_magnitude_converges():
 
 
 def test_irr_bisect_out_of_bracket_sentinel():
-    """A root outside [-0.99, 10.0] leaves NPV the same sign at both bracket
-    ends; the solver returns the IRR_NO_BRACKET sentinel (+inf), which is
-    distinct from the NaN the finalize step emits for an empty group.
+    """Check that a root outside the bracket [-0.99, 10.0] gives the IRR_NO_BRACKET sentinel, +inf, and not NaN.
+
+    NPV then has the same sign at both ends of the bracket. +inf keeps the result apart from the NaN that finalize
+    returns for an empty group.
     """
     irr = _import_irr_example()
 
@@ -5170,7 +5281,7 @@ def test_irr_bisect_out_of_bracket_sentinel():
     assert high == irr.IRR_NO_BRACKET
     assert not math.isnan(high)
 
-    # Near-total loss, root below -0.99: NPV negative at both bracket ends.
+    # Near-total loss, root below -0.99: NPV is negative at both ends of the bracket.
     low = irr.irr_bisect(
         numpy.array([1.0], dtype=numpy.float64),
         numpy.array([1.0], dtype=numpy.float64), 1, 1000.0, 0.0)
@@ -5179,16 +5290,15 @@ def test_irr_bisect_out_of_bracket_sentinel():
 
 
 def test_irr_bisect_financing_direction_converges():
-    """A financing-direction stream -- cash received up front, repaid later --
-    makes NPV increase in r (npv_lo < 0 < npv_hi) instead of decrease, yet it
-    still changes sign exactly once inside the bracket. The solver must follow
-    the sign change to that root rather than walk the bracket the wrong way to
-    an endpoint (which would fabricate a ~10.0 rate).
+    """Check that the solver finds the root of a financing stream, in which cash arrives first and is repaid later.
+
+    NPV then rises with r instead of falling: it is negative at -0.99 and positive at 10.0, and it still changes sign
+    once inside the bracket. A solver that assumed a falling NPV would move toward an end of the bracket and return a
+    rate near 10.0.
     """
     irr = _import_irr_example()
-    # Receive 1000 now (investment = -1000), repay 1300 at month 12:
-    # NPV(r) = 1000 - 1300 / (1 + r)^12 -- negative at r=-0.99, positive at
-    # r=10, with its single root at (1300/1000)^(1/12) - 1.
+    # Receive 1000 now (investment = -1000) and repay 1300 at month 12. NPV(r) = 1000 - 1300 / (1 + r)^12 is negative
+    # at r=-0.99 and positive at r=10, with its single root at (1300/1000)^(1/12) - 1.
     rate = irr.irr_bisect(
         numpy.array([-1300.0], dtype=numpy.float64),
         numpy.array([12.0], dtype=numpy.float64), 1, -1000.0, 0.0)
@@ -5199,11 +5309,12 @@ def test_irr_bisect_financing_direction_converges():
 
 
 def test_irr_bisect_large_period_converges():
-    """At r=-0.99 the discount factor (1+r)**period underflows to 0.0 for
-    period >= ~162; numba's default 'python' error model would raise
-    ZeroDivisionError on the divide, which finalize turns into the empty-group
-    NaN -- misreporting a valid group as "no data". error_model="numpy" yields
-    +inf there instead, so the solver still converges on the true rate.
+    """Check that the solver converges on the true rate for a cashflow at period 200.
+
+    At r = -0.99, the lower end of the bracket, the discount factor (1 + r)**period underflows to 0.0 for a period of
+    162 or more. An NPV computed directly would divide by that 0.0, which raises ZeroDivisionError under numba's default
+    error model. The finalize callback would then report the valid group as NaN, the result of an empty group. The
+    solver evaluates only the sign of NPV, in log space, and never divides by the discount factor.
     """
     irr = _import_irr_example()
     rate = irr.irr_bisect(
@@ -5215,9 +5326,10 @@ def test_irr_bisect_large_period_converges():
 
 
 def test_irr_bisect_nan_input_returns_nan():
-    """A NaN cashflow is a legal DOUBLE (not SQL NULL), so it reaches the solver
-    and makes an endpoint NaN. It must return the empty-group NaN, not the +inf
-    out-of-bracket sentinel a caller reads as "root above the bracket".
+    """Check that a NaN cashflow gives NaN, the result of an empty group, and not the +inf sentinel.
+
+    A NaN is a legal DOUBLE, not a SQL NULL, so it reaches the solver and makes the sign at an end of the bracket NaN.
+    A result of +inf would mean that the bracket holds no single root.
     """
     irr = _import_irr_example()
     rate = irr.irr_bisect(
@@ -5227,11 +5339,11 @@ def test_irr_bisect_nan_input_returns_nan():
 
 
 def test_irr_bisect_zero_cashflow_far_period_matches():
-    """A zero cashflow at a far period (>= 162) contributes nothing to NPV at
-    any rate, so a fully valid group plus one such row must return the SAME root
-    as the group without it. A raw NPV at r=-0.99 instead evaluates 0.0 * inf =
-    NaN there (the discount factor underflows to 0.0 for period >= ~162), so the
-    old solver misreported the valid group as the empty-group NaN.
+    """Check that a zero cashflow at period 200 leaves the root unchanged.
+
+    A zero cashflow adds nothing to NPV at any rate, so the group with it must return the same root as the group
+    without it. At r = -0.99, (1 + r)**-200 overflows to inf, and an NPV computed directly would multiply the zero by
+    inf and get NaN, the result of an empty group. The solver skips zero cashflows when it evaluates the sign.
     """
     irr = _import_irr_example()
     with_zero = irr.irr_bisect(
@@ -5247,13 +5359,13 @@ def test_irr_bisect_zero_cashflow_far_period_matches():
 
 
 def test_irr_bisect_mixed_sign_far_period_converges():
-    """A mixed-sign stream whose opposite-sign cashflows both sit at far periods
-    (>= 162) makes a raw NPV at r=-0.99 evaluate inf + -inf = NaN, which the old
-    solver misreported as the empty-group NaN. The overflow-free sign evaluation
-    keeps both endpoint signs correct, so the single in-bracket root is found.
-    Cross-checked against an exact-rational bisection over the same bracket --
-    Fraction arithmetic never underflows, so it is independent of the solver's
-    floating-point sign trick.
+    """Check that the solver finds the root when cashflows of opposite sign both lie at periods of 162 or more.
+
+    At r = -0.99, an NPV computed directly would add inf and -inf there and get NaN, the result of an empty group. The
+    solver evaluates the sign without overflow, so the sign of NPV at each end of the bracket is correct, and the
+    solver finds the single root inside the bracket. The test compares the rate with a bisection in exact rational
+    arithmetic over the same bracket. Fraction arithmetic never underflows, so the reference does not depend on the
+    solver's floating-point method.
     """
     from fractions import Fraction
     irr = _import_irr_example()
@@ -5284,24 +5396,22 @@ def test_irr_bisect_mixed_sign_far_period_converges():
     assert abs(rate - ref) < 1e-9, (rate, ref)
 
 
-# --- @cfunc exception-guard coverage for structref-backed UDAF callbacks ---
+# --- Exception guards in the callbacks of a structref-backed UDAF ---
 #
-# A Python exception raised from an @njit impl invoked through a @cfunc is
-# swallowed at the C boundary: numba prints it and returns the zero/void default
-# without unwinding into DuckDB. When the raise originates in a nested call while
-# a borrowed structref is still live, numba also skips that borrow's scope-exit
-# decref -- an NRT meminfo leak. A bare try/except inside the impl catches the
-# exception in-frame so the decref runs. These tests pin both halves: an
-# unguarded raise leaks, the guarded form does not.
+# numba does not let a Python exception from an @njit function cross a @cfunc into DuckDB: the @cfunc prints the
+# exception and returns zero, or nothing for a void callback. If the exception comes from a nested call while a
+# borrowed structref is alive, numba also skips the decref that ends the borrow, and the structref's MemInfo leaks. A
+# bare try/except inside the @njit function catches the exception in its own frame, so the decref runs. The tests
+# below check both cases: an unguarded raise leaks, and a guarded one does not.
 
 
 @njit
 def _cfunc_guard_raise(x):
-    """Raise from a nested njit call while the caller holds a live borrow.
+    """Raise ValueError for an input over 0.5, and return the input otherwise.
 
-    Models vector_push -> numpy.empty raising on allocation failure: the raise
-    crosses a call boundary, which is what skips the borrow's decref on an
-    unguarded path (a direct in-frame raise still runs the decref).
+    The callers call it while they hold a borrowed structref, so the raise crosses a call boundary, as a failed
+    allocation does when numbox's vector_push calls numpy.empty. On an unguarded path, numba skips the borrow's decref
+    when the raise crosses a call boundary, and still runs it when the raise is in the caller's own frame.
     """
     if x > 0.5:
         raise ValueError("induced failure inside a UDAF callback")
@@ -5336,7 +5446,7 @@ def _welford_update_raise_guarded_impl(info, chunk, states):
     for i in range(n):
         slot = carray(
             _cast_int_to_void_p(state_slots[i]), (1,), dtype=numpy.intp)
-        # Borrow inside the guard so a raise in the nested call releases it.
+        # The borrow is inside the guard, so numba releases it when the nested call raises.
         try:
             s = borrow_structref(welford_type, slot[0])
             welford_update(s, _cfunc_guard_raise(in_vals[i]))
@@ -5346,8 +5456,11 @@ def _welford_update_raise_guarded_impl(info, chunk, states):
 
 @functools.cache
 def _welford_raise_callbacks():
-    """Compile the raising-update @cfunc probes on first use, keeping their eager
-    compilation out of module import so collection cost stays near base."""
+    """Compile the unguarded and the guarded raising update callbacks on the first call, and return them.
+
+    A @cfunc compiles when it is defined. These are defined inside the function, so importing the module does not
+    compile them, and test collection stays fast.
+    """
 
     @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
     def unguarded_cb(info, chunk, states):
@@ -5361,8 +5474,10 @@ def _welford_raise_callbacks():
 
 
 def _register_raising_welford(conn, name, update_cb):
-    """Register a Welford UDAF that reuses the shared init/combine/finalize/
-    destroy callbacks but swaps in a raising update callback."""
+    """Register on ``conn`` a Welford UDAF named ``name`` whose update callback is ``update_cb``.
+
+    The other callbacks, init, combine, finalize and destroy, are the Welford UDAF's own.
+    """
     from numbduck.pybridge import extract_connection_ptr
 
     conn_p = extract_connection_ptr(conn)
@@ -5386,10 +5501,11 @@ def _register_raising_welford(conn, name, update_cb):
 
 
 def _run_raising_udaf_nrt_delta(update_cb):
-    """Register a Welford UDAF whose update raises via a nested call, drive it
-    over a non-empty table, and return the NRT (alloc - free) delta across the
-    query. The raise is swallowed at the @cfunc boundary, so the query reports
-    success regardless of whether a leak occurred."""
+    """Run a Welford UDAF whose update callback is ``update_cb`` over eight rows, and return the leak and the result.
+
+    The leak is the number of NRT allocations minus the number of frees during the query. The @cfunc catches the
+    exception, so the query succeeds whether or not memory leaked.
+    """
     from numba.core.runtime import _nrt_python as _nrt
     _nrt.memsys_enable_stats()
     from numba.core.runtime.nrt import rtsys
@@ -5408,33 +5524,34 @@ def _run_raising_udaf_nrt_delta(update_cb):
 @pytest.mark.filterwarnings(
     "ignore::pytest.PytestUnraisableExceptionWarning")
 def test_udaf_cfunc_unguarded_raise_leaks_borrowed_state():
-    """Control: without the guard, a raise from a nested call while a borrowed
-    structref is live leaks the borrow's incref -- the C boundary swallows the
-    exception and skips the scope-exit decref. This establishes that the raise
-    is real and consequential, so the guarded assertion below is meaningful.
+    """Check that, without the guard, a raise from a nested call leaks the reference of a borrowed structref.
 
-    The swallow makes numba print the ignored exception, which pytest surfaces
-    as an unraisable-exception warning; it is expected here and filtered."""
+    The @cfunc catches the exception, and numba skips the decref that ends the borrow. This control shows that the
+    raise happens and has an effect, so a leak of zero in the guarded test below comes from the guard.
+
+    numba prints the exception that the @cfunc caught, and pytest reports it as an unraisable-exception warning, which
+    the test's ``filterwarnings`` mark ignores.
+    """
     unguarded_cb, _ = _welford_raise_callbacks()
     leak, _ = _run_raising_udaf_nrt_delta(unguarded_cb)
     assert leak > 0, f"expected an NRT leak without the guard, got delta {leak}"
 
 
 def test_udaf_cfunc_guarded_raise_no_leak():
-    """A bare try/except around the borrow and its nested raising call catches
-    the exception in-frame, so numba runs the borrow's decref: NRT alloc == free
-    even though every row's update raises. This is the guard the example
-    aggregate callbacks use."""
+    """Check that a bare try/except around the borrow and the raising call keeps the borrow from leaking.
+
+    numba runs the borrow's decref when the exception is caught in the same frame, so NRT allocates and frees the same
+    number of blocks although every row's update raises. The example UDAFs guard their callbacks the same way.
+    """
     _, guarded_cb = _welford_raise_callbacks()
     leak, value = _run_raising_udaf_nrt_delta(guarded_cb)
     assert leak == 0, f"guarded raise must not leak, got NRT delta {leak}"
-    # Every row's update raised, so the guard dropped them all: the Welford
-    # finalize sees an empty state and yields no real number. This pins that the
-    # induced raise actually fired -- otherwise the result would be a stddev.
+    # Every row's update raised, so the guard skipped every row. finalize sees an empty state, and the result is NULL
+    # or NaN. Without the raise, the result would be a standard deviation.
     assert value is None or math.isnan(value), value
 
 
-# ---- Merge-counter UDAF: proves DuckDB invokes the C-API combine callback ----
+# ---- A merge-counting UDAF, which shows whether DuckDB calls the combine callback ----
 
 @structref.register
 class _MergeStateType(nb_types.StructRef):
@@ -5442,12 +5559,11 @@ class _MergeStateType(nb_types.StructRef):
 
 
 _merge_state_fields = [("total", nb_types.float64), ("merges", nb_types.int64)]
-# cache=False keeps numbox's generated structref constructor out of numba's
-# on-disk cache. That cache is keyed by struct name + fields only and resolves
-# _MergeStateType through the module name it was first compiled under, so once it
-# is warm, importing this file under any other qualified name fails type
-# inference (examples/irr.py documents the same trap for IRRState). Disabling the
-# cache has no measurable cost here and keeps the module importable under any name.
+# cache=False keeps the structref constructor that numbox generates out of numba's disk cache. The cache keys the
+# constructor by the struct's name and fields alone, and it resolves _MergeStateType through the module name under
+# which it first compiled. Once the cache is warm, an import of this file under another qualified name fails type
+# inference. IRRState in examples/irr.py is cached, so that module must always be imported under the name irr.
+# Without the cache, this module imports under any name, at no measurable cost.
 _MergeState = make_structref(
     "_MergeState", dict(_merge_state_fields), _MergeStateType,
     jit_options={"cache": False})
@@ -5497,7 +5613,7 @@ def _merge_combine_impl(info, source, target, count):
         src = borrow_structref(merge_state_type, src_slot[0])
         tgt = borrow_structref(merge_state_type, tgt_slot[0])
         tgt.total += src.total
-        # Count each merged partial so finalize can surface whether combine ran.
+        # Count each merged partial state, so that finalize can report whether combine ran.
         tgt.merges += src.merges + 1
 
 
@@ -5530,9 +5646,11 @@ def _merge_destroy_impl(states, count):
 
 @functools.cache
 def _merge_probe_callbacks():
-    """Compile the merge-counter UDAF @cfunc callbacks on first use, keeping their
-    eager compilation out of module import so collection cost stays near base.
-    Returns the six callbacks in DuckDB's callback order."""
+    """Compile the six callbacks of the merge-counting UDAF on the first call, and return them in DuckDB's order.
+
+    The order is state size, init, update, combine, finalize and destroy. The callbacks are defined inside the
+    function, so importing the module does not compile them.
+    """
 
     @cfunc(nb_types.uint64(nb_types.intp))
     def state_size_cb(info):
@@ -5590,12 +5708,13 @@ def _register_merge_probe(conn):
 
 
 def test_irr_example_combine_path_nrt_balanced():
-    """Drive the irr example UDAF under forced parallelism so DuckDB produces
-    multiple partial states and invokes the C-API combine callback, inside an
-    NRT alloc==free region, and assert the aggregate is still correct. A sibling
-    merge-counter UDAF proves that this configuration actually triggers combine
-    on this DuckDB build -- correctness alone cannot, since a single-partition
-    plan would be correct too."""
+    """Check that the IRR UDAF returns the right rate, without an NRT leak, when DuckDB merges partial states.
+
+    PRAGMA verify_parallelism makes DuckDB build several partial states and merge them with the combine callback. A
+    correct rate alone does not show that combine ran, because a plan with one partition would be correct too. A
+    merge-counting UDAF therefore first checks that the installed DuckDB calls combine under the pragma. Both queries
+    must free every NRT block they allocate.
+    """
     from numba.core.runtime import _nrt_python as _nrt
     _nrt.memsys_enable_stats()
     from numba.core.runtime.nrt import rtsys
@@ -5603,9 +5722,9 @@ def test_irr_example_combine_path_nrt_balanced():
     irr = _import_irr_example()
 
     conn = duckdb.connect()
-    # PRAGMA verify_parallelism forces the parallel aggregate path even for tiny
-    # inputs on duckdb 1.5.4, deterministically exercising combine. (SET
-    # verify_parallelism=true is not a recognized parameter -- only the PRAGMA.)
+    # On duckdb 1.5.4, PRAGMA verify_parallelism makes DuckDB take the parallel aggregate path even for very small
+    # inputs, so combine runs every time. SET verify_parallelism=true does not work: DuckDB has no setting of that
+    # name, only the PRAGMA.
     conn.execute("PRAGMA verify_parallelism")
 
     _register_merge_probe(conn)
@@ -5644,8 +5763,10 @@ def test_irr_example_combine_path_nrt_balanced():
 
 
 def _load_examples_common():
-    """Import examples/_common.py (the shared example utilities), using the same
-    examples/ sys.path insertion as _import_irr_example."""
+    """Import examples/_common.py, the helpers that the examples share, and return it.
+
+    Like _import_irr_example, it puts examples/ on sys.path first.
+    """
     examples_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
     if examples_dir not in sys.path:
@@ -5655,22 +5776,23 @@ def _load_examples_common():
 
 
 def test_assert_results_match_both_nan_equal():
-    """Variants that all legitimately produce NaN agree; NaN != NaN under
-    IEEE-754 must not be reported as a spurious mismatch."""
+    """Check that assert_results_match accepts variants that all return NaN, although NaN != NaN in IEEE 754."""
     common = _load_examples_common()
     common.assert_results_match(math.nan, math.nan, label="both nan")
 
 
 def test_assert_results_match_nan_vs_number_fails():
-    """A NaN against a real value is a genuine disagreement and still fails."""
+    """Check that assert_results_match still fails for a NaN against a number."""
     common = _load_examples_common()
     with pytest.raises(AssertionError):
         common.assert_results_match(math.nan, 1.0, label="nan vs number")
 
 
 def test_format_table_wrong_width_row_raises():
-    """A row whose cell count differs from the header count is rejected up front,
-    both when it is too long (would IndexError) and too short (would truncate)."""
+    """Check that format_table raises ValueError for a row whose number of cells differs from the number of headers.
+
+    A longer row would otherwise raise IndexError, and a shorter one would be truncated.
+    """
     common = _load_examples_common()
     headers = ["A", "B"]
     alignments = ["<", "<"]
@@ -5681,7 +5803,7 @@ def test_format_table_wrong_width_row_raises():
 
 
 def test_format_table_renders():
-    """A well-formed table renders one line per header row and data row."""
+    """Check that format_table renders one line for the header and one for each data row."""
     common = _load_examples_common()
     out = common.format_table(
         ["Variant", "Time"],
@@ -5695,11 +5817,10 @@ def test_format_table_renders():
     assert "JIT" in lines[2]
 
 
-# ---- Example UDF/UDAF integration coverage (NULL handling, sentinels, errors) ----
+# ---- The examples' UDFs and UDAFs in DuckDB: NULL input, sentinels and errors ----
 
 def _import_example(name):
-    """Import an examples/ module by name via the same examples/ sys.path
-    insertion the example launchers use."""
+    """Return the module ``name`` of examples/, imported with examples/ on sys.path as the example launchers do."""
     examples_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
     if examples_dir not in sys.path:
@@ -5708,20 +5829,22 @@ def _import_example(name):
 
 
 def test_haversine_udf_nulls_and_antipodal():
-    """hv_jit emits the NaN sentinel for a NULL-input row (validity gating) and
-    clamps a genuine ~2-ULP antipodal overshoot to the half-circumference
-    (~pi*R km) instead of returning NaN from an asin domain overshoot. The
-    per-row Python/Arrow/JIT variants agree on the antipodal and overshoot rows
-    (aligned s*s form); a NaN coordinate surfaces as NaN from hv_jit/hv_arrow
-    and as SQL NULL from hv_py (the scalar-UDF bridge maps its NaN return)."""
+    """Check how the haversine UDFs handle a NULL input, an antipodal pair and a NaN coordinate.
+
+    hv_jit reads the validity masks and writes the NaN sentinel for a row with a NULL input. It clamps ``a`` for an
+    antipodal pair whose ``a`` overshoots 1.0 by about 2 ULP, and returns half the circumference, about pi * R km,
+    instead of the NaN that asin would return. The Python, Arrow and jitted variants agree on the antipodal rows,
+    because they compute ``a`` in the same s*s form. For a NaN coordinate, hv_jit and hv_arrow return NaN. hv_py
+    returns NaN too, but DuckDB's bridge for Python scalar UDFs turns a returned NaN into SQL NULL.
+    """
     hv = _import_example("haversine")
     conn = duckdb.connect()
     conn.create_function("hv_py", hv.haversine_py, ["DOUBLE"] * 4, "DOUBLE")
     variants = ["hv_py", "hv_jit"]
     try:
-        # haversine_arrow imports pyarrow lazily at call time, so probe it
-        # eagerly here: without this, registration succeeds on a pyarrow-less
-        # host and the ImportError surfaces mid-query as a _duckdb.Error.
+        # haversine_arrow imports pyarrow only when DuckDB calls it, so the test imports pyarrow here first. Otherwise
+        # the registration would succeed on a host without pyarrow, and the ImportError would appear in the middle of
+        # the query as a _duckdb.Error.
         import pyarrow.compute  # noqa: F401
         conn.create_function(
             "hv_arrow", hv.haversine_arrow, ["DOUBLE"] * 4, "DOUBLE",
@@ -5730,13 +5853,13 @@ def test_haversine_udf_nulls_and_antipodal():
     except ImportError:
         pass
     hv.register_jit_udf(conn)
-    # Row 3 is a real finite near-antipodal pair whose float64 `a` overshoots 1.0
-    # by ~2 ULP: unclamped, math.asin(sqrt(a)) raises (hv_py) or yields NaN
-    # (hv_jit). Read the UDFs directly off the VALUES relation (no intervening
-    # TABLE): a materialized NULL DOUBLE decodes to NaN, but the VALUES vector
-    # leaves the NULL row's data slot as finite zero-page bytes, so an ungated
-    # read would fold them into a real distance -- that is what makes the
-    # validity gate observable here rather than coinciding with a stored NaN.
+    # The row with rid 2 is a finite pair, nearly antipodal, whose float64 `a` overshoots 1.0 by about 2 ULP. Without
+    # the clamp, math.asin(sqrt(a)) raises in hv_py and returns NaN in hv_jit.
+    #
+    # The UDFs read directly from the VALUES relation, not from a stored table. A NULL DOUBLE stored in an in-memory
+    # table reads back as NaN bytes, but the VALUES vector leaves zero bytes, a finite value, in the NULL row's data
+    # slot. A read that ignored the validity mask would therefore compute a real distance from them, and the test would
+    # fail. With a stored NaN, the test would pass whether or not hv_jit reads the validity mask.
     pts = (
         "(VALUES "
         "(0, 0.0, 0.0, 0.0, 0.0), "
@@ -5747,8 +5870,8 @@ def test_haversine_udf_nulls_and_antipodal():
         "(4, CAST('nan' AS DOUBLE), 0.0, 10.0, 20.0)) "
         "AS t(rid, lat1, lon1, lat2, lon2)")
     cols = ", ".join(f"{v}(lat1, lon1, lat2, lon2)" for v in variants)
-    # ORDER BY an explicit row id so the positional unpack below is independent
-    # of VALUES scan order (mirrors the sibling divergence/sentinel tests).
+    # ORDER BY the row id makes the positional unpack below independent of the order in which DuckDB scans VALUES, as
+    # in the fraud_score tests below.
     same, antipode, overshoot, null_row, nan_row = conn.execute(
         f"SELECT {cols} FROM {pts} ORDER BY rid").fetchall()
     conn.close()
@@ -5756,23 +5879,20 @@ def test_haversine_udf_nulls_and_antipodal():
     half = math.pi * 6371.0
     for v in same:
         assert v is not None and abs(v) < 1e-6, same
-    # Exact antipode and the 2-ULP overshoot both clamp to the half-circumference
-    # and the variants agree there (a would otherwise diverge near the asin
-    # singularity if the formula forms were not aligned).
+    # The exact antipode and the overshoot both clamp to half the circumference, where the variants agree. Near the
+    # singularity of asin, `a` would differ between the variants if they did not compute it in the same form.
     for label, row in (("antipode", antipode), ("overshoot", overshoot)):
         assert all(v is not None and math.isfinite(v) for v in row), (label, row)
         assert abs(row[jit] - half) < 1.0, (label, row)
         assert max(row) - min(row) < 1e-6, (label, row)
-    # NULL-input row: hv_jit writes the NaN sentinel; hv_py/hv_arrow yield NULL.
+    # NULL-input row: hv_jit writes the NaN sentinel, and hv_py and hv_arrow return NULL.
     assert null_row[jit] is not None and math.isnan(null_row[jit]), null_row
     for i, v in enumerate(variants):
         if v != "hv_jit":
             assert null_row[i] is None, (v, null_row)
-    # NaN-coordinate row: every variant computes through the NaN. hv_jit and
-    # hv_arrow surface it as NaN -- pinning the Arrow clamp's if_else form,
-    # since a min-based clamp would collapse the NaN `a` to 1.0 and fabricate
-    # the antipodal distance -- while DuckDB's scalar-UDF bridge maps hv_py's
-    # NaN return to SQL NULL.
+    # NaN-coordinate row: every variant computes with the NaN. hv_jit and hv_arrow return NaN, and DuckDB's bridge for
+    # Python scalar UDFs turns hv_py's NaN into SQL NULL. hv_arrow's NaN checks the if_else form of its clamp: a clamp
+    # built on a minimum would turn the NaN `a` into 1.0 and return the antipodal distance.
     assert nan_row[jit] is not None and math.isnan(nan_row[jit]), nan_row
     assert nan_row[variants.index("hv_py")] is None, nan_row
     if "hv_arrow" in variants:
@@ -5781,21 +5901,21 @@ def test_haversine_udf_nulls_and_antipodal():
 
 
 def test_haversine_udf_null_aggregation_divergence():
-    """hv_jit emits NaN for a NULL-input row while the reference hv_py yields SQL
-    NULL. Under the demo's filtering count (WHERE dist < 50) the two agree (NaN
-    < 50 and NULL < 50 both exclude the row), but under sum() the NaN poisons the
-    JIT aggregate while hv_py skips the NULL -- the NaN sentinel round-trips as
-    NULL only under predicates that exclude the row (DuckDB orders NaN as the
-    largest DOUBLE, so dist >= X and negations retain it)."""
+    """Check where hv_jit's NaN for a NULL input agrees with the SQL NULL of the reference hv_py, and where it does not.
+
+    A filtering count, as in the demo's ``WHERE dist < 50``, gives the same answer for both, because ``NaN < 50`` and
+    ``NULL < 50`` both exclude the row. A sum does not: the NaN makes the jitted sum NaN, while SQL's sum skips hv_py's
+    NULL. The NaN behaves like NULL only under a predicate that excludes the row. DuckDB orders NaN above every other
+    DOUBLE, so ``dist >= X`` keeps the row, and so does the negation of any such predicate.
+    """
     hv = _import_example("haversine")
     conn = duckdb.connect()
     conn.create_function("hv_py", hv.haversine_py, ["DOUBLE"] * 4, "DOUBLE")
     hv.register_jit_udf(conn)
-    # Query straight off VALUES (not a stored TABLE): a materialized NULL DOUBLE
-    # decodes to NaN bytes, which would mask the validity gate, whereas the
-    # VALUES vector leaves the NULL row's data slot as finite zero-page bytes --
-    # so without the gate hv_jit folds a real distance in and the sum assertion
-    # below (isnan) would fail instead of passing vacuously.
+    # The query reads directly from VALUES, not from a stored table. A NULL DOUBLE stored in an in-memory table reads
+    # back as NaN bytes, so the sum would be NaN with or without a validity check, and the isnan assertion below would
+    # pass either way. The VALUES vector leaves zero bytes in the NULL row's data slot instead: without the check,
+    # hv_jit would add a real distance, and the assertion would fail.
     pts = (
         "(VALUES "
         "(0.0, 0.0, 0.0, 0.0), "
@@ -5815,8 +5935,10 @@ def test_haversine_udf_null_aggregation_divergence():
 
 
 def test_fraud_score_udf_null_sentinel():
-    """fr_jit scores a normal row with its positive rule sum and any NULL-input
-    row with the -1 sentinel (a scalar UDF cannot write SQL NULL here)."""
+    """Check that fr_jit gives a valid row its positive rule score, and a row with a NULL input the sentinel -1.
+
+    The UDF writes the sentinel in place of NULL, because ducklib binds no function that would let it write SQL NULL.
+    """
     fr = _import_example("fraud_score")
     conn = duckdb.connect()
     fr.register_jit_udf(conn)
@@ -5836,10 +5958,12 @@ def test_fraud_score_udf_null_sentinel():
 
 
 def test_fraud_score_udf_null_divergence():
-    """The JIT variant cannot emit SQL NULL, so on a NULL-input row it writes the
-    -1 sentinel while the reference fr_py yields SQL NULL. A naive sum() therefore
-    diverges (fr_py skips NULLs, fr_jit folds in -1); filtering the sentinel
-    restores agreement -- the contract the NULL_SCORE comment documents."""
+    """Check that fr_jit's sentinel makes its sum differ from fr_py's, and that filtering it out removes the difference.
+
+    fr_jit cannot write SQL NULL, so it writes -1 for a row with a NULL input, where the reference fr_py returns SQL
+    NULL. SQL's sum skips fr_py's NULL but adds fr_jit's -1, so a caller must filter out ``NULL_SCORE`` before it
+    aggregates fr_jit's scores.
+    """
     fr = _import_example("fraud_score")
     types = ["DOUBLE", "TINYINT", "TINYINT", "TINYINT", "TINYINT", "INTEGER"]
     conn = duckdb.connect()
@@ -5857,12 +5981,12 @@ def test_fraud_score_udf_null_divergence():
         f"SELECT fr_py({cols}), fr_jit({cols}) FROM tx ORDER BY amount NULLS LAST"
     ).fetchall()
     assert per_row[0] == (17, 17), per_row[0]
-    assert per_row[1][0] is None, per_row[1]           # fr_py -> SQL NULL
-    assert per_row[1][1] == fr.NULL_SCORE, per_row[1]  # fr_jit -> -1 sentinel
+    assert per_row[1][0] is None, per_row[1]           # fr_py returns SQL NULL
+    assert per_row[1][1] == fr.NULL_SCORE, per_row[1]  # fr_jit returns the -1 sentinel
     s_py, s_jit = conn.execute(
         f"SELECT sum(fr_py({cols})), sum(fr_jit({cols})) FROM tx").fetchone()
     assert s_py == 17, s_py            # SQL sum skips the NULL row
-    assert s_jit == 16, s_jit          # -1 sentinel folded into the total
+    assert s_jit == 16, s_jit          # SQL sum adds the -1 sentinel
     s_jit_filtered = conn.execute(
         f"SELECT sum(s) FROM (SELECT fr_jit({cols}) AS s FROM tx) q "
         f"WHERE s <> {fr.NULL_SCORE}").fetchone()[0]
@@ -5871,8 +5995,10 @@ def test_fraud_score_udf_null_divergence():
 
 
 def test_fraud_score_udf_all_valid_fast_path():
-    """With no NULL inputs every validity pointer is zero, so fr_jit runs the
-    check-free fast loop; its per-row scores must still match fr_py exactly."""
+    """Check that fr_jit's scores match fr_py's exactly, row by row, on data without NULL.
+
+    DuckDB then returns a validity pointer of 0 for every input, so fr_jit runs its loop without validity checks.
+    """
     fr = _import_example("fraud_score")
     types = ["DOUBLE", "TINYINT", "TINYINT", "TINYINT", "TINYINT", "INTEGER"]
     conn = duckdb.connect()
@@ -5888,11 +6014,12 @@ def test_fraud_score_udf_all_valid_fast_path():
 
 
 def test_online_scoring_missing_key_raises():
-    """score_jit's point lookup matches exactly one feature row; a missing id
-    makes duckdb_fetch_chunk return a NULL chunk (chunk_p == 0), which the loop's
-    null-pointer guard turns into a RuntimeError instead of dereferencing it. The
-    companion ``size == 0`` half of that guard is defensive: this missing-key path
-    reaches the null-pointer half, not the empty-chunk half."""
+    """Check that score_jit raises RuntimeError for an id that has no feature row.
+
+    The point lookup for a missing id returns no rows, so duckdb_fetch_chunk returns a null chunk (``chunk_p == 0``),
+    and the loop raises instead of dereferencing it. The same guard also checks for an empty chunk (``size == 0``), a
+    case that this path does not reach.
+    """
     osc = _import_example("online_scoring")
     conn = duckdb.connect()
     osc.setup_features(conn, 8)
@@ -5904,9 +6031,12 @@ def test_online_scoring_missing_key_raises():
 
 
 def test_online_scoring_null_feature_raises():
-    """A NULL feature value for a matched id would be read as stale storage and
-    silently mis-scored; the JIT loop reads the validity mask and raises, matching
-    the pure-Python reference (which raises on None*float)."""
+    """Check that both scorers raise for an id whose feature is NULL.
+
+    score_jit reads the validity mask and raises RuntimeError. The Python reference, score_python, raises TypeError when
+    it multiplies None by a float. Without the mask, score_jit would read whatever the NULL slot holds and return a
+    wrong score without an error.
+    """
     osc = _import_example("online_scoring")
     conn = duckdb.connect()
     osc.setup_features(conn, 8)
@@ -5921,10 +6051,12 @@ def test_online_scoring_null_feature_raises():
 
 
 def test_online_scoring_big_knob_scales_workload():
-    """NUMBDUCK_BENCH_BIG must enlarge the actually-scored workload, not just the
-    allocated dataset: the latency/scaling sample sizes are derived from the
-    dataset size, so a 10x-bigger dataset scores proportionally more events while
-    the default sizes stay put (and scaling always scores fewer than latency)."""
+    """Check that NUMBDUCK_BENCH_BIG enlarges the workload that the example scores, not only the data it allocates.
+
+    sample_sizes derives the latency and scaling sample sizes from the dataset size, so a dataset ten times larger
+    scores proportionally more events, while the default sizes stay the same. The scaling sample is always smaller than
+    the latency sample.
+    """
     osc = _import_example("online_scoring")
     assert osc.sample_sizes(50_000) == (5_000, 2_000)
     lat_big, scale_big = osc.sample_sizes(500_000)
@@ -5933,9 +6065,11 @@ def test_online_scoring_big_knob_scales_workload():
 
 
 def test_irr_udaf_group_sentinels():
-    """Through the real irr aggregate under GROUP BY: an all-NULL group yields
-    NaN (no data), an out-of-bracket group yields +inf, and a normal group
-    yields a finite rate -- pinning the finalize sentinel distinctions."""
+    """Check the three kinds of result that the irr aggregate gives under GROUP BY.
+
+    A normal group gives a finite rate, a group whose root lies outside the bracket gives +inf, and a group whose rows
+    are all NULL gives NaN, the result for a group without data.
+    """
     irr = _import_example("irr")
     conn = duckdb.connect()
     irr.register_irr(conn)
@@ -5956,10 +6090,10 @@ def test_irr_udaf_group_sentinels():
     assert math.isnan(res[3]), res[3]
 
 
-# irr raising-update harness: pins that update rolls a mid-row push failure back
-# to the row boundary so cashflows/periods stay paired (not just truncated).
-# Built lazily so importing the irr example and compiling this probe stay out of
-# module import; the first test that needs it pays the cost.
+# A harness for an irr update callback that raises. It checks that update rolls a push that fails in the middle of a
+# row back to the start of the row. The two vectors, cashflows and periods, then keep the same length and stay paired.
+# The harness is built on first use, not when this module is imported, so the first test that needs it imports the irr
+# example and compiles the probe.
 @functools.cache
 def _irr_rollback_probe():
     irr = _import_example("irr")
@@ -5986,10 +6120,10 @@ def _irr_rollback_probe():
             try:
                 vector_push(s.cashflows, cf[i])
                 vector_push(s.periods, pd[i])
-                # A negative period marks the poison row: raise via a nested call
-                # AFTER both pushes have grown the vectors, so the except path
-                # must reset BOTH lengths to the row boundary -- exercising both
-                # rollback lines rather than leaving the periods reset a no-op.
+                # A negative period marks the poison row. The probe raises through a nested call after both pushes
+                # have grown the vectors, so the except branch must reset both lengths to the start of the row. Both
+                # rollback lines then have an effect; if the probe raised before the second push, the reset of
+                # periods would change nothing.
                 if pd[i] < 0.0:
                     _cfunc_guard_raise(1.0)
                 if s.initialized == 0:
@@ -6036,23 +6170,19 @@ def _register_irr_with_update(conn, name, update_cb):
 @pytest.mark.filterwarnings(
     "ignore::pytest.PytestUnraisableExceptionWarning")
 def test_irr_update_rollback_drops_poison_row_cleanly():
-    """Validate the update-callback rollback LOGIC via a structural stand-in.
+    """Check the rollback in the IRR update callback through a copy of it that can be made to fail.
 
-    The real _irr_update_cb rollback (examples/irr.py) fires only on an actual
-    vector_push allocation failure mid-row, which SQL input cannot trigger, so
-    it is not directly reachable from a test. _irr_rollback_probe builds a copy
-    of that rollback logic with an injected raise on a poison row (period < 0)
-    placed AFTER both pushes have grown the vectors, so the except path must
-    reset both lengths -- both rollback lines are required here. The failure
-    is rolled back to the row boundary so the group's cashflows/periods stay
-    paired, the aggregate equals the same group without the poison row, and NRT
-    stays balanced. This pins the rollback logic but does NOT by itself guard the
-    example's real callback against regression -- they share source, not this
-    registration. The example's real finalize and combine except guards share
-    this coverage gap: they defend against faults SQL input cannot trigger
-    (finalize confirmed undrivable across an adversarial input battery; combine
-    can fault only on a vector-allocation failure), so no test drives their
-    except branch -- they are pinned by inspection, not execution."""
+    The real ``_irr_update_cb`` in examples/irr.py rolls back only when ``vector_push`` fails to allocate in the middle
+    of a row, and SQL input cannot cause that. ``_irr_rollback_probe`` copies the callback's rollback logic and raises
+    on a poison row, one with a negative period, after both pushes have grown the vectors, so the rollback must reset
+    both lengths. The rollback must restore the start of the row, so that the group's cashflows and periods stay
+    paired: the result equals that of the group without the poison row, and NRT frees all that it allocates.
+
+    The probe copies the rollback's source; it does not register the example's callback. This test therefore does not
+    catch a regression in the example itself. No test exercises the except branches of the example's finalize and
+    combine either: SQL input cannot make finalize raise, and combine raises only when a vector fails to allocate.
+    Those branches are checked by reading the code.
+    """
     from numba.core.runtime import _nrt_python as _nrt
     _nrt.memsys_enable_stats()
     from numba.core.runtime.nrt import rtsys
@@ -6078,11 +6208,14 @@ def test_irr_update_rollback_drops_poison_row_cleanly():
     assert rate is not None and abs(rate - expected) < 1e-9, rate
 
 
-# --- Binding source integrity ---
+# --- The names in the source of ducklib's bindings ---
 
 def _called_c_symbol(arg):
-    """The C symbol named by ``_call_lib_func``'s first argument: the string
-    itself, or the value that name has in ``ducklib``."""
+    """Return the C symbol that the first argument of a ``_call_lib_func`` call names.
+
+    The symbol is the string itself, or the value that the named variable has in ``ducklib``. For any other expression,
+    the function returns None.
+    """
     if isinstance(arg, ast.Constant):
         return arg.value
     if isinstance(arg, ast.Name):
@@ -6091,9 +6224,11 @@ def _called_c_symbol(arg):
 
 
 def _decorator_signature_key(node):
-    """The registered signatures key named in a wrapper's decorator: the string
-    passed to ``signatures.get(...)``, or the canonical name passed to
-    ``_bignum_proxy(<resolved symbol>, "<canonical bignum name>")``."""
+    """Return the key of the signatures table that a binding's decorator names, or None if it names none.
+
+    The key is the string passed to ``signatures.get``, or the bignum name that ``_bignum_proxy`` receives as its
+    second argument.
+    """
     key = None
     for dec in node.decorator_list:
         if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name)
@@ -6112,14 +6247,13 @@ def _decorator_signature_key(node):
 
 
 def _wrapper_name_triples(source):
-    """For every ``_call_lib_func`` wrapper defined at module level in `source`,
-    yield ``(def_name, decorator_key, body_literal, param_names, call_arg_names)``
-    where ``decorator_key`` is the string passed to ``signatures.get(...)`` in the
-    wrapper's decorator, ``body_literal`` is the string passed to
-    ``_call_lib_func(...)`` in the body, ``param_names`` is the def's parameter
-    list, and ``call_arg_names`` is the names inside the ``_call_lib_func``
-    argument tuple (None when that argument is not a plain tuple of names, so the
-    caller fails loudly instead of skipping the wrapper).
+    """Yield a tuple for each module-level def in ``source`` whose last statement returns a ``_call_lib_func`` call.
+
+    Each tuple is ``(def_name, decorator_key, body_literal, param_names, call_arg_names)``. ``decorator_key`` is the
+    signatures key that the decorator names, and ``body_literal`` is the C symbol that the ``_call_lib_func`` call
+    names. ``param_names`` lists the function's parameters, and ``call_arg_names`` the names in the tuple of arguments
+    passed to ``_call_lib_func``. ``call_arg_names`` is None when that argument is not a plain tuple of names, so the
+    caller's comparison fails instead of skipping the binding.
     """
     tree = ast.parse(source)
     for node in tree.body:
@@ -6141,10 +6275,12 @@ def _wrapper_name_triples(source):
 
 
 def _proxy_decorated_names(source):
-    """Names of the module-level functions carrying a proxy decorator, which is
-    every binding wrapper. Used to pin how many wrappers the triple walk above is
-    expected to see, so one dropping out of its shape is a failure rather than a
-    silently smaller set."""
+    """Return the names of the module-level functions in ``source`` that carry a proxy decorator.
+
+    The decorators are ``proxy``, ``proxy_if_available`` and ``_bignum_proxy``, and every binding carries one.
+    test_wrapper_name_integrity compares this set with the functions that ``_wrapper_name_triples`` yields. A binding
+    whose shape the walk misses then fails the test, instead of making the checked set smaller without notice.
+    """
     names = set()
     for node in ast.parse(source).body:
         if not isinstance(node, ast.FunctionDef):
@@ -6156,8 +6292,8 @@ def _proxy_decorated_names(source):
     return names
 
 
-# The bignum bindings call whichever spelling the loaded libduckdb exports, so
-# their body names a C symbol that differs from the def's own name below 1.4.0.
+# The bignum bindings call whichever spelling the loaded libduckdb exports, so before duckdb 1.4.0 their body names a
+# C symbol other than the function's own name.
 _ALIASED_BINDINGS = {
     "duckdb_create_bignum": {"duckdb_create_bignum", "duckdb_create_varint"},
     "duckdb_get_bignum": {"duckdb_get_bignum", "duckdb_get_varint"},
@@ -6165,26 +6301,25 @@ _ALIASED_BINDINGS = {
 
 
 def test_wrapper_name_integrity():
-    """Every binding names its C function three times by hand (the decorator's
-    ``signatures.get`` key, the ``def`` name, and the ``_call_lib_func`` literal);
-    a typo in any one that happens to match another registered key would compile
-    against the wrong signature silently. Assert all three agree and resolve to a
-    registered signatures key. Names alone are not enough: numbox uses the
-    registered signature only for the return type, so a wrapper that forwards the
-    wrong arguments (one dropped, two swapped) still emits a native call and
-    passes garbage at runtime. Assert arity and order too: the ``_call_lib_func``
-    tuple must forward exactly the def's parameters, and their count must match
-    the registered signature's.
+    """Check that each binding names its C function consistently and passes its parameters through unchanged.
+
+    A binding spells its C function's name three times: as the key that its decorator passes to ``signatures.get``, as
+    the name of the def, and as the string passed to ``_call_lib_func``. A typo in one of them that matched another key
+    would compile against the wrong signature without an error. The test checks that the three agree and that each is
+    a key of the signatures table.
+
+    numbox's ``_call_lib_func`` takes only the result type from the signatures table, so a binding that dropped or
+    swapped an argument would still compile and pass wrong values at run time. The test therefore also checks that the
+    tuple passed to ``_call_lib_func`` holds exactly the def's parameters, in order, and that their number matches the
+    signature's.
     """
     with open(ducklib.__file__, encoding="utf-8") as f:
         source = f.read()
     triples = list(_wrapper_name_triples(source))
-    # Pin the count against the proxy-decorated set rather than a floor. The walk
-    # only recognises a module-level def whose last statement returns
-    # _call_lib_func, so a wrapper that moves under an if/try, gains a trailing
-    # statement, or switches to one of the struct-by-value call helpers drops out
-    # of the integrity check silently; comparing the two sets makes that a
-    # failure that names the wrapper.
+    # The walk recognizes only a module-level def whose last statement returns a _call_lib_func call. It would skip,
+    # without notice, a binding that moved under an if or a try, gained a statement after its return, or switched to
+    # another call helper, such as numbox's _call_lib_func_byval. Comparing the walked set with the proxy-decorated
+    # set, instead of with a minimum count, turns that into a failure that names the binding.
     seen = {triple[0] for triple in triples}
     assert seen == _proxy_decorated_names(source), {
         "unchecked": sorted(_proxy_decorated_names(source) - seen),
@@ -6196,18 +6331,19 @@ def test_wrapper_name_integrity():
         assert name in ducklib.signatures, name
         assert body_literal in ducklib.signatures, body_literal
         assert call_arg_names == param_names, (name, param_names, call_arg_names)
-        # Check arity against the signature of the symbol actually called, which
-        # is the aliased spelling for a binding resolved at import.
+        # The number of parameters is checked against the signature of the symbol that the body calls, which for a
+        # bignum binding is the spelling chosen at import.
         assert len(param_names) == len(ducklib.signatures[body_literal].args), (
             name, param_names, str(ducklib.signatures[body_literal]))
 
 
 @pytest.mark.skipif(duckdb_major_version < 2, reason="Testing duckdb>=2.0.0 behavior.")
 def test_open_result_error():
-    """
-    Adding conn.complete() is required for duckdb>=2.0.0, to indicate
-    that the last query is done _streaming_ from the open connection.
-    https://github.com/duckdb/duckdb-python/releases/tag/v2.0.0
+    """Check that, from duckdb 2.0.0 on, a prepare fails on a connection with an open result until the result completes.
+
+    duckdb 2.0.0 requires ``conn.complete()``, which ``complete_open_result`` calls, to mark that the last query has
+    finished streaming from the connection. Until then, ``duckdb_prepare`` on the connection fails with a Resource In
+    Use error. https://github.com/duckdb/duckdb-python/releases/tag/v2.0.0
     """
     from numbox.utils.cstrings import c_string
     from numbduck.pybridge import extract_connection_ptr
@@ -6233,8 +6369,11 @@ def test_open_result_error():
 
 @pytest.mark.skipif(duckdb_major_version >= 2, reason="Testing duckdb<2.0.0 behavior.")
 def test_api_call_completes_open_query():
-    """
-    Counterpart of test_open_result_error, for duckdb<2.
+    """Check that, before duckdb 2.0.0, a prepare succeeds on a connection whose result is still open.
+
+    The open result still returns its remaining rows afterward, because its four rows lie in the chunk that Python
+    has already fetched. A larger result loses the rows past that chunk. This is the counterpart of
+    test_open_result_error for duckdb 1.x.
     """
     from numbox.utils.cstrings import c_string
     from numbduck.pybridge import extract_connection_ptr
@@ -6253,7 +6392,11 @@ def test_api_call_completes_open_query():
 
 @pytest.mark.skipif(duckdb_major_version < 2, reason="Testing duckdb>=2.0.0 behavior.")
 def test_python_open_result():
-    """ Pure Python version of `test_open_result_error`. """
+    """Check the behavior of test_open_result_error through the duckdb Python API alone.
+
+    From duckdb 2.0.0 on, ``conn.sql`` on a connection with an open result raises ``ResourceInUseException`` until
+    ``complete_open_result`` completes the result. A second ``conn.execute`` succeeds.
+    """
     conn = duckdb.connect()
     conn.execute("SELECT 1")
     with pytest.raises(duckdb.ResourceInUseException):
