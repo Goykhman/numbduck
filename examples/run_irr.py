@@ -1,10 +1,11 @@
-"""Launcher for the IRR UDAF example.
+"""Run the IRR aggregate example: ``python examples/run_irr.py``.
 
-``examples/irr.py`` defines ``IRRStateType`` at module level. Running
-``irr.py`` directly would set ``IRRStateType.__module__`` to ``__main__``,
-which gives the class a fresh identity each process and breaks numba's
-warm-cache type inference. This launcher imports ``irr`` so the class
-gets a stable ``__module__ == "irr"`` and runs ``main()`` from there.
+The example is ``irr.py``, which must be imported rather than run. numbox's ``make_structref`` generates the code of
+the aggregate's state, and numba caches that code together with the state's type, ``IRRStateType``. A class defined in
+the script that Python runs belongs to ``__main__``, and it does not match the cached copy in the next process. On a
+warm cache, type inference then fails with a ``TypingError`` that reports no conversion from ``IRRStateType`` to
+``IRRStateType``. This launcher puts its own directory on ``sys.path``, imports the module as ``irr`` and calls its
+``main()``.
 """
 import os
 import sys
