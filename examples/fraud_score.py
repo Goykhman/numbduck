@@ -360,19 +360,18 @@ def main():
     print()
     print(
         "  Discussion:\n"
-        "    Arrow does the right vectorized work and beats the per-row Python\n"
-        f"    scalar UDF by ~{t_py0 / t_arrow0:.0f}x at {n0:,d} rows; pyarrow's chained\n"
-        "    pc.if_else is the correct stock-DuckDB tool for branchy logic, full\n"
-        f"    credit. The JIT chunk callback then beats Arrow by ~{t_arrow0 / t_jit0:.0f}x\n"
-        f"    at {n0:,d} rows, widening to ~{t_arrowL / t_jitL:.0f}x at {nL:,d} rows. The\n"
-        "    growing gap is *partly* an artifact: each Arrow UDF chunk crosses the\n"
-        "    Python boundary and allocates a fresh intermediate array for every\n"
-        "    pc.if_else step, while the JIT computes the whole ruleset in registers\n"
-        "    with no allocations. Even discounting the chunk-crossing overhead, the\n"
-        "    JIT path is comfortably above the spec's 2x decision threshold and the\n"
-        "    example earns its place. The case for numbduck strengthens further when\n"
-        "    the branchy work is inside a JIT loop calling other DuckDB functions\n"
-        "    (see online_scoring)."
+        f"    At {n0:,d} rows the per-row Python scalar UDF takes {t_py0 * 1000:.2f}ms,\n"
+        f"    the Arrow UDF {t_arrow0 * 1000:.2f}ms and the JIT chunk callback\n"
+        f"    {t_jit0 * 1000:.2f}ms. At {nL:,d} rows the Arrow UDF takes {t_arrowL * 1000:.2f}ms\n"
+        f"    and the JIT callback {t_jitL * 1000:.2f}ms. pyarrow's chained pc.if_else is\n"
+        "    the stock DuckDB tool for branchy logic like this. Each Arrow UDF\n"
+        "    chunk is a Python call that builds a new array for every pc.if_else\n"
+        "    step; the JIT callback computes the whole ruleset in one pass over\n"
+        "    each chunk, on all of DuckDB's threads, without the GIL. The\n"
+        f"    largest-tier Arrow/JIT ratio, {largest_ratio:.2f}x, is "
+        f"{'at or above' if largest_ratio >= 2 else 'below'} the 2x\n"
+        "    threshold of the decision above. online_scoring shows a JIT loop that\n"
+        "    runs DuckDB queries itself."
     )
     conn.close()
 

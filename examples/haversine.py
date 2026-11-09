@@ -328,16 +328,15 @@ def main():
     nL, _, t_arrowL, t_jitL = timings[-1]
     print(
         "  Discussion:\n"
-        f"    At {n0:,d} rows the JIT chunk callback is ~{t_py0 / t_jit0:.0f}x\n"
-        f"    faster than the per-row Python scalar UDF and ~{t_arrow0 / t_jit0:.0f}x\n"
-        f"    faster than the PyArrow expression UDF. The gap to Arrow widens with\n"
-        f"    N: at {nL:,d} rows the JIT runs in ~{t_jitL * 1000:.0f}ms while the\n"
-        f"    Arrow chain takes ~{t_arrowL:.2f}s, a ~{t_arrowL / t_jitL:.0f}x gap.\n"
-        "    The win comes from no Python crossings per chunk, LLVM-fused math\n"
-        "    (sin/cos/asin/sqrt inlined into one tight loop), and no intermediate\n"
-        "    Arrow arrays for each pc.* step. Python's per-row interpreter\n"
-        "    round-trip is so expensive at 100K+ that we omit it from the table:\n"
-        "    extrapolating from the 10K timing, it would dominate the budget."
+        f"    At {n0:,d} rows the JIT chunk callback takes {t_jit0:.3f}s, the per-row\n"
+        f"    Python scalar UDF {t_py0:.3f}s and the PyArrow expression UDF\n"
+        f"    {t_arrow0:.3f}s. At {nL:,d} rows the JIT callback takes {t_jitL:.3f}s and\n"
+        f"    the Arrow chain {t_arrowL:.3f}s. The JIT callback makes no Python call\n"
+        "    per chunk, builds no intermediate arrays, and runs on all of DuckDB's\n"
+        "    threads without the GIL. Each Arrow UDF chunk is a Python call that\n"
+        "    builds a new array for every pc.* step. The per-row Python UDF runs\n"
+        f"    only up to PY_MAX_N = {PY_MAX_N:,d} rows, to keep the run short; raise\n"
+        "    PY_MAX_N to time it at more rows."
     )
     conn.close()
 
