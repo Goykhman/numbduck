@@ -1,3 +1,16 @@
+"""Find and load the libduckdb whose C API numbduck's bindings call, and check that it matches the duckdb wheel.
+
+:mod:`numbduck.ducklib` calls :func:`load_duckdb` at import. :func:`find_duckdb_shared_lib` locates the shared library
+inside the installed duckdb wheel, and the loader uses it if it exports DuckDB's C API. Some macOS wheels do not, as
+:func:`load_duckdb` lists. The loader then falls back to a standalone libduckdb: the file that ``NUMBDUCK_LIBDUCKDB``
+names, numbduck's cache in ``~/.numbduck/lib``, or a Homebrew install. On macOS, it can also download one from DuckDB's
+GitHub release after the user consents. A standalone library is loaded only if it reports the same library version as
+the wheel, and :func:`libraries_coordinated` repeats that comparison for :mod:`numbduck.pybridge`.
+
+The module also holds ``duckdb_version`` and ``duckdb_major_version``, read from the installed duckdb package. Its
+:func:`complete_open_result` finishes the open result of a Python connection, which duckdb 2.0.0 requires before the
+C API can run a query on that connection.
+"""
 import ctypes
 import duckdb
 import os
@@ -16,6 +29,7 @@ class DuckdbResultTypeClass(StructRef):
     pass
 
 
+# numbduck caches a downloaded libduckdb under ~/.numbduck/lib, in a directory for each version of the duckdb package.
 _LIBDUCKDB_CACHE_BASE = os.path.join(
     os.path.expanduser("~"), ".numbduck", "lib"
 )
@@ -23,27 +37,29 @@ _LIBDUCKDB_CACHE_DIR = os.path.join(
     _LIBDUCKDB_CACHE_BASE, duckdb.__version__
 )
 
-# Basename of the standalone libduckdb, shared by the locator (the path it
-# looks for), the downloader (the path it writes to), and the ZIP member it
-# extracts, so the discover/write contract can never silently drift apart.
+# The file name of the standalone libduckdb. The cache path that the search looks at, the path that the download
+# writes, the member that the download extracts from DuckDB's archive and the old cache file all use this one name, so
+# their file names cannot differ.
 _LIBDUCKDB_DYLIB_NAME = "libduckdb.dylib"
 
-# Filename the standalone libduckdb is cached under.
+# The path of the cached standalone libduckdb for the installed duckdb version.
 _LIBDUCKDB_CACHED_DYLIB = os.path.join(_LIBDUCKDB_CACHE_DIR, _LIBDUCKDB_DYLIB_NAME)
 
-# Bounded so a hung or trickling endpoint fails fast instead of wedging import.
+# The timeout of the download, in seconds. urlopen applies it to each blocking socket operation, so a server that stops
+# responding fails the import within a minute instead of hanging it. A download that keeps receiving data is not cut
+# off, however slow it is.
 _LIBDUCKDB_DOWNLOAD_TIMEOUT = 60
 
+# Where Homebrew's duckdb puts libduckdb.dylib: under /opt/homebrew on Apple silicon and under /usr/local on Intel.
 _MACOS_LIBDUCKDB_SEARCH_PATHS = [
     "/opt/homebrew/lib/libduckdb.dylib",
     "/usr/local/lib/libduckdb.dylib",
 ]
 
 
-# The libduckdb whose C API backs numbduck's JIT bindings, retained so the
-# coordination check can probe its reported version. On the wheel path this is
-# the same shared object the Python ``duckdb`` module uses; on the standalone
-# fallback it is a second, independently loaded libduckdb (see load_duckdb).
+# The ctypes handle of the libduckdb whose C API the bindings call. load_duckdb sets it, and loaded_library_version
+# reads its version. If the wheel's library exports the C API, this is the library that the Python duckdb module uses.
+# Otherwise it is a second libduckdb, loaded from a standalone file.
 _loaded_libduckdb = None
 
 
@@ -52,18 +68,16 @@ def _has_capi_symbols(lib):
 
 
 def _normalize_version(version):
-    # duckdb_library_version() and PRAGMA version report e.g. "v1.5.4" while the
-    # bare package version is "1.5.4"; drop the single leading "v" so library
-    # versions from either source compare directly (removeprefix, not lstrip, so
-    # it strips one prefix rather than a run of leading "v"s).
+    # duckdb_library_version() and PRAGMA version report a version with a leading "v", such as "v1.5.4". The function
+    # strips the surrounding whitespace and that one "v", so that the version reads as "1.5.4", the form of the package
+    # version. removeprefix removes one "v", where lstrip would remove a run of them.
     return version.strip().removeprefix("v")
 
 
 def _library_version(lib):
-    """Version string reported by *lib*'s ``duckdb_library_version()``.
+    """Return the version that ``lib``'s ``duckdb_library_version()`` reports, without its leading ``v``.
 
-    Returns the normalized version (leading ``v`` stripped) or ``None`` when the
-    symbol is absent or reports nothing.
+    Return None if ``lib`` does not export the function, or if the function returns NULL.
     """
     if not hasattr(lib, "duckdb_library_version"):
         return None
@@ -79,25 +93,24 @@ _wheel_library_version_cache = None
 
 
 def _wheel_library_version():
-    """Library version the Python ``duckdb`` wheel reports for its own core.
+    """Return the library version that the duckdb wheel reports for its own core, without its leading ``v``, or None.
 
-    Read via ``PRAGMA version`` through the Python API (which works even on the
-    macOS wheels that strip the C-API symbols), so it is in the same
-    ``vX.Y.Z[-devN]`` scheme as a standalone's ``duckdb_library_version()``. That
-    is the right identity to coordinate on: ``duckdb.__version__`` is the Python
-    *package* version, which coincides with the library version only for releases
-    and diverges for pre-release (``.dev``/``rc``) builds, so comparing against it
-    refuses a genuinely-matched dev build. Cached because the running wheel's core
-    version cannot change in-process. Returns the normalized version, or ``None``
-    when it cannot be read.
+    The function runs ``PRAGMA version`` on an in-memory connection of the Python ``duckdb`` module, which works for a
+    wheel that does not export the C API too. The result has the ``vX.Y.Z[-devN]`` form of a standalone library's
+    ``duckdb_library_version()``, so the two compare directly. The package version, ``duckdb.__version__``, equals
+    the library version only for a release. It differs for a development or release-candidate build, and a
+    comparison with it would refuse a library that matches the wheel.
+
+    The version is kept after the first successful read, because the loaded wheel cannot change within a process. If
+    the query fails or returns no version, the function returns None, and the next call tries again.
     """
     global _wheel_library_version_cache
     if _wheel_library_version_cache is None:
         try:
             row = duckdb.connect(":memory:").execute("PRAGMA version").fetchone()
         except Exception:
-            # Fail closed: an unreadable wheel version makes the caller refuse
-            # rather than proceed with an unverified pairing.
+            # Without the wheel's version, the callers refuse the standalone library and the connection pointer, rather
+            # than pair two libraries that might be different builds.
             return None
         if not row or row[0] is None:
             return None
@@ -106,17 +119,15 @@ def _wheel_library_version():
 
 
 def _require_coordinated_standalone(lib, source):
-    """Refuse a standalone libduckdb whose build disagrees with the wheel.
+    """Raise ``RuntimeError`` unless the standalone libduckdb ``lib`` reports the same library version as the wheel.
 
-    pybridge extracts a raw ``Connection*`` minted by the Python ``duckdb``
-    wheel's runtime and hands it to this standalone library's C API, whose
-    ``duckdb_query`` casts it back to the standalone's own internal Connection
-    layout and dereferences it. That is only sound when both are the same DuckDB
-    build: a different build has a candidate-different struct layout, so the
-    dereference is undefined behavior. Coordinate on the library version, which
-    both sides report in the same ``vX.Y.Z[-devN]`` scheme: the wheel's via
-    :func:`_wheel_library_version`, the standalone's via :func:`_library_version`.
-    Detect a mismatch and refuse rather than corrupt memory at query time.
+    :mod:`numbduck.pybridge` reads the ``Connection*`` that the duckdb wheel created for a Python connection, and the
+    bindings pass it to this library's C API. ``duckdb_query`` there treats the pointer as a ``Connection`` of its own
+    build and dereferences it. That can work only if both libraries are the same DuckDB build, because another build
+    may lay the struct out differently, and the dereference is then undefined behavior. Both libraries report their
+    version in the ``vX.Y.Z[-devN]`` scheme, the wheel through :func:`_wheel_library_version` and ``lib`` through
+    :func:`_library_version`. The function also raises if either version cannot be read. ``source`` is the path that
+    the messages name.
     """
     lib_version = _library_version(lib)
     wheel_version = _wheel_library_version()
@@ -149,27 +160,27 @@ def _require_coordinated_standalone(lib, source):
 
 
 def _open_private(path):
-    """Open *path* without adding its symbols to the process-wide scope.
+    """Open the library at ``path`` without adding its symbols to the process-wide scope, and return its handle.
 
-    ``RTLD_LOCAL`` where the platform has it (Linux, macOS); a plain ``CDLL``
-    elsewhere.
+    The library is opened with ``RTLD_LOCAL`` where ``os`` defines it, as on Linux and macOS, and with the default mode
+    of ``ctypes.CDLL`` elsewhere.
     """
     mode = getattr(os, "RTLD_LOCAL", None)
     return ctypes.CDLL(path) if mode is None else ctypes.CDLL(path, mode=mode)
 
 
 def _load_coordinated_standalone(path):
-    """Load a standalone libduckdb for the JIT only once it has passed its checks.
+    """Load the standalone libduckdb at ``path`` for the bindings if it exports the C API and matches the wheel.
 
-    numbox resolves every JIT call by name through the process-wide symbol
-    scope, where the first definition wins, and a loaded library is never
-    unloaded. So the candidate is first opened privately to check that it
-    exports the C API and that its version matches the wheel's. A refused
-    candidate never enters that scope, where it would keep serving every JIT
-    call even after a later candidate passed. Returns the handle loaded for the
-    JIT, or ``None`` when *path* does not export the C API; raises
-    ``RuntimeError`` on a version mismatch.
+    Return the handle that numbox's ``load_lib_path`` opens, or None if the library does not export the C API. Raise
+    ``RuntimeError`` if its version differs from the wheel's or if either version cannot be read, and ``OSError`` if
+    ``path`` cannot be opened as a library.
     """
+    # The bindings call C functions by name, and the JIT linker resolves each name in the process-wide symbol scope,
+    # where the first library that defines the name takes precedence. ctypes never unloads a library. If a library that
+    # failed the checks entered that scope, the bindings would therefore call it for the life of the process, even after
+    # another library passed the checks. The library is opened privately first, and it enters that scope only after
+    # both checks pass.
     probe = _open_private(path)
     if not _has_capi_symbols(probe):
         return None
@@ -178,13 +189,11 @@ def _load_coordinated_standalone(path):
 
 
 def _migrate_legacy_cache():
-    """Best-effort removal of the pre-versioned unversioned cache file.
+    """Remove the file in which earlier releases cached the standalone libduckdb, if it exists, and ignore a failure.
 
-    Releases before the per-version cache layout wrote the standalone dylib
-    directly under _LIBDUCKDB_CACHE_BASE. This cleanup is kept out of the
-    discovery function and guarded so a read-only home directory or a process
-    racing the same unlink can never abort import over a stale migration
-    artifact; a failed unlink simply leaves the harmless legacy file in place.
+    Earlier numbduck releases cached the library as ``~/.numbduck/lib/libduckdb.dylib``, outside the directory of a
+    duckdb version. A removal that fails, as in a read-only home directory or when another process has removed the file
+    first, does not fail the import.
     """
     old_cached = os.path.join(_LIBDUCKDB_CACHE_BASE, _LIBDUCKDB_DYLIB_NAME)
     try:
@@ -194,13 +203,13 @@ def _migrate_legacy_cache():
 
 
 def _find_standalone_libduckdb():
-    """Locate a standalone libduckdb, or return ``None``, without side effects.
+    """Return the path of the first standalone libduckdb found, or None; the search changes nothing on disk.
 
-    Consulted in a fixed, documented order so the pick is deterministic: an
-    explicit ``NUMBDUCK_LIBDUCKDB`` override first, then numbduck's own
-    per-version cache, then the known Homebrew install paths. Pure lookup: it
-    never mutates the filesystem, so it is safe on the import-time load path and
-    testable as a plain discovery function.
+    The search looks, in this order, at the file that ``NUMBDUCK_LIBDUCKDB`` names, at numbduck's cache for the
+    installed duckdb version, ``~/.numbduck/lib/<version>/libduckdb.dylib``, and at Homebrew's ``libduckdb.dylib`` in
+    ``/opt/homebrew/lib`` and ``/usr/local/lib``. A ``NUMBDUCK_LIBDUCKDB`` that names no existing file is skipped. The
+    cache and Homebrew paths are macOS ``.dylib`` files, so off macOS only ``NUMBDUCK_LIBDUCKDB`` supplies a library.
+    The function does not check that the file it returns is a library.
     """
     env_path = os.environ.get("NUMBDUCK_LIBDUCKDB")
     if env_path and os.path.isfile(env_path):
@@ -214,14 +223,14 @@ def _find_standalone_libduckdb():
 
 
 def _consent_to_download(version):
-    """Decide whether the standalone-libduckdb download is authorized.
+    """Return whether numbduck may download the standalone libduckdb, asking the user only at a terminal.
 
-    Pure policy plus, at most, the consent prompt itself: no network, extract,
-    or cache I/O happens here. ``NUMBDUCK_LIBDUCKDB_DOWNLOAD=1`` authorizes the
-    download unattended; otherwise an interactive TTY is prompted. A closed or
-    redirected stdin (a headless import, CI, a subprocess) is treated as "no";
-    returning ``False`` lets the caller surface the branded install guidance
-    instead of letting ``input`` raise ``EOFError`` out of a bare import.
+    ``NUMBDUCK_LIBDUCKDB_DOWNLOAD=1`` allows the download without a question. Otherwise, if stdin is a terminal, the
+    function prints what it would download and where it would cache it, and asks ``Download now? [y/N]``; ``y`` or
+    ``yes`` allows the download. Without a terminal, as in a headless import, CI or a subprocess, the answer is no.
+    ``input`` would raise ``EOFError`` there, and the error would propagate out of the import. A return value of False
+    instead lets the caller raise its own error, whose message names the ways to install libduckdb. The function
+    downloads nothing and writes no file.
     """
     if os.environ.get("NUMBDUCK_LIBDUCKDB_DOWNLOAD") == "1":
         return True
@@ -239,21 +248,22 @@ def _consent_to_download(version):
     try:
         answer = input("Download now? [y/N] ").strip().lower()
     except EOFError:
-        # isatty lied (or stdin reached EOF mid-prompt); treat as no consent.
+        # stdin reported a terminal but reached its end before an answer, so the answer is no.
         return False
     return answer in ("y", "yes")
 
 
 def _fetch_and_cache(url, dest):
-    """Download the libduckdb ZIP at *url*, extract the dylib, and cache it at *dest*.
+    """Download the ZIP archive at ``url``, extract ``libduckdb.dylib``, write it to ``dest``, and return ``dest``.
 
-    Downloaded over HTTPS with a bounded timeout; the extracted dylib is staged to
-    a unique temp file and atomically ``os.replace``'d into place so two processes
-    downloading at once can't clobber a file another may already have mapped. There
-    is deliberately no cryptographic check here: DuckDB publishes no signed
-    checksum, so this trusts the official release fetched over TLS exactly as
-    ``pip`` trusts the duckdb wheel it installs the same way. The caller re-checks
-    that the loaded library actually exports the C API. Returns *dest*.
+    The download fails if the server does not respond for ``_LIBDUCKDB_DOWNLOAD_TIMEOUT`` seconds. The library replaces
+    ``dest`` in one step, so two processes that download at once do not corrupt it, and a process that has already
+    loaded the old file keeps it. ``RuntimeError`` is raised if the download raises urllib's ``HTTPError`` or
+    ``URLError`` or an ``OSError``, such as a timeout, if the archive lacks the library, or if writing or moving the
+    library fails. An ``OSError`` from creating the cache directory or the temporary file propagates unchanged. No
+    checksum is checked, because DuckDB publishes no signed checksum: the function trusts the official release over
+    HTTPS, as pip trusts the duckdb wheel that it installs the same way. The caller checks that the library exports the
+    C API.
     """
     import io
     import zipfile
@@ -263,7 +273,7 @@ def _fetch_and_cache(url, dest):
         with urlopen(url, timeout=_LIBDUCKDB_DOWNLOAD_TIMEOUT) as resp:
             data = resp.read()
     except (HTTPError, URLError, OSError) as exc:
-        # OSError also covers socket.timeout from the bounded urlopen above.
+        # The error that the timeout raises, socket.timeout, is an OSError.
         raise RuntimeError(
             f"numbduck failed to download libduckdb from {url}: {exc}. Install "
             f"it via brew install duckdb, or set NUMBDUCK_LIBDUCKDB="
@@ -280,10 +290,9 @@ def _fetch_and_cache(url, dest):
         ) from exc
     cache_dir = os.path.dirname(dest)
     os.makedirs(cache_dir, exist_ok=True)
-    # Stage into a unique temp file and atomically rename into place: unique names
-    # keep concurrent downloads from clobbering each other's in-flight write, and
-    # the same-dir os.replace never rewrites a libduckdb.dylib another process may
-    # already have mapped.
+    # The function writes the library to a temporary file with a unique name in the cache directory, and os.replace
+    # then moves that file over dest in one step. Two processes that download at once each write their own temporary
+    # file. os.replace gives dest a new file instead of writing into the old one, which another process may have loaded.
     fd_dest, tmp_dest = tempfile.mkstemp(dir=cache_dir, prefix="libduckdb.", suffix=".tmp")
     try:
         with os.fdopen(fd_dest, "wb") as dst:
@@ -308,6 +317,15 @@ duckdb_major_version = int(duckdb_version.split(".")[0])
 
 
 def _download_libduckdb():
+    """Download the standalone libduckdb of the installed duckdb version to numbduck's cache, and return its path.
+
+    The function asks for consent first, and raises ``RuntimeError`` if the answer is no. It downloads
+    ``libduckdb-osx-universal.zip`` from DuckDB's GitHub release whose tag is ``v`` followed by ``duckdb.__version__``.
+    """
+    # Every DuckDB release from v1.2.2 to v1.5.6 has libduckdb-osx-universal.zip. The v2.0.0 release publishes the
+    # library as duckdb-shared-libs-osx-universal.tar.gz instead, so for duckdb 2.0.0 this URL returns HTTP 404 and the
+    # download raises RuntimeError. The macOS wheels of duckdb 2.0.0 export the C API, so the import never reaches this
+    # download for 2.0.0.
     url = (
         "https://github.com/duckdb/duckdb/releases"
         f"/download/v{duckdb_version}"
@@ -329,11 +347,16 @@ def _download_libduckdb():
 
 
 def find_duckdb_shared_lib():
-    # Consulted in a fixed order: the duckdb 1.3.x layout (shared lib inside the
-    # duckdb/ package dir) first, then the 1.4+ layout (shared lib in the parent
-    # site-packages/ as _duckdb.*). The extension alternation is end-anchored so
-    # a name that merely contains a valid suffix (e.g. a ".so.debug" sidecar or
-    # a versioned ".so.1" soname) cannot ride along and trip the len==1 guard.
+    """Return the path of the shared library inside the installed duckdb wheel.
+
+    duckdb 1.3 and earlier install the library in the ``duckdb`` package directory, as a file whose name starts with
+    ``duckdb``. duckdb 1.4.0 and later install it in ``site-packages`` as ``_duckdb`` with the platform's extension,
+    such as ``_duckdb.abi3.so`` for duckdb 2.0.0 on Linux. The function looks in the package directory first. It raises
+    ``RuntimeError`` if neither directory holds exactly one candidate.
+    """
+    # Each pattern must match a whole file name. A file whose name only contains a library extension, such as a
+    # ".so.debug" file beside the library or a versioned ".so.1", is therefore not a candidate, so it cannot become a
+    # second candidate beside the library.
     duckdb_dir = os.path.dirname(getfile(duckdb))
     duckdb_dir_files = next(iter(os.walk(duckdb_dir)))[2]
     pkg_libs = [file_ for file_ in duckdb_dir_files if re.fullmatch(r"duckdb[\w.-]*\.(so|dll|dylib|pyd)", file_)]
@@ -351,12 +374,13 @@ def find_duckdb_shared_lib():
 
 
 def _non_darwin_capi_error():
-    """Message for the non-macOS branch when the wheel lacks the C API.
+    """Return the message of the ``RuntimeError`` that :func:`load_duckdb` raises off macOS when it finds no C API.
 
-    Distinguishes an unset ``NUMBDUCK_LIBDUCKDB`` from one set to a path that
-    was not found (echoing the rejected path so the user is not told to do what
-    they just did), and states the platform asymmetry: the automatic standalone
-    download is macOS-only, so off macOS the env var is the recourse.
+    The message distinguishes an unset ``NUMBDUCK_LIBDUCKDB`` from a set one. For a set one, it quotes the path, which
+    names no file or a library without the C API, so that it does not ask the user to set a variable that is already
+    set. For an unset one, it names ``libduckdb.dll`` on Windows and ``libduckdb.so`` elsewhere. Either way, it says
+    that the automatic download of a standalone libduckdb is macOS-only, so that off macOS ``NUMBDUCK_LIBDUCKDB`` is
+    the way to supply the C API.
     """
     env_path = os.environ.get("NUMBDUCK_LIBDUCKDB")
     if env_path:
@@ -383,28 +407,46 @@ def _non_darwin_capi_error():
 
 
 def load_duckdb():
+    """Load the libduckdb whose C API the bindings call, and return its ``ctypes`` handle.
+
+    :mod:`numbduck.ducklib` calls this function when it is imported. The function loads the shared library of the
+    installed duckdb wheel with numbox's ``load_lib_path``, which makes the library's symbols visible to the JIT linker.
+    If that library exports the C API, the bindings and the Python ``duckdb`` module share one DuckDB runtime. The
+    Linux and Windows wheels export it, and so do the macOS wheels of duckdb 1.2.2 to 1.4.0 and 1.5.3 to 2.0.0. The
+    macOS wheels of duckdb 1.4.1 to 1.5.2 do not.
+
+    If the wheel's library does not export the C API, the function first deletes ``~/.numbduck/lib/libduckdb.dylib``,
+    where earlier numbduck releases cached the standalone library. It deletes that file even if ``NUMBDUCK_LIBDUCKDB``
+    names it. The function then tries only the first standalone libduckdb that :func:`_find_standalone_libduckdb`
+    finds, and raises ``OSError`` if that file is not a loadable library. It ignores a library that does not export the
+    C API, as if it had found no file. A library that exports the C API must report the wheel's library version,
+    and the function raises ``RuntimeError`` if the two versions differ or if either cannot be read.
+
+    If no standalone library is loaded, the function raises ``RuntimeError`` off macOS. On macOS, it downloads the
+    library for the installed duckdb version after the user consents, as :func:`_download_libduckdb` describes. The
+    download must pass the same checks: the function raises ``OSError`` if it cannot be loaded, and ``RuntimeError`` if
+    it does not export the C API or reports another version.
+    """
     global _loaded_libduckdb
     lib_path = find_duckdb_shared_lib()
     lib = load_lib_path(lib_path)
     if _has_capi_symbols(lib):
-        # Single-runtime invariant: the wheel's own shared object backs both the
-        # Python ``duckdb`` module and numbduck's JIT bindings, so any handle is
-        # allocated and consumed by one libduckdb. Coordination holds by
-        # construction.
+        # The Python duckdb module and the bindings both use the wheel's own library, so one libduckdb creates and uses
+        # every handle, and no handle passes from one DuckDB build to another.
         _loaded_libduckdb = lib
         return lib
-    # Python wheel missing C API symbols (seen on the macOS duckdb wheels that
-    # strip them; detected dynamically by _has_capi_symbols above rather than
-    # pinned to a version window that would rot as the duckdb pin advances).
-    # numbduck must load a second, standalone libduckdb RTLD_GLOBAL to supply the
-    # C API, leaving two DuckDB runtimes resident: the wheel's (used by the
-    # Python ``duckdb`` module) and this standalone (bound by numbduck's JIT
-    # code). The single-runtime invariant no longer holds automatically. pybridge
-    # hands a Connection* minted by the wheel to this standalone's C API, which is
-    # sound only when the two are the same DuckDB build; refuse any version
-    # mismatch rather than dereference a cross-runtime pointer. Every handle used
-    # from JIT must originate from this standalone runtime, never from the Python
-    # ``duckdb`` module directly.
+    # The macOS wheels that lack the C API export only the Python module's two entry points
+    # (https://github.com/duckdb/duckdb-python/pull/81), and duckdb 1.5.3 exports the C API again
+    # (https://github.com/duckdb/duckdb-python/pull/445). The versions in the docstring come from the export tables of
+    # the cp312 arm64 wheel of every release from 1.2.2 to 2.0.0, and of the x86_64 and universal2 wheels of 1.4.0,
+    # 1.4.1, 1.5.2 and 1.5.3. The test above looks for a symbol rather than at the duckdb version, so it needs no list
+    # of versions.
+    #
+    # numbduck then loads a second, standalone libduckdb with RTLD_GLOBAL, and the process holds two DuckDB runtimes.
+    # The Python duckdb module uses the wheel's, and the bindings call the standalone. pybridge passes a Connection*
+    # that the wheel created to the standalone's C API. That can work only if the two are the same DuckDB build, so a
+    # standalone library of another version is refused. Every other handle that jitted code uses must come from the
+    # standalone runtime, never from the Python duckdb module.
     _migrate_legacy_cache()
     standalone = _find_standalone_libduckdb()
     if standalone:
@@ -417,9 +459,11 @@ def load_duckdb():
     downloaded = _download_libduckdb()
     lib = _load_coordinated_standalone(downloaded)
     if lib is None:
-        # Mirror the standalone branch's check so a corrupt or wrong-arch
-        # download fails here with a pointer back to the cache, not later as an
-        # opaque JIT link error at the first @njit call.
+        # A download that loads but does not export the C API fails here, with a message that names the cache. A file
+        # that cannot be loaded, such as a corrupt download or a library for another architecture, has already raised
+        # OSError in _load_coordinated_standalone. Without this check, the failure would come later, when numba
+        # compiles the first binding at import. Its error would be about a missing C symbol and would name neither the
+        # download nor the cache.
         raise RuntimeError(
             f"numbduck downloaded libduckdb to {downloaded!r} but it does not "
             f"export the DuckDB C API symbols numbduck needs. Delete "
@@ -431,10 +475,9 @@ def load_duckdb():
 
 
 def loaded_library_version():
-    """Normalized version of the libduckdb backing numbduck's JIT bindings.
+    """Return the version of the libduckdb that the bindings call, without its leading ``v``.
 
-    Returns ``None`` before :func:`load_duckdb` has run or when the version
-    cannot be read.
+    Return None before :func:`load_duckdb` has run, or if the library does not report a version.
     """
     if _loaded_libduckdb is None:
         return None
@@ -442,16 +485,15 @@ def loaded_library_version():
 
 
 def libraries_coordinated():
-    """True when numbduck's JIT libduckdb matches the Python ``duckdb`` wheel.
+    """Return whether the libduckdb that the bindings call reports the same library version as the duckdb wheel.
 
-    Compares the library version reported by the libduckdb :func:`load_duckdb`
-    bound into numbduck's bindings against the wheel's own library version
-    (:func:`_wheel_library_version`, read via ``PRAGMA version`` so it is the same
-    ``vX.Y.Z[-devN]`` scheme, not the ``duckdb.__version__`` package version).
-    Only an exact match makes it safe to hand a wheel-minted ``Connection*``
-    across the two, mirroring numbox's ``libraries_coordinated`` guard. When it
-    returns ``False``, pybridge refuses the extraction rather than dereference a
-    pointer under a possibly-different internal layout.
+    Both are library versions in the ``vX.Y.Z[-devN]`` scheme: ``duckdb_library_version()`` for the bindings' library,
+    and ``PRAGMA version`` for the wheel, as :func:`_wheel_library_version` reads it. The function does not use the
+    package version, ``duckdb.__version__``. It returns False if either version cannot be read.
+
+    :func:`numbduck.pybridge.extract_connection_ptr` returns a ``Connection*`` that the wheel created only if this
+    function returns True, because a library of another build may lay the connection out differently. numbox's
+    ``numbox.utils.pysqlite_bridge.libraries_coordinated`` makes the same check for SQLite.
     """
     jit_version = loaded_library_version()
     if jit_version is None:
@@ -463,9 +505,20 @@ def libraries_coordinated():
 
 
 def complete_open_result(conn):
-    """
-    Added in duckdb==2.0.0
-    https://github.com/duckdb/duckdb-python/releases
+    """Finish the open result of the last query on the connection ``conn``, so that the C API can run a query on it.
+
+    From duckdb 2.0.0, an open result holds its connection until the result is done, and the C API refuses a new query
+    on that connection: ``duckdb_query`` and ``duckdb_prepare`` return ``DuckDBError`` with a
+    ``Resource In Use Error``. The function calls ``conn.complete()``, a method that duckdb 2.0.0 added. ``complete()``
+    runs the result to its end without reading its rows (https://github.com/duckdb/duckdb-python/releases/tag/v2.0.0),
+    so every row that the caller has not fetched is discarded: afterwards the result returns no more rows, and no error
+    or warning reports the loss.
+
+    On an earlier duckdb, the function does nothing, and a C API query on a connection whose Python result is still
+    open succeeds. The duckdb module reads a result in chunks of up to 2,048 rows. After such a query, the open result
+    returns only the rest of the chunk that its last fetch read, and no error reports the rows that it loses. A result
+    that was never fetched returns no row. On every duckdb version, fetch the rows still needed before this call and
+    before any C API query on the connection.
     """
     if duckdb_major_version >= 2:
         assert hasattr(conn, "complete")

@@ -1,7 +1,8 @@
-"""Shared utilities for numbduck example scripts.
+"""Helpers that the three benchmark scripts share.
 
-Keep it small: only utilities shared across the example scripts belong here.
-Push any DuckDB-specific logic back into the example that needs it.
+``print_env`` prints the line that opens each script's output, ``time_median`` times a query, ``format_table`` lays
+out the results, and ``assert_results_match`` checks that the variants of a benchmark agree. The module holds only
+helpers that more than one script uses. Code that works with DuckDB itself stays in the script that needs it.
 """
 import math
 import os
@@ -16,7 +17,10 @@ import numpy
 
 
 def print_env() -> None:
-    """Print a one-line environment block. Every example output starts with this."""
+    """Print the Python, duckdb, numba and numpy versions, the machine type and the number of logical CPUs, on one line.
+
+    Each benchmark script prints this line first, so that a saved output records where its numbers were measured.
+    """
     pyver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     print(
         f"  env: python {pyver}, duckdb {duckdb.__version__}, "
@@ -26,10 +30,12 @@ def print_env() -> None:
 
 
 def time_median(fn, repeats: int = 3) -> float:
-    """Run fn() `repeats` times under perf_counter; return median wall time in seconds.
+    """Call ``fn()`` ``repeats`` times and return the median time of one call, in seconds.
 
-    No auto-warmup: caller is responsible. We pick the median, not the min,
-    to dampen the occasional outlier without hiding real variance.
+    The clock is ``time.perf_counter``, which measures wall time. ``NUMBDUCK_BENCH_REPEATS``, if set, replaces
+    ``repeats``. A value that is not an integer, or a count below 1, raises ``ValueError``. The function makes no
+    warm-up call, so a caller that needs one makes it first. An occasional slow call has little effect on the median.
+    Unlike the minimum, the median does not report the best case alone.
     """
     repeats = int(os.environ.get("NUMBDUCK_BENCH_REPEATS", repeats))
     if repeats < 1:
@@ -43,7 +49,12 @@ def time_median(fn, repeats: int = 3) -> float:
 
 
 def format_table(headers: list[str], rows: list[list[str]], alignments: list[str]) -> str:
-    """Format a small table for stdout. alignments: list of '<', '>', '^'."""
+    """Return ``headers`` and ``rows`` as lines of aligned text columns, ready to print.
+
+    Every cell is a string. ``alignments`` holds one format alignment per column: ``"<"``, ``">"`` or ``"^"``. A column
+    is as wide as its widest cell, columns are two spaces apart, and every line starts with two spaces. ``ValueError``
+    is raised if ``alignments`` or a row has a length other than that of ``headers``.
+    """
     if len(headers) != len(alignments):
         raise ValueError("headers and alignments must be the same length")
     for row in rows:
@@ -65,7 +76,10 @@ def format_table(headers: list[str], rows: list[list[str]], alignments: list[str
 
 
 def _both_nan(a, b) -> bool:
-    """True only when a and b are both floating-point NaN. Non-numbers are not NaN."""
+    """Return True if ``a`` and ``b`` are both NaN.
+
+    A value that ``math.isnan`` rejects, such as ``None``, counts as not NaN.
+    """
     try:
         return math.isnan(a) and math.isnan(b)
     except (TypeError, OverflowError):
@@ -73,13 +87,13 @@ def _both_nan(a, b) -> bool:
 
 
 def assert_results_match(*results, label: str) -> None:
-    """Cross-check that all variants produced the same answer.
+    """Raise ``AssertionError``, with ``label`` in the message, unless every result equals the first.
 
-    Catches 'your fast variant is fast because it's wrong'. Allows numpy floats
-    to compare equal at full precision; if you need tolerance, do it before calling.
-    Two NaN scalars are treated as a match: under IEEE-754 NaN != NaN, so variants
-    that legitimately all produce NaN would otherwise be flagged as a spurious
-    mismatch. A NaN against any non-NaN value still fails.
+    The check catches a variant that is fast only because it returns a wrong result. It compares with ``==`` at full
+    precision, so a caller whose variants may differ in the last bits of a float rounds them first, as
+    ``online_scoring.py`` does. Two NaN values count as a match: under IEEE 754 ``NaN != NaN``, yet variants that all
+    return NaN agree. A NaN compared with a value that is not NaN raises ``AssertionError``. The function returns
+    without a check if it receives fewer than two results.
     """
     if len(results) < 2:
         return

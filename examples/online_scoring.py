@@ -1,75 +1,82 @@
-"""Online event scoring loop: latency + GIL-free axis.
+"""Score events one at a time against a DuckDB table, from a Python loop and from a numba loop without the GIL.
 
-Story: a real-time scoring service. Events arrive one at a time. For each
-event we look up the entity's stored features in a DuckDB table and compute
-a 4-element dot-product score. The metric the operator cares about is
-per-event latency, not throughput. Batching events to amortize Python
-overhead is exactly what the SLA forbids.
+A scoring service receives events one at a time. For each event, it looks up the entity's four stored features in a
+DuckDB table and scores the event as the dot product of those features with the event's own four values. What matters
+is the latency of each event, so the service cannot batch events to spread Python's overhead over many of them. The
+script compares two loops that do this work:
 
-Two variants:
-  1. Pure-Python loop calling conn.execute(...).fetchone() per event.
-  2. numbduck @njit(nogil=True) loop calling duckdb_execute_prepared and
-     reading the result chunk via the bound C API, with no Python crossings
-     between iterations. Per-event latency is captured via a cross-platform
-     monotonic clock bound inside the JIT loop (numbox.utils.clock.monotonic_ns:
-     clock_gettime on POSIX, QueryPerformanceCounter on Windows).
+1. A Python loop calls ``conn.execute(sql, [id]).fetchone()`` for each event.
+2. An ``@njit(nogil=True)`` loop binds the id to a prepared statement, runs it with ``duckdb_execute_prepared`` and
+   reads the result chunk through numbduck's bindings. It never returns to Python between events. It times each event
+   with ``numbox.utils.clock.monotonic_ns``, a monotonic clock that jitted code can call: ``clock_gettime`` on Linux
+   and macOS, ``QueryPerformanceCounter`` on Windows.
 
-This example also measures parallel scaling on 1/2/4/8 worker threads. The
-expected (and dramatic) shape: the Python loop is GIL-bound and shows zero
-or negative scaling; the JIT loop scales roughly linearly with cores.
+Each lookup is a real DuckDB query, so the JIT loop saves only the time that Python adds to each event: the time spent
+in the interpreter and in the work that the duckdb module does around each call. The script also splits a sample of
+the events among 1, 2, 4 and 8 threads, each with its own connection, and prints each loop's speedup over one thread.
+The JIT loop never holds the GIL, so its threads run in parallel, while the Python loop holds the GIL whenever it runs
+Python code. In the runs below, the Python loop is no faster with more than two threads under duckdb 1.5. Under
+duckdb 2.0, it scales about as well as the JIT loop up to four threads.
 
-Run:
+Run it with::
+
     python examples/online_scoring.py
-    NUMBDUCK_BENCH_BIG=1 python examples/online_scoring.py    # 500K-event dataset
+    NUMBDUCK_BENCH_BIG=1 python examples/online_scoring.py     # a dataset of 500,000 events
+    NUMBDUCK_BENCH_TINY=1 python examples/online_scoring.py    # 200 events and 2 thread counts, a quick check
 
-Last measured on: 2026-04-10, x86_64 (WSL2, 8 cores), python 3.12.3,
-duckdb 1.5.1, numba 0.64.0:
+The dataset holds 50,000 events, and the table holds the features of 10,000 entities. The script times a tenth of the
+events one by one, for the latencies, and splits a twenty-fifth of them among the threads, so ``NUMBDUCK_BENCH_BIG``
+enlarges both measurements.
+It checks that the two loops compute the same total score, then prints the latency percentiles of each loop and the
+scaling table. Three runs, with "us" for microseconds::
 
-  Per-event latency (5,000 events):
-  Variant   Total  Events/s  p50 µs  p95 µs  p99 µs   max µs
-  Python   1.913s     2,614   347.3   582.3   884.0   2290.4
-  JIT      0.914s     5,469   144.3   323.6   582.6  12448.8
+    x86_64 under WSL2, 8 cores, Python 3.12.3, duckdb 1.5.1, numba 0.64.0:
 
-  Parallel scaling (2,000 events split across T workers):
-  T  Python  Py speedup     JIT  JIT speedup
-  1  0.830s       1.00x  0.380s        1.00x
-  2  0.497s       1.67x  0.292s        1.30x
-  4  0.732s       1.13x  0.199s        1.91x
-  8  0.859s       0.97x  0.159s        2.40x
+      Per-event latency (5,000 events):
+      Variant   Total  Events/s  p50 us  p95 us  p99 us   max us
+      Python   1.913s     2,614   347.3   582.3   884.0   2290.4
+      JIT      0.914s     5,469   144.3   323.6   582.6  12448.8
 
-DuckDB==1.5.6 on MacBookPro M1
+      Parallel scaling (2,000 events split across T workers):
+      T  Python  Py speedup     JIT  JIT speedup
+      1  0.830s       1.00x  0.380s        1.00x
+      2  0.497s       1.67x  0.292s        1.30x
+      4  0.732s       1.13x  0.199s        1.91x
+      8  0.859s       0.97x  0.159s        2.40x
 
-env: python 3.12.13, duckdb 1.5.6, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
-Online scoring: 50,000-event dataset, 10,000 features
+    MacBook Pro M1, duckdb 1.5.6:
 
-  Per-event latency (5,000 events):
-  Variant   Total  Events/s  p50 µs  p95 µs  p99 µs  max µs
-  Python   0.982s     5,090   178.9   280.3   382.3   997.6
-  JIT      0.429s    11,649    82.0   108.0   151.0   664.0
+    env: python 3.12.13, duckdb 1.5.6, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
+    Online scoring: 50,000-event dataset, 10,000 features
 
-  Parallel scaling (2,000 events split across T workers):
-  T  Python  Py speedup     JIT  JIT speedup
-  1  0.418s       1.00x  0.205s        1.00x
-  2  0.343s       1.22x  0.158s        1.30x
-  4  0.423s       0.99x  0.101s        2.03x
-  8  0.449s       0.93x  0.083s        2.48x
+      Per-event latency (5,000 events):
+      Variant   Total  Events/s  p50 us  p95 us  p99 us  max us
+      Python   0.982s     5,090   178.9   280.3   382.3   997.6
+      JIT      0.429s    11,649    82.0   108.0   151.0   664.0
 
-Duckdb==2.0.0 on MacBook Pro M1:
+      Parallel scaling (2,000 events split across T workers):
+      T  Python  Py speedup     JIT  JIT speedup
+      1  0.418s       1.00x  0.205s        1.00x
+      2  0.343s       1.22x  0.158s        1.30x
+      4  0.423s       0.99x  0.101s        2.03x
+      8  0.449s       0.93x  0.083s        2.48x
 
-env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
-Online scoring: 50,000-event dataset, 10,000 features
+    MacBook Pro M1, duckdb 2.0.0:
 
-  Per-event latency (5,000 events):
-  Variant   Total  Events/s  p50 µs  p95 µs  p99 µs  max µs
-  Python   1.005s     4,978   191.5   252.5   325.7   785.0
-  JIT      0.770s     6,494   150.0   181.0   214.0   499.0
+    env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
+    Online scoring: 50,000-event dataset, 10,000 features
 
-  Parallel scaling (2,000 events split across T workers):
-  T  Python  Py speedup     JIT  JIT speedup
-  1  0.418s       1.00x  0.334s        1.00x
-  2  0.244s       1.71x  0.208s        1.60x
-  4  0.174s       2.40x  0.138s        2.43x
-  8  0.180s       2.32x  0.106s        3.14x
+      Per-event latency (5,000 events):
+      Variant   Total  Events/s  p50 us  p95 us  p99 us  max us
+      Python   1.005s     4,978   191.5   252.5   325.7   785.0
+      JIT      0.770s     6,494   150.0   181.0   214.0   499.0
+
+      Parallel scaling (2,000 events split across T workers):
+      T  Python  Py speedup     JIT  JIT speedup
+      1  0.418s       1.00x  0.334s        1.00x
+      2  0.244s       1.71x  0.208s        1.60x
+      4  0.174s       2.40x  0.138s        2.43x
+      8  0.180s       2.32x  0.106s        3.14x
 """
 import os
 import sys
@@ -98,14 +105,15 @@ N_EVENTS = 50_000
 N_FEATURES = 10_000
 if os.environ.get("NUMBDUCK_BENCH_BIG") == "1":
     N_EVENTS = 500_000
-# Smoke-test mode: a tiny end-to-end pass so CI can confirm the benchmark
-# runs on every platform without burning real minutes.
+# NUMBDUCK_BENCH_TINY=1 shrinks the run to a quick check that the script works: 200 events over 100 entities, and
+# two thread counts instead of four.
 if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
     N_EVENTS = 200
     N_FEATURES = 100
 
 
 def setup_features(conn, k):
+    """Replace the table ``features`` with ``k`` rows: an ``id`` from 0 to k - 1 and four random weights, w0 to w3."""
     conn.execute("SELECT setseed(0.42)")
     conn.execute(
         f"CREATE OR REPLACE TABLE features AS "
@@ -116,6 +124,7 @@ def setup_features(conn, k):
 
 
 def setup_events(n_events, k_features, seed=43):
+    """Return ``(ids, x)`` for ``n_events`` random events: entity ids below ``k_features``, and 4 values per event."""
     rng = numpy.random.default_rng(seed)
     ids = rng.integers(0, k_features, size=n_events, dtype=numpy.int64)
     x = rng.random((n_events, 4), dtype=numpy.float64)
@@ -123,15 +132,19 @@ def setup_events(n_events, k_features, seed=43):
 
 
 def sample_sizes(n_events):
-    """(latency_events, scaling_events) actually scored for a dataset of
-    n_events. Sized off the dataset so NUMBDUCK_BENCH_BIG enlarges the measured
-    workload, not just the allocation; scaling scores fewer than latency so all
-    thread counts fit the budget."""
+    """Return ``(latency_events, scaling_events)``, the numbers of events that the two measurements score.
+
+    Both are fractions of the dataset, a tenth and a twenty-fifth, so ``NUMBDUCK_BENCH_BIG`` enlarges the measured work
+    and not only the dataset. The scaling measurement scores fewer events because it runs once for every thread count.
+    """
     return n_events // 10, n_events // 25
 
 
 def score_python(conn, ids, x):
-    """Pure-Python loop. Returns (scores, latencies_ns)."""
+    """Score each event with the Python loop and return ``(scores, latencies_ns)``.
+
+    An id without a row, or a NULL feature, raises ``TypeError`` from the arithmetic on ``None``.
+    """
     n = len(ids)
     scores = numpy.empty(n, dtype=numpy.float64)
     latencies = numpy.empty(n, dtype=numpy.int64)
@@ -149,12 +162,12 @@ def score_python(conn, ids, x):
 
 @njit(nogil=True)
 def _release(chunk_buf, result_buf):
-    """Destroy the chunk and the result held in these buffers.
+    """Destroy the data chunk and the result whose handles ``chunk_buf`` and ``result_buf`` hold.
 
-    Takes the buffers, not their addresses. numba frees an array right after its
-    last use and an address keeps nothing alive, so on a raise branch, where the
-    buffers are otherwise dead, a destroy given a bare address reads a freed
-    buffer. Passed in, the caller's buffers stay alive until this returns.
+    The function takes the buffers, not their addresses, because numba frees an array right after its last use, and an
+    address does not keep the array alive. On a branch that raises, the caller uses the buffers no further, so a destroy
+    call that received only an address would read a freed buffer. A buffer passed in stays alive until the function
+    returns.
     """
     ducklib.duckdb_destroy_data_chunk(array_data_p(chunk_buf))
     ducklib.duckdb_destroy_result(array_data_p(result_buf))
@@ -162,7 +175,16 @@ def _release(chunk_buf, result_buf):
 
 @njit(nogil=True)
 def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
+    """Score each event through the prepared statement ``stmt_p``, writing ``scores_out[i]`` and ``latencies_out[i]``.
+
+    ``stmt_p`` is the address of a statement prepared with one parameter, the entity id, and the loop runs without the
+    GIL. Each latency is in nanoseconds and covers the bind, the query, the fetch, the score and the destroy calls.
+    ``RuntimeError`` is raised if a bind or a query fails, if an id matches no row, or if a feature is NULL. Before it
+    raises, the loop destroys the result and the chunk that the event created.
+    """
     n = len(ids)
+    # duckdb_execute_prepared writes a duckdb_result, a struct of six 8-byte fields, into result_buf. chunk_buf holds
+    # the handle of the current data chunk for _release.
     result_buf = numpy.zeros(6, dtype=numpy.int64)
     chunk_buf = numpy.zeros(1, dtype=numpy.int64)
     result_p = intp(result_buf.ctypes.data)
@@ -170,25 +192,26 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
     for i in range(n):
         t0 = monotonic_ns()
 
-        # The bind/execute return-code checks below are defensive: this demo's
-        # fixed point-lookup with a valid parameter index never fails them.
+        # The checks of the bind and the query are defensive: this fixed lookup, with its one valid parameter index,
+        # never fails them.
         bind_rc = ducklib.duckdb_bind_int64(stmt_p, numpy.uint64(1), ids[i])
         if bind_rc != ducklib.DuckDBSuccess:
-            # Bind failed before any result was produced -- nothing to destroy.
+            # A failed bind creates no result, so there is nothing to destroy.
             raise RuntimeError("bind failed in scoring loop")
         exec_rc = ducklib.duckdb_execute_prepared(stmt_p, result_p)
         if exec_rc != ducklib.DuckDBSuccess:
-            # execute_prepared fills an error result even on failure; destroy it.
+            # duckdb_execute_prepared fills result_buf even when the query fails, and that result must be destroyed.
             _release(chunk_buf, result_buf)
             raise RuntimeError("execute failed in scoring loop")
+        # duckdb_fetch_chunk takes the duckdb_result struct by value, which numbduck's binding accepts as a tuple of
+        # its six fields.
         result_tup = (
             result_buf[0], result_buf[1], result_buf[2],
             result_buf[3], result_buf[4], result_buf[5],
         )
         chunk_p = ducklib.duckdb_fetch_chunk(result_tup)
-        # This point lookup matches exactly one row; a NULL (0) or empty chunk
-        # means a missed key. Guard before dereferencing so a bad key raises
-        # instead of segfaulting on a NULL chunk inside the nogil loop.
+        # The lookup matches exactly one row, so a chunk address of 0, or an empty chunk, means that the id matched
+        # none. The check raises before the loop reads the chunk, because a read at address 0 would crash the process.
         if chunk_p == 0 or ducklib.duckdb_data_chunk_get_size(chunk_p) == 0:
             chunk_buf[0] = chunk_p
             _release(chunk_buf, result_buf)
@@ -198,9 +221,9 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
         v1 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 1)
         v2 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 2)
         v3 = ducklib.duckdb_data_chunk_get_vector(chunk_p, 3)
-        # A NULL feature cell would be read as stale storage and silently score
-        # wrong; the Python reference raises on None*float, so match that here.
-        # Free the chunk+result before raising inside the nogil loop.
+        # The data of a NULL feature is undefined and would give a wrong score. score_python raises for a NULL
+        # feature, because it multiplies None by a float, so this loop raises too, after it frees the chunk and the
+        # result.
         val0 = ducklib.duckdb_vector_get_validity(v0)
         val1 = ducklib.duckdb_vector_get_validity(v1)
         val2 = ducklib.duckdb_vector_get_validity(v2)
@@ -235,17 +258,24 @@ def _score_jit_loop(stmt_p, ids, x, scores_out, latencies_out):
 
 
 def score_jit(conn, ids, x):
-    """JIT loop. Prepares the statement once, then runs the @njit core."""
+    """Score each event with the JIT loop and return ``(scores, latencies_ns)``.
+
+    The function prepares the lookup once on ``conn`` and runs ``_score_jit_loop`` over all the events. It destroys the
+    statement afterward, also when the loop raises. ``AssertionError`` is raised if the statement cannot be prepared.
+    """
     conn_ptr = extract_connection_ptr(conn)
     stmt = create_duckdb_prepared_statement()
     sql = "SELECT w0, w1, w2, w3 FROM features WHERE id = $1"
     n = len(ids)
     scores = numpy.empty(n, dtype=numpy.float64)
     latencies = numpy.empty(n, dtype=numpy.int64)
-    # duckdb_prepare allocates a statement object even when the prepare fails
-    # (it owns the error message), so it must always be destroyed. Hence the
-    # try/finally, which also covers any exception raised inside the loop.
+    # duckdb 2.0 refuses a query through the C API on a connection that still has an unfinished result from
+    # execute(), with "Resource In Use Error: connection has an open result". score_python leaves such a result,
+    # because fetchone() reads only part of it. complete_open_result runs the result to its end under duckdb 2.0 and
+    # does nothing under duckdb 1.x.
     complete_open_result(conn)
+    # duckdb_prepare creates a statement even when it fails, to hold the error message, so the finally block always
+    # destroys it. The block also runs when the loop raises.
     try:
         with c_string(sql) as sql_p:
             rc = ducklib.duckdb_prepare(conn_ptr, sql_p, stmt.ctypes.data)
@@ -257,7 +287,8 @@ def score_jit(conn, ids, x):
 
 
 def percentiles_us(latencies_ns):
-    a = numpy.asarray(latencies_ns) / 1000.0  # ns → µs
+    """Return the 50th, 95th and 99th percentiles and the maximum of ``latencies_ns``, converted to microseconds."""
+    a = numpy.asarray(latencies_ns) / 1000.0
     return (
         float(numpy.percentile(a, 50)),
         float(numpy.percentile(a, 95)),
@@ -267,14 +298,18 @@ def percentiles_us(latencies_ns):
 
 
 def run_latency_block(conn, ids, x):
-    # Warm up
+    """Score the events with both loops on ``conn`` and return their latencies, ``(py_lats, jit_lats)``.
+
+    ``AssertionError`` is raised if the two loops' total scores differ after rounding to six decimals.
+    """
+    # The first call of _score_jit_loop compiles it. A warm-up over the first 200 events keeps that, and DuckDB's
+    # first-query costs, out of the latencies.
     _ws, _wl = score_python(conn, ids[:200], x[:200])
     _ws, _wl = score_jit(conn, ids[:200], x[:200])
 
     py_scores, py_lats = score_python(conn, ids, x)
     jit_scores, jit_lats = score_jit(conn, ids, x)
 
-    # Cross-check
     assert_results_match(
         round(float(py_scores.sum()), 6),
         round(float(jit_scores.sum()), 6),
@@ -284,9 +319,12 @@ def run_latency_block(conn, ids, x):
 
 
 def run_scaling_block(conn_factory, ids, x):
-    """For each T in the thread counts, launch T workers that each score n/T of
-    the events; each worker uses its own connection. Returns dict
-    {variant: {T: total_wall}}."""
+    """Return ``{variant: {T: seconds}}``, the wall time of each loop with the events split among ``T`` threads.
+
+    ``T`` takes the values 1, 2, 4 and 8, or 1 and 2 under ``NUMBDUCK_BENCH_TINY``. Each of the ``T`` workers scores an
+    equal share of the events, to within one event. A worker opens its own connection with ``conn_factory`` and closes
+    it when it is done, and the wall time includes both.
+    """
     n = len(ids)
     out = {"python": {}, "jit": {}}
     if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
@@ -321,6 +359,7 @@ def run_scaling_block(conn_factory, ids, x):
 
 
 def main():
+    """Build the data, measure the latency and the scaling of both loops, and print the two tables and a discussion."""
     print_env()
     print(f"  Online scoring: {N_EVENTS:,d}-event dataset, {N_FEATURES:,d} features")
     print()
@@ -330,10 +369,9 @@ def main():
 
     ids, x = setup_events(N_EVENTS, N_FEATURES)
 
-    # Both blocks score a prefix sample of the dataset (the events are i.i.d., so
-    # a prefix is a valid random sample) because the Python reference is too slow
-    # per call to score the whole pool. Sizing the samples off N_EVENTS is what
-    # makes NUMBDUCK_BENCH_BIG enlarge the measured workload, not just the array.
+    # Both measurements score the first events of the dataset, because the Python loop is too slow to score them all.
+    # The events are independent draws from one distribution, so the first ones are a random sample. The sample sizes
+    # are fractions of N_EVENTS, so NUMBDUCK_BENCH_BIG enlarges the measured work and not only the dataset.
     LAT_N, SCALE_N = sample_sizes(N_EVENTS)
     py_lats, jit_lats = run_latency_block(db, ids[:LAT_N], x[:LAT_N])
 
@@ -358,11 +396,13 @@ def main():
     print(lat_table)
     print()
 
-    # Parallel scaling: each worker opens its own connection on the same
-    # on-disk db.
+    # Each worker of the scaling measurement needs a connection of its own to the same table. duckdb.connect() without
+    # a path opens a new, empty in-memory database every time, so the script creates the table in a temporary database
+    # file. mkstemp reserves a unique name but leaves an empty file, which DuckDB refuses as "not a valid DuckDB
+    # database file", so the script removes it and lets DuckDB create the file.
     scale_fd, scale_db_path = tempfile.mkstemp(suffix=".duckdb", prefix="numbduck_online_scoring_")
     os.close(scale_fd)
-    os.remove(scale_db_path)  # duckdb.connect wants to create the file itself
+    os.remove(scale_db_path)
     try:
         scale_db = duckdb.connect(scale_db_path)
         setup_features(scale_db, N_FEATURES)
@@ -396,10 +436,8 @@ def main():
         alignments=[">", ">", ">", ">", ">"],
     ))
     print()
-    # Interpolate every number in the Discussion straight from this run's own
-    # measurements so the prose can never contradict the tables above (only the
-    # qualitative story is fixed) and never cites a thread count this mode did
-    # not run.
+    # The discussion takes every number from this run's measurements, so it cannot contradict the tables above or cite
+    # a thread count that this run skipped. Only its wording is fixed.
     lat_ratio = py_p50 / jit_p50
     Ts = sorted(scaling["python"].keys())
     max_T = Ts[-1]
@@ -411,19 +449,17 @@ def main():
         f"    Per-event latency: the JIT loop runs at ~{jit_eps:,.0f} events/sec\n"
         f"    versus ~{py_eps:,.0f} events/sec for the pure-Python loop, or about\n"
         f"    {lat_ratio:.1f}x lower median latency ({jit_p50:.0f}µs vs {py_p50:.0f}µs at p50).\n"
-        "    The win is modest because every iteration still pays for a real\n"
-        "    DuckDB execute + chunk fetch + chunk destroy + result destroy; the\n"
-        "    JIT only removes Python's per-iteration interpreter and ctypes\n"
-        "    overhead.\n\n"
-        "    Parallel scaling is the dramatic axis. The pure-Python loop is\n"
-        f"    GIL-bound: across T=1..{max_T} its speedup never exceeds {best_py_speedup:.2f}x\n"
-        f"    (best at T={best_py_T}) because the interpreter serializes every\n"
-        "    iteration. The JIT loop, with nogil=True and a cross-platform\n"
-        "    monotonic clock bound from libc (POSIX) or kernel32.dll (Windows)\n"
-        f"    instead of time.monotonic_ns, scales to ~{jit_max_speedup:.2f}x at T={max_T}.\n"
-        "    The remaining gap to ideal is from DuckDB-internal locking and\n"
-        "    shared-memory contention, not GIL contention. That is the point of\n"
-        "    the example."
+        "    Both loops run a real DuckDB query for every event. The JIT loop\n"
+        "    calls the C API from compiled code, so it skips the Python\n"
+        "    interpreter and the duckdb module's Python API between queries.\n\n"
+        f"    Parallel scaling across T=1..{max_T}: the pure-Python loop's best\n"
+        f"    speedup is {best_py_speedup:.2f}x (at T={best_py_T}), and the JIT loop reaches\n"
+        f"    {jit_max_speedup:.2f}x at T={max_T}. The JIT loop runs with nogil=True and\n"
+        "    times itself with numbox's monotonic_ns, so its threads hold no GIL\n"
+        "    while they work. The Python loop holds the GIL whenever it runs\n"
+        "    Python code between DuckDB calls, so its threads take turns for that\n"
+        "    part of every event. How far it scales differs between duckdb\n"
+        "    versions."
     )
 
     db.close()

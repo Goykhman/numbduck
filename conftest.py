@@ -4,21 +4,17 @@ import pytest
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip benchmark-marked tests unless the mark expression names ``benchmark``.
+    """Skip the tests marked ``benchmark`` unless the ``-m`` expression names ``benchmark``.
 
-    Plain ``pytest`` skips the benchmarks; ``pytest -m benchmark`` runs only the
-    benchmarks. An expression that does not name ``benchmark``, such as
-    ``-m 'not slow'``, still skips them even though pytest would otherwise
-    select them.
+    A ``pytest`` run without ``-m`` skips the benchmarks, and ``pytest -m benchmark`` runs only them. An expression
+    that does not name ``benchmark``, such as ``-m 'not slow'``, still skips them, although pytest would select them.
 
-    ``addopts = -m 'not benchmark'`` cannot express that. ``-m`` is a store
-    option, so an expression given on the command line replaces the default
-    outright instead of combining with it, and ``pytest -m 'not slow'`` would
-    then run the benchmarks.
-
-    The expression is matched on a word boundary so that an unrelated marker
-    whose name merely contains ``benchmark`` does not suppress the skip.
+    A default of ``addopts = -m 'not benchmark'`` cannot do this. pytest keeps only the last ``-m`` that it is given,
+    so an expression on the command line would replace the default instead of combining with it, and
+    ``pytest -m 'not slow'`` would run the benchmarks.
     """
+    # The expression must name benchmark as a whole word, so that a marker whose name only contains it does not prevent
+    # the skip.
     if re.search(r"\bbenchmark\b", config.getoption("markexpr")):
         return
     skip_benchmark = pytest.mark.skip(reason="benchmark; run with -m benchmark")

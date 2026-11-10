@@ -1,51 +1,53 @@
-"""Fraud score UDF: branchy logic axis.
+"""Score transactions for fraud with branching rules, in three implementations of a DuckDB scalar UDF.
 
-Story: a transaction risk service. Each transaction gets an integer fraud
-score based on a small ruleset: amount tier, country mismatch, off-hours,
-merchant risk tier, and recent-txn count. The query sums scores across
-all transactions.
+Each transaction gets an integer score from five rules: the size of the amount, a country other than the home
+country, a time before 6:00 or from 23:00 on, the merchant's risk tier, and more than ten recent transactions. The
+query sums the scores of all the transactions. The script registers the scoring function three ways:
 
-Three variants:
-  1. Python scalar UDF: round-trips through the interpreter per row.
-  2. PyArrow expression UDF: pc.if_else chains over chunks. This is the
-     idiomatic vectorized-branchy approach in stock duckdb-python.
-  3. numbduck JIT UDF: chunk callback with native if/else, registered
-     via duckdb_register_scalar_function.
+1. ``fr_py`` is a Python scalar UDF. DuckDB calls it once per row, through the interpreter.
+2. ``fr_arrow`` is a PyArrow UDF that chains ``pc.if_else`` calls over each chunk of rows, the usual way to vectorize
+   branching logic with duckdb-python alone. Each step allocates an intermediate array for the chunk.
+3. ``fr_jit`` is a numbduck UDF registered through DuckDB's C API. Its compiled loop scores each row with plain ``if``
+   statements, with no Python call and no intermediate array.
 
-This example exists to test the design hypothesis that numbduck also wins
-in Arrow's wheelhouse (vectorized branchy logic). Per the spec, if the
-measured JIT-vs-Arrow gap is < 2x, the example is dropped: Arrow is the
-right tool for that workload, and we should not pretend otherwise.
+Arrow is most efficient on branching logic over whole vectors, so the script tests whether the JIT UDF is faster even
+on this workload. It prints the Arrow/JIT ratio at its largest row count with a decision rule. A ratio below 2 would
+mean that Arrow is the appropriate choice for this workload, and that the example would not belong among numbduck's
+examples.
 
-Run:
+Run it with::
+
     python examples/fraud_score.py
-    NUMBDUCK_BENCH_BIG=1 python examples/fraud_score.py    # 10M-row tier
+    NUMBDUCK_BENCH_BIG=1 python examples/fraud_score.py     # adds a run at 10,000,000 rows
+    NUMBDUCK_BENCH_TINY=1 python examples/fraud_score.py    # 1,000 rows only, a quick check that the script runs
 
-Last measured on: 2026-04-10, x86_64 (WSL2, 8 cores), python 3.12.3,
-duckdb 1.5.1, numba 0.64.0:
+The Arrow variant needs pyarrow, which numbduck does not install. At 10,000, 100,000 and 1,000,000 rows, the script
+checks that the variants return the same sum. It then prints the median time of each and its ratio to the JIT time.
+As in ``haversine.py``, the Python UDF runs only up to ``PY_MAX_N`` rows, 10,000. ``fr_jit`` cannot return SQL NULL,
+so it scores a row with a NULL input as -1, ``NULL_SCORE``; the generated data holds no NULLs.
 
-       Rows    Python      Arrow     JIT  Py/JIT  Arr/JIT
-     10,000  463.76ms     7.88ms  0.48ms    956x    16.3x
-    100,000       n/a    65.05ms  0.97ms     n/a    67.0x
-  1,000,000       n/a  2078.35ms  1.18ms     n/a  1755.3x
+Under duckdb 1.5, the Python UDF is far slower than the Arrow UDF; under duckdb 2.0, it is faster. The JIT UDF is the
+fastest of the three under both versions, and the Arrow/JIT ratio grows with the row count. DuckDB calls the Arrow
+UDF, a Python function, for every chunk, and each step of the UDF allocates a new array, while the JIT UDF computes
+each row's score in registers. DuckDB also runs a large query on several threads, and the threads speed up only the
+JIT UDF, because it never takes the GIL. Two runs::
 
-The Python scalar UDF is only run on the smallest tier (per-row interpreter
-round-trip is too expensive at >10K). The Arrow/JIT gap of ~1750x at 1M rows
-is real (cross-check passes) but is partly an Arrow PyArrow-UDF artifact:
-each chunk crosses the Python boundary and allocates intermediate arrays for
-every pc.if_else step.
+    x86_64 under WSL2, 8 cores, Python 3.12.3, duckdb 1.5.1, numba 0.64.0:
 
-DuckDb==2.0.0 on MacBook Pro M1
-(notice that with 2.0.0, Python was in fact run for 100,000 and 1,000,000 rows as well,
-adjust `PY_MAX_N = 10_000` below to reproduce):
+           Rows    Python      Arrow     JIT  Py/JIT  Arr/JIT
+         10,000  463.76ms     7.88ms  0.48ms    956x    16.3x
+        100,000       n/a    65.05ms  0.97ms     n/a    67.0x
+      1,000,000       n/a  2078.35ms  1.18ms     n/a  1755.3x
 
-env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
-Fraud score UDF benchmark: [10000, 100000, 1000000] rows
+    MacBook Pro M1, with PY_MAX_N raised to cover every row count:
 
-       Rows    Python     Arrow     JIT  Py/JIT  Arr/JIT
-     10,000    3.64ms    8.60ms  0.37ms     10x    23.2x
-    100,000   30.63ms   47.82ms  0.69ms     44x    69.2x
-  1,000,000  309.46ms  797.50ms  1.35ms    229x   589.6x
+    env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
+    Fraud score UDF benchmark: [10000, 100000, 1000000] rows
+
+           Rows    Python     Arrow     JIT  Py/JIT  Arr/JIT
+         10,000    3.64ms    8.60ms  0.37ms     10x    23.2x
+        100,000   30.63ms   47.82ms  0.69ms     44x    69.2x
+      1,000,000  309.46ms  797.50ms  1.35ms    229x   589.6x
 """
 import os
 import sys
@@ -69,18 +71,19 @@ if os.environ.get("NUMBDUCK_BENCH_BIG") == "1":
 if os.environ.get("NUMBDUCK_BENCH_TINY") == "1":
     ROW_COUNTS = [1_000]
 PY_MAX_N = 10_000
-# A @cfunc scalar callback cannot emit SQL NULL (ducklib binds no validity-write
-# helper) and cannot raise either -- an exception escaping the C boundary is
-# swallowed, not propagated -- so a NULL input that reaches the callback must be
-# written as some in-band value. We use an out-of-range sentinel: every rule adds
-# non-negative points, so a real score is always >= 0 and -1 unambiguously flags a
-# NULL/unknown transaction. Only column-borne NULLs reach the callback: DuckDB
-# constant-folds a constant NULL argument to a SQL NULL projection upstream, so
-# those rows are answered as SQL NULL directly and the sentinel never appears.
+# The score that fr_jit gives a row with a NULL input. The callback cannot write SQL NULL, because ducklib binds no
+# function that writes a validity mask. Nor can it raise: numba prints an exception that reaches the @cfunc and returns
+# to DuckDB without an error. It could fail the whole query through duckdb_scalar_function_set_error, but the example
+# marks the row instead. Every rule adds points, so a real score is at least 0, and -1 cannot be mistaken for one. Only
+# a NULL in a column reaches the callback, because DuckDB folds a constant NULL argument into a NULL result.
 NULL_SCORE = -1
 
 
 def fraud_score_py(amount, country, home_country, hour, risk_tier, recent_txns):
+    """Return the fraud score of one transaction, from 0 to 17: the Python scalar UDF.
+
+    For a row with a NULL input, DuckDB returns SQL NULL.
+    """
     s = 0
     if amount > 1000.0:
         s += 3
@@ -100,8 +103,13 @@ def fraud_score_py(amount, country, home_country, hour, risk_tier, recent_txns):
 
 
 def fraud_score_arrow(amount, country, home_country, hour, risk_tier, recent_txns):
-    # Lazy import: only the Arrow cross-check variant needs pyarrow, so importing
-    # this module for the JIT path (or a test) does not require it.
+    """Return the fraud scores of a chunk of transactions as an int32 array: the PyArrow UDF.
+
+    DuckDB calls the function once per chunk and passes each argument as a ``pyarrow.ChunkedArray``. A row with a NULL
+    input gets NULL.
+    """
+    # pyarrow is imported here, not at the top of the module, so that a program that imports this module for the JIT
+    # variant, such as a test, does not need pyarrow.
     import pyarrow.compute as pc
     s_amt = pc.if_else(
         pc.greater(amount, 1000.0),
@@ -125,6 +133,7 @@ def fraud_score_arrow(amount, country, home_country, hour, risk_tier, recent_txn
 
 @njit(inline="always")
 def _score_row(amt, co, hco, hr, rt, rx):
+    """Return the fraud score of one row, by the rules of ``fraud_score_py``."""
     s = 0
     if amt > 1000.0:
         s += 3
@@ -145,6 +154,12 @@ def _score_row(amt, co, hco, hr, rt, rx):
 
 @njit
 def _fraud_chunk_impl(info, chunk, output):
+    """Compute ``fr_jit`` for one chunk: the fraud score of each row of ``chunk``, written to ``output``.
+
+    ``info``, ``chunk`` and ``output`` are the addresses of DuckDB's function info, input data chunk and output vector,
+    as ``_fraud_chunk_cb`` receives them. The inputs are a DOUBLE vector, four TINYINT vectors and an INTEGER vector,
+    and the output is an INTEGER vector. A row with a NULL input gets ``NULL_SCORE``.
+    """
     n = ducklib.duckdb_data_chunk_get_size(chunk)
     v_amt = ducklib.duckdb_data_chunk_get_vector(chunk, 0)
     v_co = ducklib.duckdb_data_chunk_get_vector(chunk, 1)
@@ -172,10 +187,10 @@ def _fraud_chunk_impl(info, chunk, output):
     a_rt = carray(_cast_int_to_void_p(d_rt), (n,), dtype=numpy.int8)
     a_rx = carray(_cast_int_to_void_p(d_rx), (n,), dtype=numpy.int32)
     a_out = carray(_cast_int_to_void_p(d_out), (n,), dtype=numpy.int32)
-    # DuckDB returns a zero validity pointer for a vector with no NULLs. When all
-    # six inputs are fully valid (the common case, and all this benchmark feeds),
-    # run a check-free tight loop so the per-row validity probe cannot throttle the
-    # hot path; fall back to the guarded loop only when some vector carries NULLs.
+    # duckdb_vector_get_validity may return 0 for a vector without NULLs, and 0 always means that the vector has none.
+    # When all six pointers are 0, as they are for the data that this script generates, a loop without validity
+    # checks scores every row, so no per-row check slows the common case. Otherwise the guarded loop runs, even if
+    # the vectors hold no NULLs.
     any_validity = (
         val_amt != 0 or val_co != 0 or val_hco != 0
         or val_hr != 0 or val_rt != 0 or val_rx != 0
@@ -185,9 +200,8 @@ def _fraud_chunk_impl(info, chunk, output):
             a_out[i] = _score_row(a_amt[i], a_co[i], a_hco[i], a_hr[i], a_rt[i], a_rx[i])
         return
     for i in range(n):
-        # A NULL row's data slot holds stale bytes. Read each input's validity mask
-        # and score any NULL-bearing row with the sentinel instead of folding
-        # garbage into the total.
+        # DuckDB does not define the data of a NULL row, so a row with a NULL input gets NULL_SCORE instead of a
+        # score computed from undefined bytes.
         null_in = (
             (val_amt != 0 and not ducklib.duckdb_validity_row_is_valid(val_amt, i))
             or (val_co != 0 and not ducklib.duckdb_validity_row_is_valid(val_co, i))
@@ -204,10 +218,16 @@ def _fraud_chunk_impl(info, chunk, output):
 
 @cfunc(nb_types.void(nb_types.intp, nb_types.intp, nb_types.intp))
 def _fraud_chunk_cb(info, chunk, output):
+    """The ``duckdb_scalar_function_t`` that DuckDB calls for each chunk, with the three handles as intp addresses."""
     _fraud_chunk_impl(info, chunk, output)
 
 
 def register_jit_udf(conn):
+    """Register ``fr_jit``, a function of a DOUBLE, four TINYINTs and an INTEGER that returns an INTEGER, on ``conn``.
+
+    The registration goes through DuckDB's C API, and ``_fraud_chunk_cb`` computes the function. ``AssertionError`` is
+    raised if DuckDB refuses the registration.
+    """
     conn_ptr = extract_connection_ptr(conn)
     func_p = ducklib.duckdb_create_scalar_function()
     with c_string("fr_jit") as name_p:
@@ -222,19 +242,21 @@ def register_jit_udf(conn):
     ducklib.duckdb_scalar_function_add_parameter(func_p, tin_p)  # risk_tier
     ducklib.duckdb_scalar_function_add_parameter(func_p, int_p)  # recent_txns
     ducklib.duckdb_scalar_function_set_return_type(func_p, int_p)
+    # The parameters and the return type hold copies of the logical types, so the types can be destroyed now.
     for tp in (dbl_p, tin_p, int_p):
         buf = numpy.array([tp], dtype=numpy.intp)
         ducklib.duckdb_destroy_logical_type(buf.ctypes.data)
     ducklib.duckdb_scalar_function_set_function(func_p, _fraud_chunk_cb.address)
     rc = ducklib.duckdb_register_scalar_function(conn_ptr, func_p)
-    # Registration never takes ownership of func_p, so destroy it on both the
-    # success and failure paths, i.e. before asserting on the return code.
+    # Registration does not take ownership of func_p, so the function handle is destroyed before the return code is
+    # checked, after a success and after a failure alike.
     func_buf = numpy.array([func_p], dtype=numpy.intp)
     ducklib.duckdb_destroy_scalar_function(func_buf.ctypes.data)
     assert rc == ducklib.DuckDBSuccess
 
 
 def setup_data(conn, n):
+    """Replace the table ``transactions`` with ``n`` random transactions, none of them with a NULL."""
     conn.execute("SELECT setseed(0.42)")
     conn.execute(
         f"CREATE OR REPLACE TABLE transactions AS "
@@ -250,6 +272,10 @@ def setup_data(conn, n):
 
 
 def run_one(conn, n):
+    """Time the three variants over ``n`` rows and return their median times, ``(t_py, t_arrow, t_jit)``.
+
+    ``t_py`` is None above ``PY_MAX_N`` rows. ``AssertionError`` is raised if the variants return different sums.
+    """
     setup_data(conn, n)
     cols = "amount, country, home_country, hour, risk_tier, recent_txns"
     sql_py = f"SELECT sum(fr_py({cols})) FROM transactions"
@@ -257,16 +283,15 @@ def run_one(conn, n):
     sql_jit = sql_py.replace("fr_py", "fr_jit")
     run_py = n <= PY_MAX_N
 
+    # One untimed run of each query keeps first-call costs, such as the import of pyarrow, out of the timings.
     if run_py:
         conn.execute(sql_py).fetchone()
     conn.execute(sql_arrow).fetchone()
     conn.execute(sql_jit).fetchone()
 
-    # fr_jit's -1 sentinel is NOT SQL NULL: fr_py/fr_arrow yield SQL NULL for a NULL
-    # row (which sum() skips) whereas sum(fr_jit(...)) folds each -1 into the total,
-    # so the three variants are interchangeable only on non-NULL input -- which
-    # setup_data generates. A caller with real column NULLs must filter the sentinel
-    # before aggregating. See test_fraud_score_udf_null_divergence for the contract.
+    # The sums agree because setup_data generates no NULLs. For a row with a NULL input, fr_py and fr_arrow return SQL
+    # NULL, and sum() skips it. fr_jit returns -1 instead, and sum() adds it. A caller whose columns hold NULLs filters
+    # out NULL_SCORE before aggregating, as test_fraud_score_udf_null_divergence does.
     r_arrow = conn.execute(sql_arrow).fetchone()[0]
     r_jit = conn.execute(sql_jit).fetchone()[0]
     if run_py:
@@ -282,6 +307,7 @@ def run_one(conn, n):
 
 
 def main():
+    """Register the three variants, time them at each row count, and print the table, the decision and a discussion."""
     print_env()
     print(f"  Fraud score UDF benchmark: {ROW_COUNTS} rows")
     print()
@@ -321,9 +347,8 @@ def main():
         alignments=[">", ">", ">", ">", ">", ">"],
     ))
     print()
-    # Interpolate every ratio straight from the measurements above so the prose can
-    # never contradict the printed table (only the qualitative story is fixed). The
-    # first tier runs all three variants; the last is the widest N.
+    # The discussion takes every number from this run's measurements, so it cannot contradict the table above; only
+    # its wording is fixed. The first row count runs all three variants, and the last is the largest.
     n0, t_py0, t_arrow0, t_jit0 = timings[0]
     nL, _, t_arrowL, t_jitL = timings[-1]
     largest_ratio = t_arrowL / t_jitL
@@ -335,19 +360,18 @@ def main():
     print()
     print(
         "  Discussion:\n"
-        "    Arrow does the right vectorized work and beats the per-row Python\n"
-        f"    scalar UDF by ~{t_py0 / t_arrow0:.0f}x at {n0:,d} rows; pyarrow's chained\n"
-        "    pc.if_else is the correct stock-DuckDB tool for branchy logic, full\n"
-        f"    credit. The JIT chunk callback then beats Arrow by ~{t_arrow0 / t_jit0:.0f}x\n"
-        f"    at {n0:,d} rows, widening to ~{t_arrowL / t_jitL:.0f}x at {nL:,d} rows. The\n"
-        "    growing gap is *partly* an artifact: each Arrow UDF chunk crosses the\n"
-        "    Python boundary and allocates a fresh intermediate array for every\n"
-        "    pc.if_else step, while the JIT computes the whole ruleset in registers\n"
-        "    with no allocations. Even discounting the chunk-crossing overhead, the\n"
-        "    JIT path is comfortably above the spec's 2x decision threshold and the\n"
-        "    example earns its place. The case for numbduck strengthens further when\n"
-        "    the branchy work is inside a JIT loop calling other DuckDB functions\n"
-        "    (see online_scoring)."
+        f"    At {n0:,d} rows the per-row Python scalar UDF takes {t_py0 * 1000:.2f}ms,\n"
+        f"    the Arrow UDF {t_arrow0 * 1000:.2f}ms and the JIT chunk callback\n"
+        f"    {t_jit0 * 1000:.2f}ms. At {nL:,d} rows the Arrow UDF takes {t_arrowL * 1000:.2f}ms\n"
+        f"    and the JIT callback {t_jitL * 1000:.2f}ms. pyarrow's chained pc.if_else is\n"
+        "    the stock DuckDB tool for branchy logic like this. Each Arrow UDF\n"
+        "    chunk is a Python call that builds a new array for every pc.if_else\n"
+        "    step; the JIT callback computes the whole ruleset in one pass over\n"
+        "    each chunk, on all of DuckDB's threads, without the GIL. The\n"
+        f"    largest-tier Arrow/JIT ratio, {largest_ratio:.2f}x, is "
+        f"{'at or above' if largest_ratio >= 2 else 'below'} the 2x\n"
+        "    threshold of the decision above. online_scoring shows a JIT loop that\n"
+        "    runs DuckDB queries itself."
     )
     conn.close()
 

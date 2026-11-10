@@ -1,3 +1,40 @@
+"""Bindings of DuckDB's C API that Python code and numba-compiled code can call.
+
+Each binding has the name of a function of DuckDB's C API, such as ``duckdb_open`` or ``duckdb_query``, and its
+docstring links to that function on DuckDB's C API page. numbox's ``proxy`` compiles each binding when this
+module is imported, under :data:`numbduck.configurations.jit_options`, and a jitted caller calls that compiled binding.
+With the default options, a binding called from Python releases the GIL while its C function runs. The import loads
+libduckdb through :func:`numbduck.utils.load_duckdb`. The module also defines the ``DUCKDB_TYPE_*`` codes of DuckDB's
+``duckdb_type`` enum, the state codes ``DuckDBSuccess`` and ``DuckDBError``, and the numba types of the structs that
+the C API passes by value.
+
+A binding takes and returns what its C function does, with every pointer as an ``intp``. A handle, such as a
+``duckdb_connection``, is a pointer in C, so it is an ``intp`` too. A parameter whose name ends in ``_p`` holds a
+pointer: a handle, a ``char *`` to UTF-8 text, a function pointer or the address of a struct. The text ends with a
+NUL byte, unless the function also takes its length, as ``duckdb_create_varchar_length`` does. A name that ends in
+``_pp`` holds the address of a handle, such as the out-parameter of ``duckdb_open`` or the argument of a destroy
+function, and :mod:`numbduck.duckdb_utils` allocates buffers for such handles. A C ``bool`` is an ``int8``, and the
+caller passes 0 or 1.
+
+A binding never raises for an error that DuckDB reports. It returns what the C function returns, such as
+``DuckDBError`` or a null pointer, and the caller checks it, as a C caller does. An exception raised inside a binding
+does not reach the caller: a call enters the compiled binding through its C entry point, which prints the exception
+and returns zero (https://github.com/Goykhman/numbox/issues/5). numbduck checks no argument either. A handle must be
+live, and a pointer must point at memory that the C function may read or write.
+
+A struct that a C function takes or returns by value is a numba tuple of the struct's fields in C order, such as
+``duckdb_hugeint_ty``, and the docstring of each such binding gives its tuple. ``duckdb_decimal_ty`` flattens the
+``duckdb_hugeint`` inside a ``duckdb_decimal`` into its two fields, which keeps the C layout. A struct of one field,
+such as ``duckdb_date``, is passed and returned as that field: ``duckdb_bind_date`` takes the days as an ``int32``.
+numbox's ``_call_lib_func`` passes each tuple as the platform's C calling convention requires. The compiler front end,
+not LLVM, must implement that convention (https://github.com/numba/llvmlite/issues/300#issuecomment-327235846).
+
+Some C functions are missing from older duckdb releases. numbox's ``proxy_if_available`` makes the binding of such a
+function a stub if the loaded libduckdb lacks it. The binding's docstring names the duckdb version that added the
+function, and what a call of the stub raises. duckdb 1.4.0 renamed ``duckdb_create_varint`` and ``duckdb_get_varint``
+to ``duckdb_create_bignum`` and ``duckdb_get_bignum``. The two bignum bindings call whichever name the loaded
+libduckdb exports, and numba does not cache them.
+"""
 import sys
 
 from numba.core.types import float32, float64, int8, int16, int32, int64, intp, Tuple, uint8, uint16, uint32, uint64, UniTuple, void
@@ -14,12 +51,15 @@ duckdb_lib = load_duckdb()
 _is_win = sys.platform == 'win32'
 
 
+# duckdb_state, the result of most C API functions, and its two values.
 duckdb_state_ty = int32
 
 DuckDBSuccess = 0
 DuckDBError = 1
 
-# duckdb_type enum (from duckdb.h)
+# The codes of the duckdb_type enum in DuckDB's duckdb.h, through DUCKDB_TYPE_TIME_NS. Later releases add
+# DUCKDB_TYPE_GEOMETRY (40, duckdb 1.5.2), DUCKDB_TYPE_VARIANT (41, duckdb 1.5.3) and DUCKDB_TYPE_TIMESTAMP_TZ_NS (42,
+# duckdb 2.0.0), which are not defined here.
 DUCKDB_TYPE_INVALID = 0
 DUCKDB_TYPE_BOOLEAN = 1
 DUCKDB_TYPE_TINYINT = 2
@@ -55,17 +95,20 @@ DUCKDB_TYPE_TIMESTAMP_TZ = 31
 DUCKDB_TYPE_UHUGEINT = 32
 DUCKDB_TYPE_ARRAY = 33
 DUCKDB_TYPE_ANY = 34
-# VARINT (duckdb ≤1.3) and BIGNUM (duckdb ≥1.4) are the same type:
-# same enum value, same struct layout ({byte_ptr, size, is_negative}).
-# duckdb renamed the type and its value functions in 1.4.0. Both enum
-# names are defined for cross-version portability.
+# duckdb 1.4.0 renamed the VARINT type to BIGNUM and also renamed the type's value functions. The enum value, 35, and
+# the struct layout, {data pointer, size, is_negative}, did not change, so both names are defined, for duckdb before
+# 1.4.0 and for 1.4.0 and later.
 DUCKDB_TYPE_VARINT = 35
 DUCKDB_TYPE_BIGNUM = 35
 DUCKDB_TYPE_SQLNULL = 36
 DUCKDB_TYPE_STRING_LITERAL = 37
 DUCKDB_TYPE_INTEGER_LITERAL = 38
-DUCKDB_TYPE_TIME_NS = 39  # duckdb 1.5+
+DUCKDB_TYPE_TIME_NS = 39  # duckdb 1.4.0 and later
 
+# ducklib declares each struct of two or more fields that the C API passes or returns by value as a numba tuple of its
+# fields in C order. A pointer is an intp, idx_t a uint64 and bool an int8. duckdb_decimal_ty flattens the
+# duckdb_hugeint inside a duckdb_decimal into its two fields, which keeps the C layout, and duckdb_result_ty holds the
+# six 8-byte fields of a duckdb_result.
 duckdb_result_ty = UniTuple(intp, 6)
 duckdb_hugeint_ty = Tuple((uint64, int64))
 duckdb_uhugeint_ty = UniTuple(uint64, 2)
@@ -76,11 +119,9 @@ duckdb_bit_ty = Tuple((intp, uint64))
 duckdb_bignum_ty = Tuple((intp, uint64, int8))
 
 
-# duckdb renamed duckdb_create_varint/duckdb_get_varint to duckdb_create_bignum/
-# duckdb_get_bignum in 1.4.0: same enum value, same struct, same signature, and
-# no C-level alias either way. Only the bignum spelling is bound; the binding
-# calls whichever symbol the loaded libduckdb exports, so it works across the
-# whole supported duckdb range.
+# duckdb 1.4.0 renamed duckdb_create_varint and duckdb_get_varint to duckdb_create_bignum and duckdb_get_bignum, with
+# the same enum value, struct and signature, and no C alias for either name. Only the bignum names are bound. Each
+# binding calls whichever symbol the loaded libduckdb exports, so it works across the supported duckdb range.
 _BIGNUM_CREATE = next(
     (name for name in ("duckdb_create_bignum", "duckdb_create_varint")
      if hasattr(duckdb_lib, name)), None)
@@ -89,20 +130,22 @@ _BIGNUM_GET = next(
      if hasattr(duckdb_lib, name)), None)
 
 
-# numba's cache key hashes bytecode and closure cells only, so the symbol chosen
-# above reaches it by neither route: a cached object built against one spelling
-# would be served to a process needing the other and abort at import. Upgrading
-# duckdb across 1.4.0 with a warm cache is enough, so keep these two off the disk
-# cache. Every other binding still caches.
+# numba's cache key holds a function's bytecode and the values of its closure cells, but not the values of the globals
+# that it reads, and numbox's part of the key does not hold them either. The symbol chosen above is such a global. A
+# binding cached against one name would therefore load in a process whose libduckdb exports only the other name, and
+# that process would abort at import. An upgrade of duckdb across 1.4.0 with a warm cache is enough to cause it, so the
+# two bignum bindings compile without the cache. Every other binding still caches.
 _bignum_jit_options = {name: value for name, value in jit_options.items() if name != "cache"}
 
 
 def _bignum_proxy(sym, bignum_name):
-    """Proxy decorator for a bignum binding that calls the C symbol ``sym``.
+    """Return the decorator of a bignum binding, whose body calls the C symbol ``sym``.
 
-    ``sym`` is the spelling the loaded libduckdb exports. When it is None the
-    library exports neither, and the binding degrades to the version-gated stub
-    that raises a clear, named error from Python and at ``@njit`` typing time.
+    ``sym`` is the name under which the loaded libduckdb exports the function, and ``bignum_name`` is the function's
+    name from duckdb 1.4.0 on. If ``sym`` is None, the library exports neither name, and the decorator is numbox's
+    ``proxy_if_available`` for ``bignum_name``, which makes the binding a stub. A call of the stub from Python raises
+    ``NotImplementedError``, and jitted code that calls it fails to compile with a ``TypingError``. Either decorator
+    compiles the binding without the cache.
     """
     if sym is None:
         return proxy_if_available(duckdb_lib, signatures.get(bignum_name),
@@ -185,8 +228,8 @@ signatures["duckdb_create_uint64"] = intp(uint64)
 signatures["duckdb_create_union_type"] = intp(intp, intp, uint64)
 signatures["duckdb_create_union_value"] = intp(intp, uint64, intp)
 signatures["duckdb_create_uuid"] = intp(duckdb_uhugeint_ty)
-# Both spellings stay registered: the binding calls whichever one the loaded
-# libduckdb exports, and _call_lib_func resolves the signature by C symbol name.
+# Both names stay registered, because the binding calls whichever one the loaded libduckdb exports, and _call_lib_func
+# looks up the signature by the name of the C symbol that it calls.
 signatures["duckdb_create_bignum"] = intp(duckdb_bignum_ty)
 signatures["duckdb_create_varint"] = intp(duckdb_bignum_ty)
 signatures["duckdb_create_varchar"] = intp(intp)
@@ -314,1158 +357,1255 @@ signatures["duckdb_scalar_function_set_error"] = void(intp, intp)
 
 @proxy(signatures.get("duckdb_array_type_array_size"), jit_options=jit_options)
 def duckdb_array_type_array_size(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_array_type_array_size """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_array_type_array_size """
     return _call_lib_func("duckdb_array_type_array_size", (type_p,))
 
 
 @proxy(signatures.get("duckdb_array_type_child_type"), jit_options=jit_options)
 def duckdb_array_type_child_type(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_array_type_child_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_array_type_child_type """
     return _call_lib_func("duckdb_array_type_child_type", (type_p,))
 
 
 @proxy(signatures.get("duckdb_bind_boolean"), jit_options=jit_options)
 def duckdb_bind_boolean(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_boolean """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_boolean """
     return _call_lib_func("duckdb_bind_boolean", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_blob"), jit_options=jit_options)
 def duckdb_bind_blob(prepared_statement_p, param_idx, data_p, length):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_blob """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_blob """
     return _call_lib_func("duckdb_bind_blob", (prepared_statement_p, param_idx, data_p, length))
 
 
 @proxy(signatures.get("duckdb_bind_date"), jit_options=jit_options)
 def duckdb_bind_date(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_date """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_date """
     return _call_lib_func("duckdb_bind_date", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_int8"), jit_options=jit_options)
 def duckdb_bind_int8(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int8 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_int8 """
     return _call_lib_func("duckdb_bind_int8", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_int16"), jit_options=jit_options)
 def duckdb_bind_int16(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int16 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_int16 """
     return _call_lib_func("duckdb_bind_int16", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_double"), jit_options=jit_options)
 def duckdb_bind_double(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_double """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_double """
     return _call_lib_func("duckdb_bind_double", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_float"), jit_options=jit_options)
 def duckdb_bind_float(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_float """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_float """
     return _call_lib_func("duckdb_bind_float", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_int32"), jit_options=jit_options)
 def duckdb_bind_int32(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int32 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_int32 """
     return _call_lib_func("duckdb_bind_int32", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_int64"), jit_options=jit_options)
 def duckdb_bind_int64(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_int64 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_int64 """
     return _call_lib_func("duckdb_bind_int64", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_parameter_index"), jit_options=jit_options)
 def duckdb_bind_parameter_index(prepared_statement_p, param_idx_out_p, name_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_parameter_index """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_parameter_index """
     return _call_lib_func("duckdb_bind_parameter_index", (prepared_statement_p, param_idx_out_p, name_p))
 
 
 @proxy(signatures.get("duckdb_bind_null"), jit_options=jit_options)
 def duckdb_bind_null(prepared_statement_p, param_idx):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_null """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_null """
     return _call_lib_func("duckdb_bind_null", (prepared_statement_p, param_idx))
 
 
 @proxy(signatures.get("duckdb_bind_time"), jit_options=jit_options)
 def duckdb_bind_time(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_time """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_time """
     return _call_lib_func("duckdb_bind_time", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_timestamp"), jit_options=jit_options)
 def duckdb_bind_timestamp(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_timestamp """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_timestamp """
     return _call_lib_func("duckdb_bind_timestamp", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_timestamp_tz"), jit_options=jit_options)
 def duckdb_bind_timestamp_tz(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_timestamp_tz """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_timestamp_tz """
     return _call_lib_func("duckdb_bind_timestamp_tz", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_uint8"), jit_options=jit_options)
 def duckdb_bind_uint8(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_uint8 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_uint8 """
     return _call_lib_func("duckdb_bind_uint8", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_uint16"), jit_options=jit_options)
 def duckdb_bind_uint16(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_uint16 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_uint16 """
     return _call_lib_func("duckdb_bind_uint16", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_uint32"), jit_options=jit_options)
 def duckdb_bind_uint32(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_uint32 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_uint32 """
     return _call_lib_func("duckdb_bind_uint32", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_uint64"), jit_options=jit_options)
 def duckdb_bind_uint64(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_uint64 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_uint64 """
     return _call_lib_func("duckdb_bind_uint64", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_value"), jit_options=jit_options)
 def duckdb_bind_value(prepared_statement_p, param_idx, val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_value """
     return _call_lib_func("duckdb_bind_value", (prepared_statement_p, param_idx, val_p))
 
 
 @proxy(signatures.get("duckdb_bind_varchar"), jit_options=jit_options)
 def duckdb_bind_varchar(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_varchar """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_varchar """
     return _call_lib_func("duckdb_bind_varchar", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_varchar_length"), jit_options=jit_options)
 def duckdb_bind_varchar_length(prepared_statement_p, param_idx, val_p, length):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_varchar_length """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_varchar_length """
     return _call_lib_func("duckdb_bind_varchar_length", (prepared_statement_p, param_idx, val_p, length))
 
 
 @proxy(signatures.get("duckdb_close"), jit_options=jit_options)
 def duckdb_close(duckdb_database_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_close """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_close """
     return _call_lib_func("duckdb_close", (duckdb_database_pp,))
 
 
 @proxy(signatures.get("duckdb_column_count"), jit_options=jit_options)
 def duckdb_column_count(duckdb_result_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_column_count """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_column_count """
     return _call_lib_func("duckdb_column_count", (duckdb_result_p,))
 
 
 @proxy(signatures.get("duckdb_column_logical_type"), jit_options=jit_options)
 def duckdb_column_logical_type(duckdb_result_p, col):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_column_logical_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_column_logical_type """
     return _call_lib_func("duckdb_column_logical_type", (duckdb_result_p, col))
 
 
 @proxy(signatures.get("duckdb_column_name"), jit_options=jit_options)
 def duckdb_column_name(duckdb_result_p, col):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_column_name """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_column_name """
     return _call_lib_func("duckdb_column_name", (duckdb_result_p, col))
 
 
 @proxy(signatures.get("duckdb_column_type"), jit_options=jit_options)
 def duckdb_column_type(duckdb_result_p, col):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_column_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_column_type """
     return _call_lib_func("duckdb_column_type", (duckdb_result_p, col))
 
 
 @proxy(signatures.get("duckdb_create_array_type"), jit_options=jit_options)
 def duckdb_create_array_type(type_p, array_size):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_array_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_array_type """
     return _call_lib_func("duckdb_create_array_type", (type_p, array_size))
 
 
 @proxy(signatures.get("duckdb_create_array_value"), jit_options=jit_options)
 def duckdb_create_array_value(type_p, values_p, value_count):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_array_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_array_value """
     return _call_lib_func("duckdb_create_array_value", (type_p, values_p, value_count))
 
 
 @proxy(signatures.get("duckdb_create_bool"), jit_options=jit_options)
 def duckdb_create_bool(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_bool """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_bool """
     return _call_lib_func("duckdb_create_bool", (input,))
 
 
 @proxy(signatures.get("duckdb_create_decimal_type"), jit_options=jit_options)
 def duckdb_create_decimal_type(width, scale):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_decimal_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_decimal_type """
     return _call_lib_func("duckdb_create_decimal_type", (width, scale))
 
 
 @proxy(signatures.get("duckdb_create_double"), jit_options=jit_options)
 def duckdb_create_double(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_double """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_double """
     return _call_lib_func("duckdb_create_double", (input,))
 
 
 @proxy(signatures.get("duckdb_create_enum_type"), jit_options=jit_options)
 def duckdb_create_enum_type(member_names_p, member_count):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_enum_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_enum_type """
     return _call_lib_func("duckdb_create_enum_type", (member_names_p, member_count))
 
 
 @proxy(signatures.get("duckdb_create_enum_value"), jit_options=jit_options)
 def duckdb_create_enum_value(type_p, value):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_enum_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_enum_value """
     return _call_lib_func("duckdb_create_enum_value", (type_p, value))
 
 
 @proxy(signatures.get("duckdb_create_float"), jit_options=jit_options)
 def duckdb_create_float(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_float """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_float """
     return _call_lib_func("duckdb_create_float", (input,))
 
 
 @proxy(signatures.get("duckdb_create_int8"), jit_options=jit_options)
 def duckdb_create_int8(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_int8 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_int8 """
     return _call_lib_func("duckdb_create_int8", (input,))
 
 
 @proxy(signatures.get("duckdb_create_int16"), jit_options=jit_options)
 def duckdb_create_int16(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_int16 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_int16 """
     return _call_lib_func("duckdb_create_int16", (input,))
 
 
 @proxy(signatures.get("duckdb_create_int32"), jit_options=jit_options)
 def duckdb_create_int32(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_int32 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_int32 """
     return _call_lib_func("duckdb_create_int32", (input,))
 
 
 @proxy(signatures.get("duckdb_create_int64"), jit_options=jit_options)
 def duckdb_create_int64(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_int64 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_int64 """
     return _call_lib_func("duckdb_create_int64", (input,))
 
 
 @proxy(signatures.get("duckdb_create_list_type"), jit_options=jit_options)
 def duckdb_create_list_type(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_list_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_list_type """
     return _call_lib_func("duckdb_create_list_type", (type_p,))
 
 
 @proxy(signatures.get("duckdb_create_list_value"), jit_options=jit_options)
 def duckdb_create_list_value(type_p, values_p, value_count):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_list_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_list_value """
     return _call_lib_func("duckdb_create_list_value", (type_p, values_p, value_count))
 
 
 @proxy(signatures.get("duckdb_create_logical_type"), jit_options=jit_options)
 def duckdb_create_logical_type(type_id):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_logical_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_logical_type """
     return _call_lib_func("duckdb_create_logical_type", (type_id,))
 
 
 @proxy(signatures.get("duckdb_create_map_type"), jit_options=jit_options)
 def duckdb_create_map_type(key_type_p, value_type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_map_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_map_type """
     return _call_lib_func("duckdb_create_map_type", (key_type_p, value_type_p))
 
 
 @proxy_if_available(duckdb_lib, signatures.get("duckdb_create_map_value"), jit_options=jit_options)
 def duckdb_create_map_value(map_type_p, keys_p, values_p, entry_count):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_map_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_map_value
+
+    duckdb 1.3.0 added this function. If the loaded libduckdb lacks it, a call from Python raises
+    ``NotImplementedError``, and a jitted caller fails to compile with a ``TypingError`` that names the binding.
+    """
     return _call_lib_func("duckdb_create_map_value", (map_type_p, keys_p, values_p, entry_count))
 
 
 @proxy(signatures.get("duckdb_create_null_value"), jit_options=jit_options)
 def duckdb_create_null_value():
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_null_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_null_value """
     return _call_lib_func("duckdb_create_null_value", ())
 
 
 @proxy(signatures.get("duckdb_create_struct_type"), jit_options=jit_options)
 def duckdb_create_struct_type(member_types_p, member_names_p, member_count):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_struct_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_struct_type """
     return _call_lib_func("duckdb_create_struct_type", (member_types_p, member_names_p, member_count))
 
 
 @proxy(signatures.get("duckdb_create_struct_value"), jit_options=jit_options)
 def duckdb_create_struct_value(type_p, values_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_struct_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_struct_value """
     return _call_lib_func("duckdb_create_struct_value", (type_p, values_p))
 
 
 @proxy(signatures.get("duckdb_create_uint8"), jit_options=jit_options)
 def duckdb_create_uint8(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_uint8 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_uint8 """
     return _call_lib_func("duckdb_create_uint8", (input,))
 
 
 @proxy(signatures.get("duckdb_create_uint16"), jit_options=jit_options)
 def duckdb_create_uint16(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_uint16 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_uint16 """
     return _call_lib_func("duckdb_create_uint16", (input,))
 
 
 @proxy(signatures.get("duckdb_create_uint32"), jit_options=jit_options)
 def duckdb_create_uint32(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_uint32 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_uint32 """
     return _call_lib_func("duckdb_create_uint32", (input,))
 
 
 @proxy(signatures.get("duckdb_create_uint64"), jit_options=jit_options)
 def duckdb_create_uint64(input):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_uint64 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_uint64 """
     return _call_lib_func("duckdb_create_uint64", (input,))
 
 
 @proxy(signatures.get("duckdb_create_union_type"), jit_options=jit_options)
 def duckdb_create_union_type(member_types_p, member_names_p, member_count):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_union_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_union_type """
     return _call_lib_func("duckdb_create_union_type", (member_types_p, member_names_p, member_count))
 
 
 @proxy_if_available(duckdb_lib, signatures.get("duckdb_create_union_value"), jit_options=jit_options)
 def duckdb_create_union_value(union_type_p, tag_index, value_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_union_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_union_value
+
+    duckdb 1.3.0 added this function. If the loaded libduckdb lacks it, a call from Python raises
+    ``NotImplementedError``, and a jitted caller fails to compile with a ``TypingError`` that names the binding.
+    """
     return _call_lib_func("duckdb_create_union_value", (union_type_p, tag_index, value_p))
 
 
 @proxy(signatures.get("duckdb_create_varchar"), jit_options=jit_options)
 def duckdb_create_varchar(text_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_varchar """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_varchar """
     return _call_lib_func("duckdb_create_varchar", (text_p,))
 
 
 @proxy(signatures.get("duckdb_create_varchar_length"), jit_options=jit_options)
 def duckdb_create_varchar_length(text_p, length):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_varchar_length """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_varchar_length """
     return _call_lib_func("duckdb_create_varchar_length", (text_p, length))
 
 
 @proxy(signatures.get("duckdb_data_chunk_get_column_count"), jit_options=jit_options)
 def duckdb_data_chunk_get_column_count(data_chunk_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_data_chunk_get_column_count """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_data_chunk_get_column_count """
     return _call_lib_func("duckdb_data_chunk_get_column_count", (data_chunk_p,))
 
 
 @proxy(signatures.get("duckdb_data_chunk_get_size"), jit_options=jit_options)
 def duckdb_data_chunk_get_size(data_chunk_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_data_chunk_get_size """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_data_chunk_get_size """
     return _call_lib_func("duckdb_data_chunk_get_size", (data_chunk_p,))
 
 
 @proxy(signatures.get("duckdb_connect"), jit_options=jit_options)
 def duckdb_connect(duckdb_database_p, duckdb_connection_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_connect """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_connect """
     return _call_lib_func("duckdb_connect", (duckdb_database_p, duckdb_connection_pp))
 
 
 @proxy(signatures.get("duckdb_create_bit"), jit_options=jit_options)
 def duckdb_create_bit(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_bit """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_bit
+
+    The binding takes the ``duckdb_bit`` as the tuple ``(data, size)``.
+    """
     return _call_lib_func("duckdb_create_bit", (val,))
 
 
 @proxy(signatures.get("duckdb_create_blob"), jit_options=jit_options)
 def duckdb_create_blob(data_p, length):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_blob """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_blob """
     return _call_lib_func("duckdb_create_blob", (data_p, length))
 
 
 @proxy(signatures.get("duckdb_create_date"), jit_options=jit_options)
 def duckdb_create_date(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_date """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_date """
     return _call_lib_func("duckdb_create_date", (val,))
 
 
 @proxy(signatures.get("duckdb_create_decimal"), jit_options=jit_options)
 def duckdb_create_decimal(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_decimal """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_decimal
+
+    The binding takes the ``duckdb_decimal`` as the tuple ``(width, scale, lower, upper)``, where ``lower`` and
+    ``upper`` are the two fields of its ``value``.
+    """
     return _call_lib_func("duckdb_create_decimal", (val,))
 
 
 @proxy(signatures.get("duckdb_create_hugeint"), jit_options=jit_options)
 def duckdb_create_hugeint(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_hugeint """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_hugeint
+
+    The binding takes the ``duckdb_hugeint`` as the tuple ``(lower, upper)``.
+    """
     return _call_lib_func("duckdb_create_hugeint", (val,))
 
 
 @proxy(signatures.get("duckdb_create_interval"), jit_options=jit_options)
 def duckdb_create_interval(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_interval """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_interval
+
+    The binding takes the ``duckdb_interval`` as the tuple ``(months, days, micros)``.
+    """
     return _call_lib_func("duckdb_create_interval", (val,))
 
 
 @proxy(signatures.get("duckdb_create_time"), jit_options=jit_options)
 def duckdb_create_time(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_time """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_time """
     return _call_lib_func("duckdb_create_time", (val,))
 
 
 @proxy(signatures.get("duckdb_create_time_tz"), jit_options=jit_options)
 def duckdb_create_time_tz(micros, offset):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_time_tz """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_time_tz """
     return _call_lib_func("duckdb_create_time_tz", (micros, offset))
 
 
 @proxy(signatures.get("duckdb_create_time_tz_value"), jit_options=jit_options)
 def duckdb_create_time_tz_value(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_time_tz_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_time_tz_value """
     return _call_lib_func("duckdb_create_time_tz_value", (val,))
 
 
 @proxy(signatures.get("duckdb_create_timestamp"), jit_options=jit_options)
 def duckdb_create_timestamp(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_timestamp """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_timestamp """
     return _call_lib_func("duckdb_create_timestamp", (val,))
 
 
 @proxy(signatures.get("duckdb_create_timestamp_ms"), jit_options=jit_options)
 def duckdb_create_timestamp_ms(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_timestamp_ms """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_timestamp_ms """
     return _call_lib_func("duckdb_create_timestamp_ms", (val,))
 
 
 @proxy(signatures.get("duckdb_create_timestamp_ns"), jit_options=jit_options)
 def duckdb_create_timestamp_ns(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_timestamp_ns """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_timestamp_ns """
     return _call_lib_func("duckdb_create_timestamp_ns", (val,))
 
 
 @proxy(signatures.get("duckdb_create_timestamp_s"), jit_options=jit_options)
 def duckdb_create_timestamp_s(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_timestamp_s """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_timestamp_s """
     return _call_lib_func("duckdb_create_timestamp_s", (val,))
 
 
 @proxy(signatures.get("duckdb_create_timestamp_tz"), jit_options=jit_options)
 def duckdb_create_timestamp_tz(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_timestamp_tz """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_timestamp_tz """
     return _call_lib_func("duckdb_create_timestamp_tz", (val,))
 
 
 @proxy(signatures.get("duckdb_create_uhugeint"), jit_options=jit_options)
 def duckdb_create_uhugeint(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_uhugeint """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_uhugeint
+
+    The binding takes the ``duckdb_uhugeint`` as the tuple ``(lower, upper)``.
+    """
     return _call_lib_func("duckdb_create_uhugeint", (val,))
 
 
 @proxy(signatures.get("duckdb_create_uuid"), jit_options=jit_options)
 def duckdb_create_uuid(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_uuid """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_uuid
+
+    The binding takes the ``duckdb_uhugeint`` as the tuple ``(lower, upper)``.
+    """
     return _call_lib_func("duckdb_create_uuid", (val,))
 
 
 @_bignum_proxy(_BIGNUM_CREATE, "duckdb_create_bignum")
 def duckdb_create_bignum(val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_bignum """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_bignum
+
+    The binding takes the ``duckdb_bignum`` as the tuple ``(data, size, is_negative)``. The C function is
+    ``duckdb_create_varint`` before duckdb 1.4.0, and the binding calls whichever name the loaded libduckdb exports.
+    """
     return _call_lib_func(_BIGNUM_CREATE, (val,))
 
 
 @proxy(signatures.get("duckdb_data_chunk_get_vector"), jit_options=jit_options)
 def duckdb_data_chunk_get_vector(chunk_p, idx):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_data_chunk_get_vector """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_data_chunk_get_vector """
     return _call_lib_func("duckdb_data_chunk_get_vector", (chunk_p, idx))
 
 
 @proxy(signatures.get("duckdb_decimal_internal_type"), jit_options=jit_options)
 def duckdb_decimal_internal_type(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_decimal_internal_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_decimal_internal_type """
     return _call_lib_func("duckdb_decimal_internal_type", (type_p,))
 
 
 @proxy(signatures.get("duckdb_decimal_scale"), jit_options=jit_options)
 def duckdb_decimal_scale(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_decimal_scale """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_decimal_scale """
     return _call_lib_func("duckdb_decimal_scale", (type_p,))
 
 
 @proxy(signatures.get("duckdb_decimal_width"), jit_options=jit_options)
 def duckdb_decimal_width(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_decimal_width """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_decimal_width """
     return _call_lib_func("duckdb_decimal_width", (type_p,))
 
 
 @proxy(signatures.get("duckdb_destroy_data_chunk"), jit_options=jit_options)
 def duckdb_destroy_data_chunk(data_chunk_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_data_chunk
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_data_chunk
     todo: need to access pp """
     return _call_lib_func("duckdb_destroy_data_chunk", (data_chunk_pp,))
 
 
 @proxy(signatures.get("duckdb_destroy_logical_type"), jit_options=jit_options)
 def duckdb_destroy_logical_type(logical_type_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_logical_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_logical_type """
     return _call_lib_func("duckdb_destroy_logical_type", (logical_type_pp,))
 
 
 @proxy(signatures.get("duckdb_destroy_prepare"), jit_options=jit_options)
 def duckdb_destroy_prepare(prepared_statement_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_prepare """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_prepare """
     return _call_lib_func("duckdb_destroy_prepare", (prepared_statement_pp,))
 
 
 @proxy(signatures.get("duckdb_destroy_result"), jit_options=jit_options)
 def duckdb_destroy_result(duckdb_result_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_result """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_result """
     return _call_lib_func("duckdb_destroy_result", (duckdb_result_p,))
 
 
 @proxy(signatures.get("duckdb_destroy_value"), jit_options=jit_options)
 def duckdb_destroy_value(value_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_value """
     return _call_lib_func("duckdb_destroy_value", (value_pp,))
 
 
 @proxy(signatures.get("duckdb_disconnect"), jit_options=jit_options)
 def duckdb_disconnect(duckdb_connection_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_disconnect """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_disconnect """
     return _call_lib_func("duckdb_disconnect", (duckdb_connection_pp,))
 
 
 @proxy(signatures.get("duckdb_enum_dictionary_size"), jit_options=jit_options)
 def duckdb_enum_dictionary_size(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_enum_dictionary_size """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_enum_dictionary_size """
     return _call_lib_func("duckdb_enum_dictionary_size", (type_p,))
 
 
 @proxy(signatures.get("duckdb_enum_dictionary_value"), jit_options=jit_options)
 def duckdb_enum_dictionary_value(type_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_enum_dictionary_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_enum_dictionary_value """
     return _call_lib_func("duckdb_enum_dictionary_value", (type_p, index))
 
 
 @proxy(signatures.get("duckdb_enum_internal_type"), jit_options=jit_options)
 def duckdb_enum_internal_type(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_enum_internal_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_enum_internal_type """
     return _call_lib_func("duckdb_enum_internal_type", (type_p,))
 
 
 @proxy(signatures.get("duckdb_execute_prepared"), jit_options=jit_options)
 def duckdb_execute_prepared(prepared_statement_p, out_result_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_execute_prepared """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_execute_prepared """
     return _call_lib_func("duckdb_execute_prepared", (prepared_statement_p, out_result_p))
 
 
 @proxy(signatures.get("duckdb_get_bool"), jit_options=jit_options)
 def duckdb_get_bool(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_bool """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_bool """
     return _call_lib_func("duckdb_get_bool", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_double"), jit_options=jit_options)
 def duckdb_get_double(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_double """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_double """
     return _call_lib_func("duckdb_get_double", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_enum_value"), jit_options=jit_options)
 def duckdb_get_enum_value(value_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_enum_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_enum_value """
     return _call_lib_func("duckdb_get_enum_value", (value_p,))
 
 
 @proxy(signatures.get("duckdb_get_float"), jit_options=jit_options)
 def duckdb_get_float(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_float """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_float """
     return _call_lib_func("duckdb_get_float", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_int8"), jit_options=jit_options)
 def duckdb_get_int8(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_int8 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_int8 """
     return _call_lib_func("duckdb_get_int8", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_int16"), jit_options=jit_options)
 def duckdb_get_int16(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_int16 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_int16 """
     return _call_lib_func("duckdb_get_int16", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_int32"), jit_options=jit_options)
 def duckdb_get_int32(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_int32 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_int32 """
     return _call_lib_func("duckdb_get_int32", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_int64"), jit_options=jit_options)
 def duckdb_get_int64(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_int64 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_int64 """
     return _call_lib_func("duckdb_get_int64", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_list_child"), jit_options=jit_options)
 def duckdb_get_list_child(value_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_list_child """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_list_child """
     return _call_lib_func("duckdb_get_list_child", (value_p, index))
 
 
 @proxy(signatures.get("duckdb_get_list_size"), jit_options=jit_options)
 def duckdb_get_list_size(value_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_list_size """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_list_size """
     return _call_lib_func("duckdb_get_list_size", (value_p,))
 
 
 @proxy(signatures.get("duckdb_get_map_key"), jit_options=jit_options)
 def duckdb_get_map_key(value_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_map_key """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_map_key """
     return _call_lib_func("duckdb_get_map_key", (value_p, index))
 
 
 @proxy(signatures.get("duckdb_get_map_size"), jit_options=jit_options)
 def duckdb_get_map_size(value_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_map_size """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_map_size """
     return _call_lib_func("duckdb_get_map_size", (value_p,))
 
 
 @proxy(signatures.get("duckdb_get_map_value"), jit_options=jit_options)
 def duckdb_get_map_value(value_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_map_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_map_value """
     return _call_lib_func("duckdb_get_map_value", (value_p, index))
 
 
 @proxy(signatures.get("duckdb_get_struct_child"), jit_options=jit_options)
 def duckdb_get_struct_child(value_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_struct_child """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_struct_child """
     return _call_lib_func("duckdb_get_struct_child", (value_p, index))
 
 
 @proxy(signatures.get("duckdb_get_uint8"), jit_options=jit_options)
 def duckdb_get_uint8(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_uint8 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_uint8 """
     return _call_lib_func("duckdb_get_uint8", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_uint16"), jit_options=jit_options)
 def duckdb_get_uint16(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_uint16 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_uint16 """
     return _call_lib_func("duckdb_get_uint16", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_uint32"), jit_options=jit_options)
 def duckdb_get_uint32(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_uint32 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_uint32 """
     return _call_lib_func("duckdb_get_uint32", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_uint64"), jit_options=jit_options)
 def duckdb_get_uint64(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_uint64 """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_uint64 """
     return _call_lib_func("duckdb_get_uint64", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_value_type"), jit_options=jit_options)
 def duckdb_get_value_type(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_value_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_value_type """
     return _call_lib_func("duckdb_get_value_type", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_varchar"), jit_options=jit_options)
 def duckdb_get_varchar(value_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_varchar """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_varchar """
     return _call_lib_func("duckdb_get_varchar", (value_p,))
 
 
 @proxy(signatures.get("duckdb_is_null_value"), jit_options=jit_options)
 def duckdb_is_null_value(value_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_is_null_value """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_is_null_value """
     return _call_lib_func("duckdb_is_null_value", (value_p,))
 
 
 @proxy(signatures.get("duckdb_fetch_chunk"), jit_options=jit_options)
 def duckdb_fetch_chunk(duckdb_result):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_fetch_chunk """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_fetch_chunk
+
+    The binding takes the ``duckdb_result`` as the tuple of its six fields in C order: ``tuple(buffer)`` in Python, or
+    ``(buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5])`` in jitted code, for a ``buffer`` from
+    :func:`~numbduck.duckdb_utils.create_duckdb_result`.
+    """
     return _call_lib_func("duckdb_fetch_chunk", (duckdb_result,))
 
 
 @proxy(signatures.get("duckdb_free"), jit_options=jit_options)
 def duckdb_free(ptr):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_free """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_free """
     return _call_lib_func("duckdb_free", (ptr,))
 
 
 @proxy(signatures.get("duckdb_get_bit"), jit_options=jit_options)
 def duckdb_get_bit(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_bit """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_bit
+
+    The binding returns the ``duckdb_bit`` as the tuple ``(data, size)``.
+    """
     return _call_lib_func("duckdb_get_bit", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_blob"), jit_options=jit_options)
 def duckdb_get_blob(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_blob """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_blob
+
+    The binding returns the ``duckdb_blob`` as the tuple ``(data, size)``.
+    """
     return _call_lib_func("duckdb_get_blob", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_date"), jit_options=jit_options)
 def duckdb_get_date(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_date """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_date """
     return _call_lib_func("duckdb_get_date", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_decimal"), jit_options=jit_options)
 def duckdb_get_decimal(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_decimal """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_decimal
+
+    The binding returns the ``duckdb_decimal`` as the tuple ``(width, scale, lower, upper)``, where ``lower`` and
+    ``upper`` are the two fields of its ``value``.
+    """
     return _call_lib_func("duckdb_get_decimal", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_hugeint"), jit_options=jit_options)
 def duckdb_get_hugeint(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_hugeint """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_hugeint
+
+    The binding returns the ``duckdb_hugeint`` as the tuple ``(lower, upper)``.
+    """
     return _call_lib_func("duckdb_get_hugeint", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_interval"), jit_options=jit_options)
 def duckdb_get_interval(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_interval """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_interval
+
+    The binding returns the ``duckdb_interval`` as the tuple ``(months, days, micros)``.
+    """
     return _call_lib_func("duckdb_get_interval", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_time"), jit_options=jit_options)
 def duckdb_get_time(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_time """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_time """
     return _call_lib_func("duckdb_get_time", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_time_tz"), jit_options=jit_options)
 def duckdb_get_time_tz(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_time_tz """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_time_tz """
     return _call_lib_func("duckdb_get_time_tz", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_timestamp"), jit_options=jit_options)
 def duckdb_get_timestamp(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_timestamp """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_timestamp """
     return _call_lib_func("duckdb_get_timestamp", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_timestamp_ms"), jit_options=jit_options)
 def duckdb_get_timestamp_ms(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_timestamp_ms """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_timestamp_ms """
     return _call_lib_func("duckdb_get_timestamp_ms", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_timestamp_ns"), jit_options=jit_options)
 def duckdb_get_timestamp_ns(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_timestamp_ns """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_timestamp_ns """
     return _call_lib_func("duckdb_get_timestamp_ns", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_timestamp_s"), jit_options=jit_options)
 def duckdb_get_timestamp_s(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_timestamp_s """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_timestamp_s """
     return _call_lib_func("duckdb_get_timestamp_s", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_timestamp_tz"), jit_options=jit_options)
 def duckdb_get_timestamp_tz(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_timestamp_tz """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_timestamp_tz """
     return _call_lib_func("duckdb_get_timestamp_tz", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_type_id"), jit_options=jit_options)
 def duckdb_get_type_id(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_type_id """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_type_id """
     return _call_lib_func("duckdb_get_type_id", (type_p,))
 
 
 @proxy(signatures.get("duckdb_get_uhugeint"), jit_options=jit_options)
 def duckdb_get_uhugeint(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_uhugeint """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_uhugeint
+
+    The binding returns the ``duckdb_uhugeint`` as the tuple ``(lower, upper)``.
+    """
     return _call_lib_func("duckdb_get_uhugeint", (val_p,))
 
 
 @proxy(signatures.get("duckdb_get_uuid"), jit_options=jit_options)
 def duckdb_get_uuid(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_uuid """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_uuid
+
+    The binding returns the ``duckdb_uhugeint`` as the tuple ``(lower, upper)``.
+    """
     return _call_lib_func("duckdb_get_uuid", (val_p,))
 
 
 @_bignum_proxy(_BIGNUM_GET, "duckdb_get_bignum")
 def duckdb_get_bignum(val_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_get_bignum """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_get_bignum
+
+    The binding returns the ``duckdb_bignum`` as the tuple ``(data, size, is_negative)``. The C function is
+    ``duckdb_get_varint`` before duckdb 1.4.0, and the binding calls whichever name the loaded libduckdb exports.
+    """
     return _call_lib_func(_BIGNUM_GET, (val_p,))
 
 
 @proxy(signatures.get("duckdb_list_type_child_type"), jit_options=jit_options)
 def duckdb_list_type_child_type(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_list_type_child_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_list_type_child_type """
     return _call_lib_func("duckdb_list_type_child_type", (type_p,))
 
 
 @proxy(signatures.get("duckdb_logical_type_get_alias"), jit_options=jit_options)
 def duckdb_logical_type_get_alias(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_logical_type_get_alias """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_logical_type_get_alias """
     return _call_lib_func("duckdb_logical_type_get_alias", (type_p,))
 
 
 @proxy(signatures.get("duckdb_logical_type_set_alias"), jit_options=jit_options)
 def duckdb_logical_type_set_alias(type_p, alias_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_logical_type_set_alias """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_logical_type_set_alias """
     return _call_lib_func("duckdb_logical_type_set_alias", (type_p, alias_p))
 
 
 @proxy(signatures.get("duckdb_map_type_key_type"), jit_options=jit_options)
 def duckdb_map_type_key_type(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_map_type_key_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_map_type_key_type """
     return _call_lib_func("duckdb_map_type_key_type", (type_p,))
 
 
 @proxy(signatures.get("duckdb_map_type_value_type"), jit_options=jit_options)
 def duckdb_map_type_value_type(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_map_type_value_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_map_type_value_type """
     return _call_lib_func("duckdb_map_type_value_type", (type_p,))
 
 
 @proxy(signatures.get("duckdb_nparams"), jit_options=jit_options)
 def duckdb_nparams(prepared_statement_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_nparams """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_nparams """
     return _call_lib_func("duckdb_nparams", (prepared_statement_p,))
 
 
 @proxy(signatures.get("duckdb_open"), jit_options=jit_options)
 def duckdb_open(path_p, duckdb_database_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_open """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_open """
     return _call_lib_func("duckdb_open", (path_p, duckdb_database_pp))
 
 
 @proxy(signatures.get("duckdb_prepare_error"), jit_options=jit_options)
 def duckdb_prepare_error(prepared_statement_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare_error """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_prepare_error """
     return _call_lib_func("duckdb_prepare_error", (prepared_statement_p,))
 
 
 @proxy(signatures.get("duckdb_prepare"), jit_options=jit_options)
 def duckdb_prepare(connection_p, query_p, out_prepared_statement_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_prepare """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_prepare """
     return _call_lib_func("duckdb_prepare", (connection_p, query_p, out_prepared_statement_pp))
 
 
 @proxy(signatures.get("duckdb_query"), jit_options=jit_options)
 def duckdb_query(duckdb_connection_p, query_p, out_result_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_query """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_query """
     return _call_lib_func("duckdb_query", (duckdb_connection_p, query_p, out_result_p))
 
 
 @proxy(signatures.get("duckdb_result_error"), jit_options=jit_options)
 def duckdb_result_error(duckdb_result_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_error """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_result_error """
     return _call_lib_func("duckdb_result_error", (duckdb_result_p,))
 
 
 @proxy(signatures.get("duckdb_result_error_type"), jit_options=jit_options)
 def duckdb_result_error_type(duckdb_result_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_error_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_result_error_type """
     return _call_lib_func("duckdb_result_error_type", (duckdb_result_p,))
 
 
 @proxy(signatures.get("duckdb_result_return_type"), jit_options=jit_options)
 def duckdb_result_return_type(result):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_return_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_result_return_type
+
+    The binding takes the ``duckdb_result`` as the tuple of its six fields in C order: ``tuple(buffer)`` in Python, or
+    ``(buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5])`` in jitted code, for a ``buffer`` from
+    :func:`~numbduck.duckdb_utils.create_duckdb_result`.
+    """
     return _call_lib_func("duckdb_result_return_type", (result,))
 
 
 @proxy(signatures.get("duckdb_result_statement_type"), jit_options=jit_options)
 def duckdb_result_statement_type(result):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_result_statement_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_result_statement_type
+
+    The binding takes the ``duckdb_result`` as the tuple of its six fields in C order: ``tuple(buffer)`` in Python, or
+    ``(buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5])`` in jitted code, for a ``buffer`` from
+    :func:`~numbduck.duckdb_utils.create_duckdb_result`.
+    """
     return _call_lib_func("duckdb_result_statement_type", (result,))
 
 
 @proxy(signatures.get("duckdb_row_count"), jit_options=jit_options)
 def duckdb_row_count(duckdb_result_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_row_count """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_row_count """
     return _call_lib_func("duckdb_row_count", (duckdb_result_p,))
 
 
 @proxy(signatures.get("duckdb_rows_changed"), jit_options=jit_options)
 def duckdb_rows_changed(duckdb_result_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_rows_changed """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_rows_changed """
     return _call_lib_func("duckdb_rows_changed", (duckdb_result_p,))
 
 
 @proxy(signatures.get("duckdb_struct_type_child_count"), jit_options=jit_options)
 def duckdb_struct_type_child_count(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_struct_type_child_count """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_struct_type_child_count """
     return _call_lib_func("duckdb_struct_type_child_count", (type_p,))
 
 
 @proxy(signatures.get("duckdb_struct_type_child_name"), jit_options=jit_options)
 def duckdb_struct_type_child_name(type_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_struct_type_child_name """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_struct_type_child_name """
     return _call_lib_func("duckdb_struct_type_child_name", (type_p, index))
 
 
 @proxy(signatures.get("duckdb_struct_type_child_type"), jit_options=jit_options)
 def duckdb_struct_type_child_type(type_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_struct_type_child_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_struct_type_child_type """
     return _call_lib_func("duckdb_struct_type_child_type", (type_p, index))
 
 
 @proxy(signatures.get("duckdb_union_type_member_count"), jit_options=jit_options)
 def duckdb_union_type_member_count(type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_union_type_member_count """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_union_type_member_count """
     return _call_lib_func("duckdb_union_type_member_count", (type_p,))
 
 
 @proxy(signatures.get("duckdb_union_type_member_name"), jit_options=jit_options)
 def duckdb_union_type_member_name(type_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_union_type_member_name """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_union_type_member_name """
     return _call_lib_func("duckdb_union_type_member_name", (type_p, index))
 
 
 @proxy(signatures.get("duckdb_union_type_member_type"), jit_options=jit_options)
 def duckdb_union_type_member_type(type_p, index):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_union_type_member_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_union_type_member_type """
     return _call_lib_func("duckdb_union_type_member_type", (type_p, index))
 
 
 @proxy(signatures.get("duckdb_validity_row_is_valid"), jit_options=jit_options)
 def duckdb_validity_row_is_valid(validity_p, row):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_validity_row_is_valid """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_validity_row_is_valid """
     return _call_lib_func("duckdb_validity_row_is_valid", (validity_p, row))
 
 
 @proxy_if_available(duckdb_lib, signatures.get("duckdb_value_to_string"), jit_options=jit_options)
 def duckdb_value_to_string(value_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_value_to_string """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_value_to_string
+
+    duckdb 1.3.0 added this function. If the loaded libduckdb lacks it, a call from Python raises
+    ``NotImplementedError``, and a jitted caller fails to compile with a ``TypingError`` that names the binding.
+    """
     return _call_lib_func("duckdb_value_to_string", (value_p,))
 
 
 @proxy(signatures.get("duckdb_vector_get_data"), jit_options=jit_options)
 def duckdb_vector_get_data(duckdb_vector_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_vector_get_data """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_vector_get_data """
     return _call_lib_func("duckdb_vector_get_data", (duckdb_vector_p,))
 
 
 @proxy(signatures.get("duckdb_vector_get_validity"), jit_options=jit_options)
 def duckdb_vector_get_validity(duckdb_vector_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_vector_get_validity """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_vector_get_validity """
     return _call_lib_func("duckdb_vector_get_validity", (duckdb_vector_p,))
 
 
 @proxy(signatures.get("duckdb_create_scalar_function"), jit_options=jit_options)
 def duckdb_create_scalar_function():
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_scalar_function """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_scalar_function """
     return _call_lib_func("duckdb_create_scalar_function", ())
 
 
 @proxy(signatures.get("duckdb_destroy_scalar_function"), jit_options=jit_options)
 def duckdb_destroy_scalar_function(scalar_function_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_scalar_function """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_scalar_function """
     return _call_lib_func("duckdb_destroy_scalar_function", (scalar_function_pp,))
 
 
 @proxy(signatures.get("duckdb_register_scalar_function"), jit_options=jit_options)
 def duckdb_register_scalar_function(connection_p, scalar_function_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_register_scalar_function """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_register_scalar_function """
     return _call_lib_func("duckdb_register_scalar_function", (connection_p, scalar_function_p))
 
 
 @proxy(signatures.get("duckdb_scalar_function_set_name"), jit_options=jit_options)
 def duckdb_scalar_function_set_name(scalar_function_p, name_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_name """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_name """
     return _call_lib_func("duckdb_scalar_function_set_name", (scalar_function_p, name_p))
 
 
 @proxy(signatures.get("duckdb_scalar_function_add_parameter"), jit_options=jit_options)
 def duckdb_scalar_function_add_parameter(scalar_function_p, type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_add_parameter """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_add_parameter """
     return _call_lib_func("duckdb_scalar_function_add_parameter", (scalar_function_p, type_p))
 
 
 @proxy(signatures.get("duckdb_scalar_function_set_return_type"), jit_options=jit_options)
 def duckdb_scalar_function_set_return_type(scalar_function_p, type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_return_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_return_type """
     return _call_lib_func("duckdb_scalar_function_set_return_type", (scalar_function_p, type_p))
 
 
 @proxy(signatures.get("duckdb_scalar_function_set_function"), jit_options=jit_options)
 def duckdb_scalar_function_set_function(scalar_function_p, function_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_function """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_function """
     return _call_lib_func("duckdb_scalar_function_set_function", (scalar_function_p, function_p))
 
 
 @proxy_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_bind"), jit_options=jit_options)
 def duckdb_scalar_function_set_bind(scalar_function_p, bind_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_bind """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_bind
+
+    duckdb 1.3.0 added this function. If the loaded libduckdb lacks it, a call from Python raises
+    ``NotImplementedError``, and a jitted caller fails to compile with a ``TypingError`` that names the binding.
+    """
     return _call_lib_func("duckdb_scalar_function_set_bind", (scalar_function_p, bind_p))
 
 
 @proxy(signatures.get("duckdb_scalar_function_set_extra_info"), jit_options=jit_options)
 def duckdb_scalar_function_set_extra_info(scalar_function_p, extra_info_p, destroy_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_extra_info """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_extra_info """
     return _call_lib_func("duckdb_scalar_function_set_extra_info", (scalar_function_p, extra_info_p, destroy_p))
 
 
 @proxy(signatures.get("duckdb_scalar_function_set_varargs"), jit_options=jit_options)
 def duckdb_scalar_function_set_varargs(scalar_function_p, type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_varargs """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_varargs """
     return _call_lib_func("duckdb_scalar_function_set_varargs", (scalar_function_p, type_p))
 
 
 @proxy(signatures.get("duckdb_scalar_function_set_volatile"), jit_options=jit_options)
 def duckdb_scalar_function_set_volatile(scalar_function_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_volatile """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_volatile """
     return _call_lib_func("duckdb_scalar_function_set_volatile", (scalar_function_p,))
 
 
 @proxy(signatures.get("duckdb_scalar_function_set_special_handling"), jit_options=jit_options)
 def duckdb_scalar_function_set_special_handling(scalar_function_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_special_handling """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_special_handling """
     return _call_lib_func("duckdb_scalar_function_set_special_handling", (scalar_function_p,))
 
 
 @proxy_if_available(duckdb_lib, signatures.get("duckdb_scalar_function_set_init"), jit_options=jit_options)
 def duckdb_scalar_function_set_init(scalar_function_p, init_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_init """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_init
+
+    duckdb 1.5.0 added this function. If the loaded libduckdb lacks it, a call from Python raises
+    ``NotImplementedError``, and a jitted caller fails to compile with a ``TypingError`` that names the binding.
+    """
     return _call_lib_func("duckdb_scalar_function_set_init", (scalar_function_p, init_p))
 
 
 @proxy(signatures.get("duckdb_create_scalar_function_set"), jit_options=jit_options)
 def duckdb_create_scalar_function_set(name_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_scalar_function_set """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_scalar_function_set """
     return _call_lib_func("duckdb_create_scalar_function_set", (name_p,))
 
 
 @proxy(signatures.get("duckdb_destroy_scalar_function_set"), jit_options=jit_options)
 def duckdb_destroy_scalar_function_set(set_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_scalar_function_set """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_scalar_function_set """
     return _call_lib_func("duckdb_destroy_scalar_function_set", (set_pp,))
 
 
 @proxy(signatures.get("duckdb_add_scalar_function_to_set"), jit_options=jit_options)
 def duckdb_add_scalar_function_to_set(set_p, scalar_function_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_add_scalar_function_to_set """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_add_scalar_function_to_set """
     return _call_lib_func("duckdb_add_scalar_function_to_set", (set_p, scalar_function_p))
 
 
 @proxy(signatures.get("duckdb_register_scalar_function_set"), jit_options=jit_options)
 def duckdb_register_scalar_function_set(connection_p, set_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_register_scalar_function_set """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_register_scalar_function_set """
     return _call_lib_func("duckdb_register_scalar_function_set", (connection_p, set_p))
 
 
 @proxy(signatures.get("duckdb_create_aggregate_function"), jit_options=jit_options)
 def duckdb_create_aggregate_function():
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_aggregate_function """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_aggregate_function """
     return _call_lib_func("duckdb_create_aggregate_function", ())
 
 
 @proxy(signatures.get("duckdb_destroy_aggregate_function"), jit_options=jit_options)
 def duckdb_destroy_aggregate_function(aggregate_function_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_aggregate_function """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_aggregate_function """
     return _call_lib_func("duckdb_destroy_aggregate_function", (aggregate_function_pp,))
 
 
 @proxy(signatures.get("duckdb_register_aggregate_function"), jit_options=jit_options)
 def duckdb_register_aggregate_function(connection_p, aggregate_function_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_register_aggregate_function """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_register_aggregate_function """
     return _call_lib_func("duckdb_register_aggregate_function", (connection_p, aggregate_function_p))
 
 
 @proxy(signatures.get("duckdb_aggregate_function_set_name"), jit_options=jit_options)
 def duckdb_aggregate_function_set_name(aggregate_function_p, name_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_aggregate_function_set_name """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_aggregate_function_set_name """
     return _call_lib_func("duckdb_aggregate_function_set_name", (aggregate_function_p, name_p))
 
 
 @proxy(signatures.get("duckdb_aggregate_function_add_parameter"), jit_options=jit_options)
 def duckdb_aggregate_function_add_parameter(aggregate_function_p, type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_aggregate_function_add_parameter """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_aggregate_function_add_parameter """
     return _call_lib_func("duckdb_aggregate_function_add_parameter", (aggregate_function_p, type_p))
 
 
 @proxy(signatures.get("duckdb_aggregate_function_set_return_type"), jit_options=jit_options)
 def duckdb_aggregate_function_set_return_type(aggregate_function_p, type_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_aggregate_function_set_return_type """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_aggregate_function_set_return_type """
     return _call_lib_func("duckdb_aggregate_function_set_return_type", (aggregate_function_p, type_p))
 
 
 @proxy(signatures.get("duckdb_aggregate_function_set_functions"), jit_options=jit_options)
 def duckdb_aggregate_function_set_functions(aggregate_function_p, state_size_p, init_p, update_p, combine_p, finalize_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_aggregate_function_set_functions """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_aggregate_function_set_functions """
     return _call_lib_func("duckdb_aggregate_function_set_functions", (aggregate_function_p, state_size_p, init_p, update_p, combine_p, finalize_p))
 
 
 @proxy(signatures.get("duckdb_aggregate_function_set_destructor"), jit_options=jit_options)
 def duckdb_aggregate_function_set_destructor(aggregate_function_p, destroy_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_aggregate_function_set_destructor """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_aggregate_function_set_destructor """
     return _call_lib_func("duckdb_aggregate_function_set_destructor", (aggregate_function_p, destroy_p))
 
 
 @proxy(signatures.get("duckdb_aggregate_function_set_extra_info"), jit_options=jit_options)
 def duckdb_aggregate_function_set_extra_info(aggregate_function_p, extra_info_p, destroy_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_aggregate_function_set_extra_info """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_aggregate_function_set_extra_info """
     return _call_lib_func("duckdb_aggregate_function_set_extra_info", (aggregate_function_p, extra_info_p, destroy_p))
 
 
 @proxy(signatures.get("duckdb_aggregate_function_set_special_handling"), jit_options=jit_options)
 def duckdb_aggregate_function_set_special_handling(aggregate_function_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_aggregate_function_set_special_handling """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_aggregate_function_set_special_handling """
     return _call_lib_func("duckdb_aggregate_function_set_special_handling", (aggregate_function_p,))
 
 
 @proxy(signatures.get("duckdb_create_aggregate_function_set"), jit_options=jit_options)
 def duckdb_create_aggregate_function_set(name_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_create_aggregate_function_set """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_create_aggregate_function_set """
     return _call_lib_func("duckdb_create_aggregate_function_set", (name_p,))
 
 
 @proxy(signatures.get("duckdb_destroy_aggregate_function_set"), jit_options=jit_options)
 def duckdb_destroy_aggregate_function_set(set_pp):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_destroy_aggregate_function_set """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_destroy_aggregate_function_set """
     return _call_lib_func("duckdb_destroy_aggregate_function_set", (set_pp,))
 
 
 @proxy(signatures.get("duckdb_add_aggregate_function_to_set"), jit_options=jit_options)
 def duckdb_add_aggregate_function_to_set(set_p, aggregate_function_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_add_aggregate_function_to_set """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_add_aggregate_function_to_set """
     return _call_lib_func("duckdb_add_aggregate_function_to_set", (set_p, aggregate_function_p))
 
 
 @proxy(signatures.get("duckdb_register_aggregate_function_set"), jit_options=jit_options)
 def duckdb_register_aggregate_function_set(connection_p, set_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_register_aggregate_function_set """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_register_aggregate_function_set """
     return _call_lib_func("duckdb_register_aggregate_function_set", (connection_p, set_p))
 
 
 @proxy(signatures.get("duckdb_scalar_function_get_extra_info"), jit_options=jit_options)
 def duckdb_scalar_function_get_extra_info(info_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_get_extra_info """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_get_extra_info """
     return _call_lib_func("duckdb_scalar_function_get_extra_info", (info_p,))
 
 
 @proxy(signatures.get("duckdb_scalar_function_set_error"), jit_options=jit_options)
 def duckdb_scalar_function_set_error(info_p, error_p):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_scalar_function_set_error """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_scalar_function_set_error """
     return _call_lib_func("duckdb_scalar_function_set_error", (info_p, error_p))
 
 
 @proxy(signatures.get("duckdb_bind_hugeint"), jit_options=jit_options)
 def duckdb_bind_hugeint(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_hugeint """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_hugeint
+
+    The binding takes the ``duckdb_hugeint`` as the tuple ``(lower, upper)``.
+    """
     return _call_lib_func("duckdb_bind_hugeint", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_uhugeint"), jit_options=jit_options)
 def duckdb_bind_uhugeint(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_uhugeint """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_uhugeint
+
+    The binding takes the ``duckdb_uhugeint`` as the tuple ``(lower, upper)``.
+    """
     return _call_lib_func("duckdb_bind_uhugeint", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_interval"), jit_options=jit_options)
 def duckdb_bind_interval(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_interval """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_interval
+
+    The binding takes the ``duckdb_interval`` as the tuple ``(months, days, micros)``.
+    """
     return _call_lib_func("duckdb_bind_interval", (prepared_statement_p, param_idx, val))
 
 
 @proxy(signatures.get("duckdb_bind_decimal"), jit_options=jit_options)
 def duckdb_bind_decimal(prepared_statement_p, param_idx, val):
-    """ https://duckdb.org/docs/current/clients/c/api.html#duckdb_bind_decimal """
+    """ https://duckdb.org/docs/2.0/clients/c/api.html#duckdb_bind_decimal
+
+    The binding takes the ``duckdb_decimal`` as the tuple ``(width, scale, lower, upper)``, where ``lower`` and
+    ``upper`` are the two fields of its ``value``.
+    """
     return _call_lib_func("duckdb_bind_decimal", (prepared_statement_p, param_idx, val))
