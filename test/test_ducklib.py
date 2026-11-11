@@ -3125,9 +3125,7 @@ def test_scalar_function_set_overloads():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-
-
-
+# Simple registered aggregate that stores all the required data directly in the state buffer.
 AGG_STATE_SIZE = 8  # int64 accumulator
 
 
@@ -3364,10 +3362,6 @@ def test_scalar_function_set_init():
     aux_close_db(duckdb_database, duckdb_connection)
 
 
-
-
-
-
 def test_aggregate_function_set_overloads():
     """Check that an aggregate function set registers ``my_sum2`` for INTEGER and BIGINT.
 
@@ -3476,10 +3470,6 @@ def test_aggregate_function_set_overloads():
     ducklib.duckdb_destroy_result(result.ctypes.data)
 
     aux_close_db(duckdb_database, duckdb_connection)
-
-
-
-
 
 
 @njit
@@ -3642,10 +3632,28 @@ def test_udf_benchmark(capsys):
            10,000     0.749s      0.003s      0.000s     2,095x        7x
           100,000     7.382s      0.019s      0.001s    13,879x       36x
         1,000,000   118.835s      0.242s      0.001s   130,568x      266x
+
+    MacBook Pro M1
+    env: python 3.12.13, duckdb 1.5.6, numba 0.66.0, numpy 2.4.6, arm64
+
+             Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
+           10,000     1.2547s     0.0017s     0.0002s     7399x       10x
+          100,000     9.9651s     0.0078s     0.0003s    35395x       28x
+        1,000,000   103.5426s     0.1174s     0.0007s   141734x      161x
+
+
+    MacBook Pro M1
+    env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64
+
+             Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
+           10,000     0.0012s     0.0005s     0.0002s        6x        2x
+          100,000     0.0102s     0.0015s     0.0003s       33x        5x
+        1,000,000     0.1005s     0.0598s     0.0008s      130x       78x
     """
     import sys
     import time
     from numbduck.pybridge import extract_connection_ptr
+    from numbduck.utils import complete_open_result
 
     ROW_COUNTS = [10_000, 100_000, 1_000_000]
 
@@ -3720,6 +3728,7 @@ def test_udf_benchmark(capsys):
         assert jit_result == py_result
         results.append((N, t_python, t_arrow, t_jit))
 
+    complete_open_result(conn)
     conn.remove_function("py_square")
     if has_arrow:
         conn.remove_function("arrow_square")
@@ -5236,7 +5245,7 @@ def _import_irr_example():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
     if examples_dir not in sys.path:
         sys.path.insert(0, examples_dir)
-    import irr
+    import irr  # type: ignore  # noqa: E402
     return irr
 
 
@@ -5771,7 +5780,7 @@ def _load_examples_common():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
     if examples_dir not in sys.path:
         sys.path.insert(0, examples_dir)
-    import _common
+    import _common  # type: ignore  # noqa: E402
     return _common
 
 
