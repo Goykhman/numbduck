@@ -41,6 +41,15 @@ JIT UDF, because it never takes the GIL. Two runs::
 
     MacBook Pro M1, with PY_MAX_N raised to cover every row count:
 
+    env: python 3.12.13, duckdb 1.5.6, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
+    (requires pandas to avoid suboptimal type checking; installed pandas==3.1.1)
+    Fraud score UDF benchmark: [10000, 100000, 1000000] rows
+
+           Rows    Python     Arrow     JIT  Py/JIT  Arr/JIT
+         10,000    3.39ms    2.47ms  0.18ms     19x    14.1x
+        100,000   30.79ms   19.74ms  0.33ms     93x    59.4x
+      1,000,000  306.11ms  478.87ms  0.94ms    327x   511.5x
+
     env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
     Fraud score UDF benchmark: [10000, 100000, 1000000] rows
 
