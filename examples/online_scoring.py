@@ -17,8 +17,8 @@ the events among 1, 2, 4 and 8 threads, each with its own connection, and prints
 The JIT loop never holds the GIL, so its threads run in parallel, while the Python loop holds the GIL whenever it runs
 Python code. In the duckdb 2.0 run below, the Python loop scales about as well as the JIT loop. Under duckdb 1.x, the
 duckdb module tries to import pandas for every parameter of a query, and numbduck does not install pandas. Without
-pandas, every attempt fails. The failed attempts slow the Python loop, and in a run under duckdb 1.5.6 it was no faster
-with more than two threads.
+pandas, every attempt fails. The failed attempts slow the Python loop, which on the Linux machine below, under duckdb
+1.5.6, was no faster with more than two threads.
 
 Run it with::
 
