@@ -48,40 +48,6 @@ scaling table. Three runs, with "us" for microseconds::
       2  0.340s       1.93x  0.267s        1.82x
       4  0.206s       3.17x  0.157s        3.10x
       8  0.177s       3.70x  0.137s        3.54x
-
-    MacBook Pro M1, duckdb 1.5.6:
-
-    env: python 3.12.13, duckdb 1.5.6, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
-    Online scoring: 50,000-event dataset, 10,000 features
-
-      Per-event latency (5,000 events):
-      Variant   Total  Events/s  p50 us  p95 us  p99 us  max us
-      Python   0.982s     5,090   178.9   280.3   382.3   997.6
-      JIT      0.429s    11,649    82.0   108.0   151.0   664.0
-
-      Parallel scaling (2,000 events split across T workers):
-      T  Python  Py speedup     JIT  JIT speedup
-      1  0.418s       1.00x  0.205s        1.00x
-      2  0.343s       1.22x  0.158s        1.30x
-      4  0.423s       0.99x  0.101s        2.03x
-      8  0.449s       0.93x  0.083s        2.48x
-
-    MacBook Pro M1, duckdb 2.0.0:
-
-    env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
-    Online scoring: 50,000-event dataset, 10,000 features
-
-      Per-event latency (5,000 events):
-      Variant   Total  Events/s  p50 us  p95 us  p99 us  max us
-      Python   1.005s     4,978   191.5   252.5   325.7   785.0
-      JIT      0.770s     6,494   150.0   181.0   214.0   499.0
-
-      Parallel scaling (2,000 events split across T workers):
-      T  Python  Py speedup     JIT  JIT speedup
-      1  0.418s       1.00x  0.334s        1.00x
-      2  0.244s       1.71x  0.208s        1.60x
-      4  0.174s       2.40x  0.138s        2.43x
-      8  0.180s       2.32x  0.106s        3.14x
 """
 import os
 import sys

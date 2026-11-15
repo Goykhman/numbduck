@@ -3636,23 +3636,6 @@ def test_udf_benchmark(capsys):
            10,000     0.0011s     0.0005s     0.0006s        2x        1x
           100,000     0.0082s     0.0039s     0.0008s       10x        5x
         1,000,000     0.0892s     0.0420s     0.0010s       89x       42x
-
-    MacBook Pro M1
-    env: python 3.12.13, duckdb 1.5.6, numba 0.66.0, numpy 2.4.6, arm64
-    (requires pandas to avoid suboptimal type checking; installed pandas==3.1.1)
-
-             Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
-           10,000     0.0020s     0.0013s     0.0001s       15x       10x
-          100,000     0.0190s     0.0070s     0.0004s       48x       18x
-        1,000,000     0.1468s     0.2146s     0.0014s      104x      152x
-
-    MacBook Pro M1
-    env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64
-
-             Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
-           10,000     0.0012s     0.0005s     0.0002s        6x        2x
-          100,000     0.0102s     0.0015s     0.0003s       33x        5x
-        1,000,000     0.1005s     0.0598s     0.0008s      130x       78x
     """
     import sys
     import time

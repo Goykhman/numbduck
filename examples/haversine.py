@@ -49,25 +49,6 @@ Python environments. The runs below were made on two machines::
          10,000  0.005s  0.002s  0.001s      6x       2x
         100,000  0.041s  0.011s  0.005s      8x       2x
       1,000,000  0.422s  0.194s  0.009s     47x      22x
-
-    MacBook Pro M1, with PY_MAX_N raised to cover every row count:
-
-     env: python 3.12.13, duckdb 1.5.6, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
-     (requires pandas to avoid suboptimal type checking; installed pandas==3.1.1)
-     Haversine UDF benchmark: [10000, 100000, 1000000] rows, radius 50.0 km
-
-           Rows  Python   Arrow     JIT  Py/JIT  Arr/JIT
-         10,000  0.005s  0.002s  0.001s      8x       3x
-        100,000  0.050s  0.018s  0.004s     12x       4x
-      1,000,000  0.504s  0.403s  0.010s     49x      39x
-
-    env: python 3.12.13, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, arm64, 8 cores
-    Haversine UDF benchmark: [10000, 100000, 1000000] rows, radius 50.0 km
-
-           Rows  Python   Arrow     JIT  Py/JIT  Arr/JIT
-         10,000  0.005s  0.004s  0.001s      7x       4x
-        100,000  0.048s  0.028s  0.004s     13x       7x
-      1,000,000  0.467s  0.478s  0.008s     56x      57x
 """
 import math
 import os
