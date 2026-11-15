@@ -15,10 +15,10 @@ Each lookup is a real DuckDB query, so the JIT loop saves only the time that Pyt
 in the interpreter and in the work that the duckdb module does around each call. The script also splits a sample of
 the events among 1, 2, 4 and 8 threads, each with its own connection, and prints each loop's speedup over one thread.
 The JIT loop never holds the GIL, so its threads run in parallel, while the Python loop holds the GIL whenever it runs
-Python code. Under duckdb 2.0, the Python loop scales about as well as the JIT loop up to four threads in the runs
-below. Under duckdb 1.x, the duckdb module tries to import pandas for every parameter of a query, and numbduck does
-not install pandas. Without pandas, every attempt fails. The failed attempts slow the Python loop, and in a run under
-duckdb 1.5.6 it was no faster with more than two threads.
+Python code. In the duckdb 2.0 run below, the Python loop scales about as well as the JIT loop. Under duckdb 1.x, the
+duckdb module tries to import pandas for every parameter of a query, and numbduck does not install pandas. Without
+pandas, every attempt fails. The failed attempts slow the Python loop, which on the Linux machine below, under duckdb
+1.5.6, was no faster with more than two threads.
 
 Run it with::
 
@@ -30,7 +30,7 @@ The dataset holds 50,000 events, and the table holds the features of 10,000 enti
 events one by one, for the latencies, and splits a twenty-fifth of them among the threads, so ``NUMBDUCK_BENCH_BIG``
 enlarges both measurements.
 It checks that the two loops compute the same total score, then prints the latency percentiles of each loop and the
-scaling table. Three runs, with "us" for microseconds::
+scaling table. In the run below, "us" replaces the microsecond symbol that the script prints::
 
     Linux x86_64, duckdb 2.0.0, with pandas 3.1.1 installed:
 

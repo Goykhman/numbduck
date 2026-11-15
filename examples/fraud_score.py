@@ -26,7 +26,7 @@ checks that the variants return the same sum. It then prints the median time of 
 As in ``haversine.py``, the Python UDF runs only up to ``PY_MAX_N`` rows, 10,000. ``fr_jit`` cannot return SQL NULL,
 so it scores a row with a NULL input as -1, ``NULL_SCORE``; the generated data holds no NULLs.
 
-The JIT UDF is the fastest of the three in every run below, and the Arrow/JIT ratio grows with the row count. DuckDB
+The JIT UDF is the fastest of the three in the run below, and the Arrow/JIT ratio grows with the row count. DuckDB
 calls the Arrow UDF, a Python function, for every chunk, and each step of the UDF allocates a new array, while the JIT
 UDF computes each row's score in registers. DuckDB also runs a large query on several threads, and the threads speed up
 only the JIT UDF, because it never takes the GIL.
@@ -35,8 +35,8 @@ The times of the Python UDF and the Arrow UDF also depend on pandas and python-d
 ``haversine.py`` gives the reasons. Under duckdb 1.x without pandas, the Python UDF would need more than a minute for
 a million rows. ``fr_arrow`` passes about twenty Python numbers to ``pyarrow.compute`` functions for every chunk.
 Without python-dateutil, the Arrow UDF therefore took about four times as long at a million rows on the Linux
-machine below. That factor differs between machines and between Python environments. The runs below were made on two
-machines::
+machine below. That factor differs between machines and between Python environments. The run below was made on the
+Linux machine::
 
     Linux x86_64, with pyarrow 26.0.1 and pandas 3.1.1 installed, and PY_MAX_N raised to cover every row count:
 
