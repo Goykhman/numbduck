@@ -15,8 +15,10 @@ Each lookup is a real DuckDB query, so the JIT loop saves only the time that Pyt
 in the interpreter and in the work that the duckdb module does around each call. The script also splits a sample of
 the events among 1, 2, 4 and 8 threads, each with its own connection, and prints each loop's speedup over one thread.
 The JIT loop never holds the GIL, so its threads run in parallel, while the Python loop holds the GIL whenever it runs
-Python code. In the runs below, the Python loop is no faster with more than two threads under duckdb 1.5. Under
-duckdb 2.0, it scales about as well as the JIT loop up to four threads.
+Python code. Under duckdb 2.0, the Python loop scales about as well as the JIT loop up to four threads in the runs
+below. Under duckdb 1.x, the duckdb module tries to import pandas for every parameter of a query, and numbduck does
+not install pandas. Without pandas, every attempt fails. The failed attempts slow the Python loop, and in a run under
+duckdb 1.5.6 it was no faster with more than two threads.
 
 Run it with::
 
@@ -30,19 +32,22 @@ enlarges both measurements.
 It checks that the two loops compute the same total score, then prints the latency percentiles of each loop and the
 scaling table. Three runs, with "us" for microseconds::
 
-    x86_64 under WSL2, 8 cores, Python 3.12.3, duckdb 1.5.1, numba 0.64.0:
+    Linux x86_64, duckdb 2.0.0, with pandas 3.1.1 installed:
+
+    env: python 3.12.3, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, x86_64, 8 cores
+    Online scoring: 50,000-event dataset, 10,000 features
 
       Per-event latency (5,000 events):
-      Variant   Total  Events/s  p50 us  p95 us  p99 us   max us
-      Python   1.913s     2,614   347.3   582.3   884.0   2290.4
-      JIT      0.914s     5,469   144.3   323.6   582.6  12448.8
+      Variant   Total  Events/s  p50 us  p95 us  p99 us  max us
+      Python   1.479s     3,380   291.1   325.2   350.8   692.8
+      JIT      1.144s     4,370   227.7   238.8   249.4   510.2
 
       Parallel scaling (2,000 events split across T workers):
       T  Python  Py speedup     JIT  JIT speedup
-      1  0.830s       1.00x  0.380s        1.00x
-      2  0.497s       1.67x  0.292s        1.30x
-      4  0.732s       1.13x  0.199s        1.91x
-      8  0.859s       0.97x  0.159s        2.40x
+      1  0.655s       1.00x  0.486s        1.00x
+      2  0.340s       1.93x  0.267s        1.82x
+      4  0.206s       3.17x  0.157s        3.10x
+      8  0.177s       3.70x  0.137s        3.54x
 
     MacBook Pro M1, duckdb 1.5.6:
 

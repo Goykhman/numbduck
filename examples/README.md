@@ -19,8 +19,8 @@ points. It runs `SELECT count(*) FROM customers WHERE <distance> < 50` with thre
 - a JIT UDF: a `@cfunc` callback that numba compiles and numbduck registers through DuckDB's C API.
 
 The script runs the query on tables of 10,000, 100,000 and 1,000,000 rows. The Python UDF runs only on the table of
-10,000 rows, because under duckdb 1.5 it would need minutes for a million rows. `PY_MAX_N` in the script sets that
-limit.
+10,000 rows, because it would need more than a minute for a million rows under duckdb 1.x without pandas. `PY_MAX_N`
+in the script sets that limit.
 
 [fraud_score.py](fraud_score.py) scores each transaction with a few branching rules over six columns, and sums the
 scores. It has the same three versions, the same table sizes and the same limit on the Python UDF as haversine.py. The
@@ -65,6 +65,24 @@ pip install pyarrow
 Without pyarrow, the two scripts fail at their first Arrow query. The duckdb module raises its `Error` with the message
 `ModuleNotFoundError: No module named 'pyarrow'`; the class prints as `_duckdb.Error` on duckdb 1.5.4 and 2.0.0 and
 as `duckdb.duckdb.Error` on 1.2.2. online_scoring.py and run_irr.py run without pyarrow.
+
+Two more packages change the timings, although every script runs without them: pandas, and python-dateutil, which
+pandas requires.
+
+- Under duckdb 1.x, the duckdb module tries to import pandas for every value that a Python UDF returns and for every
+  parameter of a query. If pandas is not installed, every attempt fails. The Python UDF of haversine.py and
+  fraud_score.py would then need more than a minute for a million rows. The Python loop of online_scoring.py is also
+  slower without pandas, and in a run under duckdb 1.5.6 it was no faster with more than two threads. duckdb 2.0 does
+  not try the import.
+- pyarrow tries to import python-dateutil each time a UDF passes a Python number to a `pyarrow.compute` function. If
+  python-dateutil is not installed, every attempt fails. The failed attempts slow the Arrow UDF of haversine.py and
+  fraud_score.py. The docstrings of the two scripts give the factors measured on one machine.
+
+Install pandas before timing the scripts:
+
+```bash
+pip install pandas
+```
 
 [pyarrow-install]: https://arrow.apache.org/docs/python/install.html
 
@@ -136,8 +154,9 @@ The script prints each rate, and `All checks passed.` at the end. A wrong rate r
 counts the memory blocks that numba's runtime, NRT, allocates and frees during the run. If the counts differ, it
 prints `WARNING: NRT leak` and exits with status 1.
 
-The ratios depend on the machine, on the duckdb version and on what else runs at the time. Timings this short vary from
-run to run, and a larger `NUMBDUCK_BENCH_REPEATS` takes each median over more runs.
+The ratios depend on the machine, on the versions of duckdb and pyarrow, on whether pandas and python-dateutil are
+installed, and on what else runs at the time. Timings this short vary from run to run, and a larger
+`NUMBDUCK_BENCH_REPEATS` takes each median over more runs.
 
 ## Reading the code
 

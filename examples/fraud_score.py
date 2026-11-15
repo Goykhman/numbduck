@@ -26,18 +26,27 @@ checks that the variants return the same sum. It then prints the median time of 
 As in ``haversine.py``, the Python UDF runs only up to ``PY_MAX_N`` rows, 10,000. ``fr_jit`` cannot return SQL NULL,
 so it scores a row with a NULL input as -1, ``NULL_SCORE``; the generated data holds no NULLs.
 
-Under duckdb 1.5, the Python UDF is far slower than the Arrow UDF; under duckdb 2.0, it is faster. The JIT UDF is the
-fastest of the three under both versions, and the Arrow/JIT ratio grows with the row count. DuckDB calls the Arrow
-UDF, a Python function, for every chunk, and each step of the UDF allocates a new array, while the JIT UDF computes
-each row's score in registers. DuckDB also runs a large query on several threads, and the threads speed up only the
-JIT UDF, because it never takes the GIL. Two runs::
+The JIT UDF is the fastest of the three in every run below, and the Arrow/JIT ratio grows with the row count. DuckDB
+calls the Arrow UDF, a Python function, for every chunk, and each step of the UDF allocates a new array, while the JIT
+UDF computes each row's score in registers. DuckDB also runs a large query on several threads, and the threads speed up
+only the JIT UDF, because it never takes the GIL.
 
-    x86_64 under WSL2, 8 cores, Python 3.12.3, duckdb 1.5.1, numba 0.64.0:
+The times of the Python UDF and the Arrow UDF also depend on pandas and python-dateutil. The docstring of
+``haversine.py`` gives the reasons. Under duckdb 1.x without pandas, the Python UDF would need more than a minute for
+a million rows. ``fr_arrow`` passes about twenty Python numbers to ``pyarrow.compute`` functions for every chunk.
+Without python-dateutil, the Arrow UDF therefore took about four times as long at a million rows on the Linux
+machine below. That factor differs between machines and between Python environments. The runs below were made on two
+machines::
 
-           Rows    Python      Arrow     JIT  Py/JIT  Arr/JIT
-         10,000  463.76ms     7.88ms  0.48ms    956x    16.3x
-        100,000       n/a    65.05ms  0.97ms     n/a    67.0x
-      1,000,000       n/a  2078.35ms  1.18ms     n/a  1755.3x
+    Linux x86_64, with pyarrow 26.0.1 and pandas 3.1.1 installed, and PY_MAX_N raised to cover every row count:
+
+    env: python 3.12.3, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, x86_64, 8 cores
+    Fraud score UDF benchmark: [10000, 100000, 1000000] rows
+
+           Rows    Python     Arrow     JIT  Py/JIT  Arr/JIT
+         10,000    2.88ms    1.58ms  0.38ms      8x     4.2x
+        100,000   22.55ms   13.79ms  0.54ms     42x    25.6x
+      1,000,000  244.43ms  257.64ms  0.91ms    270x   284.4x
 
     MacBook Pro M1, with PY_MAX_N raised to cover every row count:
 

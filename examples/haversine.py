@@ -7,8 +7,7 @@ The script fills a table with random customer locations and runs one query::
 ``haversine`` returns the great-circle distance in kilometers. Computing it for every row is most of the query's work,
 so the query's time measures the UDF. The script registers the UDF three ways:
 
-1. ``hv_py`` is a Python scalar UDF. DuckDB calls the Python function once per row, through the interpreter, and
-   duckdb 2.0 makes that call much cheaper than duckdb 1.5 does.
+1. ``hv_py`` is a Python scalar UDF. DuckDB calls the Python function once per row, through the interpreter.
 2. ``hv_arrow`` is a PyArrow UDF, registered with ``type="arrow"``. DuckDB calls it once per chunk of rows, and each
    ``pyarrow.compute`` step allocates an array for the whole chunk.
 3. ``hv_jit`` is a numbduck UDF, registered through DuckDB's C API with ``duckdb_register_scalar_function``. DuckDB
@@ -28,18 +27,28 @@ The Arrow variant needs pyarrow, which numbduck does not install. At 10,000, 100
 checks that every variant it runs at that size counts the same customers. It then prints the median time of each and its
 ratio to the JIT time. ``NUMBDUCK_BENCH_REPEATS`` sets the number of timed runs, 3 by default; more runs make the
 medians of these short timings more stable. The script is meant to finish within 30 seconds, so the Python UDF runs only
-up to ``PY_MAX_N`` rows, 10,000. Under duckdb 1.5, the Python UDF would need minutes for a million rows. Under duckdb
-2.0, raise ``PY_MAX_N`` to time it at every row count, as the second run below does.
+up to ``PY_MAX_N`` rows, 10,000. Under duckdb 1.x without pandas, the Python UDF would need more than a minute for a
+million rows. With pandas installed, or under duckdb 2.0, raise ``PY_MAX_N`` to time it at every row count. The runs
+below were made with ``PY_MAX_N`` raised.
 
-The ratios depend on the machine and above all on the duckdb version. Under duckdb 1.5, the Python UDF is by far the
-slowest variant; under duckdb 2.0, it takes about as long as the Arrow UDF. Two runs show the difference::
+The ratios depend on the machine, on the versions of duckdb and pyarrow, and on two more packages that numbduck does
+not install: pandas, and python-dateutil, which pandas requires. Under duckdb 1.x, the duckdb module tries to import
+pandas for every value that a Python UDF returns. If pandas is not installed, every attempt fails. Each failed import
+takes far longer than the UDF itself. duckdb 2.0 does not try the import. pyarrow tries to import python-dateutil
+each time a UDF passes a Python number to a ``pyarrow.compute`` function. ``hv_arrow`` passes Python numbers to
+``pyarrow.compute`` functions. If python-dateutil is not installed, every attempt fails. On the Linux machine below,
+the Arrow UDF then took about three times as long at a million rows. That factor differs between machines and between
+Python environments. The runs below were made on two machines::
 
-    x86_64 under WSL2, 8 cores, Python 3.12.3, duckdb 1.5.1, numba 0.64.0:
+    Linux x86_64, with pyarrow 26.0.1 and pandas 3.1.1 installed, and PY_MAX_N raised to cover every row count:
+
+    env: python 3.12.3, duckdb 2.0.0, numba 0.66.0, numpy 2.4.6, x86_64, 8 cores
+    Haversine UDF benchmark: [10000, 100000, 1000000] rows, radius 50.0 km
 
            Rows  Python   Arrow     JIT  Py/JIT  Arr/JIT
-         10,000  0.466s  0.009s  0.001s    400x       8x
-        100,000     n/a  0.070s  0.005s     n/a      14x
-      1,000,000     n/a  1.368s  0.014s     n/a     101x
+         10,000  0.005s  0.002s  0.001s      6x       2x
+        100,000  0.041s  0.011s  0.005s      8x       2x
+      1,000,000  0.422s  0.194s  0.009s     47x      22x
 
     MacBook Pro M1, with PY_MAX_N raised to cover every row count:
 
@@ -83,8 +92,8 @@ RADIUS_KM = 50.0
 ROW_COUNTS = [10_000, 100_000, 1_000_000]
 if os.environ.get("NUMBDUCK_BENCH_BIG") == "1":
     ROW_COUNTS.append(10_000_000)
-# The largest row count at which the script runs the Python UDF. DuckDB calls that UDF through the interpreter for
-# every row, which under duckdb 1.5 makes a million rows take minutes.
+# The largest row count at which the script runs the Python UDF. Under duckdb 1.x without pandas, that UDF would need
+# more than a minute for a million rows.
 PY_MAX_N = 10_000
 
 

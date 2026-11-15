@@ -1575,7 +1575,7 @@ def test_non_default_compile_options_leave_the_disk_cache_untouched(tmp_path):
 # the GIL, so the UDF runs and nothing deadlocks, whether or not the binding releases the GIL. With two threads, DuckDB
 # also uses a worker thread on every host, regardless of its number of cores. The 250000 rows fill three row groups,
 # so the workers scan some of them. The filter passes 1 row in 64 to the UDF, because a Python UDF costs tens of
-# microseconds per row on duckdb 1.5.4 and earlier.
+# microseconds per row on duckdb 1.x without pandas.
 _GIL_WORKER_SCRIPT = r"""
 import duckdb
 from numbox.utils.lowlevel import get_unicode_data_p
@@ -3626,12 +3626,16 @@ def test_udf_benchmark(capsys):
     with no Python code per call. The Python UDFs go through the interpreter: the scalar UDF once per row, and the Arrow
     UDF once per batch, through pyarrow. conftest.py skips the test unless ``-m`` names ``benchmark``.
 
-    One run gave these times (WSL2, Python 3.12, duckdb 1.5.1, numba 0.60)::
+    Under duckdb 1.x, the Python column depends on pandas. On duckdb 1.5.6 without pandas installed, the scalar UDF
+    took 113 s for a million rows on the Linux machine below. With pandas 3.1.1 installed, the scalar UDF took 0.10 s
+    for a million rows.
+
+    One run gave these times (Linux x86_64, Python 3.12.3, duckdb 2.0.0, numba 0.66.0, pyarrow 26.0.1, pandas 3.1.1)::
 
              Rows      Python       Arrow         JIT    Py/JIT   Arr/JIT
-           10,000     0.749s      0.003s      0.000s     2,095x        7x
-          100,000     7.382s      0.019s      0.001s    13,879x       36x
-        1,000,000   118.835s      0.242s      0.001s   130,568x      266x
+           10,000     0.0011s     0.0005s     0.0006s        2x        1x
+          100,000     0.0082s     0.0039s     0.0008s       10x        5x
+        1,000,000     0.0892s     0.0420s     0.0010s       89x       42x
 
     MacBook Pro M1
     env: python 3.12.13, duckdb 1.5.6, numba 0.66.0, numpy 2.4.6, arm64
