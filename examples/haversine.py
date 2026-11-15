@@ -28,8 +28,8 @@ checks that every variant it runs at that size counts the same customers. It the
 ratio to the JIT time. ``NUMBDUCK_BENCH_REPEATS`` sets the number of timed runs, 3 by default; more runs make the
 medians of these short timings more stable. The script is meant to finish within 30 seconds, so the Python UDF runs only
 up to ``PY_MAX_N`` rows, 10,000. Under duckdb 1.x without pandas, the Python UDF would need more than a minute for a
-million rows. With pandas installed, or under duckdb 2.0, raise ``PY_MAX_N`` to time it at every row count. The runs
-below were made with ``PY_MAX_N`` raised.
+million rows. With pandas installed, or under duckdb 2.0, raise ``PY_MAX_N`` to time it at every row count. The run
+below was made with ``PY_MAX_N`` raised.
 
 The ratios depend on the machine, on the versions of duckdb and pyarrow, and on two more packages that numbduck does
 not install: pandas, and python-dateutil, which pandas requires. Under duckdb 1.x, the duckdb module tries to import
@@ -38,7 +38,7 @@ takes far longer than the UDF itself. duckdb 2.0 does not try the import. pyarro
 each time a UDF passes a Python number to a ``pyarrow.compute`` function. ``hv_arrow`` passes Python numbers to
 ``pyarrow.compute`` functions. If python-dateutil is not installed, every attempt fails. On the Linux machine below,
 the Arrow UDF then took about three times as long at a million rows. That factor differs between machines and between
-Python environments. The runs below were made on two machines::
+Python environments. The run below was made on the Linux machine::
 
     Linux x86_64, with pyarrow 26.0.1 and pandas 3.1.1 installed, and PY_MAX_N raised to cover every row count:
 
